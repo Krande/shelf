@@ -1,0 +1,241 @@
+[workspace]
+name = "shelf"
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-arm64", "win-64"]
+
+[dependencies]
+python = ">=3.12,<3.13"
+# Node version is pinned here so local dev (pixi run frontend-*) and the
+# Docker build stage agree. Bump in lockstep with the FROM line in the
+# top-level Dockerfile.
+nodejs = ">=22,<23"
+fastapi = ">=0.115"
+uvicorn = "*"
+sqlalchemy = ">=2.0"
+asyncpg = "*"
+alembic = "*"
+pydantic = ">=2"
+pydantic-settings = "*"
+authlib = "*"
+joserfc = "*"
+httpx = "*"
+python-multipart = "*"
+itsdangerous = "*"
+pypdf = "*"
+nats-py = "*"
+pytest = "*"
+pytest-asyncio = "*"
+ruff = "*"
+mypy = "*"
+hatchling = "*"
+
+[pypi-dependencies]
+shelf = { path = "./backend", editable = true }
+shelf-migrate = { path = "./migrate", editable = true }
+arq = "*"
+obstore = "*"
+aiomysql = "*"
+beautifulsoup4 = "*"
+# Force PyPI resolution: conda-forge only has 14.2 which is
+# incompatible with the pikepdf pulled in elsewhere. Floor at 17
+# because the worker uses the 17.x positional ocr() signature.
+ocrmypdf = ">=17.0"
+
+# Phase B (OCR worker). Tesseract + ghostscript come from conda-forge
+# (linux only — Mac/Win pixi envs don't run the worker locally; the
+# binaries land via apt in the container). The Python package itself
+# is pulled from PyPI everywhere because conda-forge's ocrmypdf is
+# pinned to an older pikepdf API that breaks with current pikepdf.
+[target.linux-64.dependencies]
+tesseract = "*"
+ghostscript = "*"
+pngquant = "*"
+
+# ── Local dev ────────────────────────────────────────────────────────────────
+
+[tasks.dev-api]
+cmd = "uvicorn shelf.main:app --reload --host 0.0.0.0 --port 8000"
+cwd = "backend"
+description = "Run the FastAPI dev server with auto-reload"
+
+[tasks.frontend-install]
+cmd = "npm install"
+cwd = "frontend"
+description = "Install frontend node_modules"
+
+[tasks.frontend-dev]
+cmd = "npm run dev"
+cwd = "frontend"
+description = "Run the vite dev server (proxies /api and /auth to dev-api on :8000)"
+
+[tasks.frontend-build]
+cmd = "npm run build"
+cwd = "frontend"
+description = "Type-check and build the SPA into frontend/dist"
+
+[tasks.frontend-typecheck]
+cmd = "npm run typecheck"
+cwd = "frontend"
+description = "Run the SPA TypeScript compiler in noEmit mode"
+
+[tasks.dev-up]
+cmd = "docker compose up -d"
+description = "Start Postgres + Redis + Gotenberg for local development"
+
+[tasks.dev-down]
+cmd = "docker compose down"
+description = "Stop the local dev stack"
+
+[tasks.dev-logs]
+cmd = "docker compose logs -f"
+description = "Tail logs from the local dev stack"
+
+# ── Quality ──────────────────────────────────────────────────────────────────
+
+[tasks.test]
+cmd = "pytest"
+cwd = "backend"
+description = "Run backend tests (assumes Postgres is already up and migrated)"
+
+# `pixi run test-all` is the one command that takes a fresh checkout to a green
+# suite. conftest's `client` fixture TRUNCATEs against a live database, so the
+# suite cannot run without Postgres — this chain starts it, waits for it, and
+# migrates before pytest sees it.
+#
+# Only postgres is started, not the whole `dev-up` stack: nothing in the suite
+# touches Redis or Gotenberg, and leaving them out keeps the loop quick.
+#
+# `--wait` is what makes this identical on Windows and Linux. It blocks until
+# the container passes the pg_isready healthcheck compose.yaml defines, so
+# there is no shell-specific polling loop and no `sleep` guess. Re-running when
+# the container is already up is a no-op that returns as soon as it's healthy.
+#
+# The tasks form a linear depends-on chain rather than one task listing all
+# three, so the execution order is fixed by the graph itself — migrating before
+# the database is accepting connections isn't expressible.
+[tasks.test-db-up]
+cmd = "docker compose up -d --wait postgres"
+description = "Start the test Postgres and block until it reports healthy"
+
+[tasks.test-db-migrate]
+cmd = "alembic upgrade head"
+cwd = "backend"
+depends-on = ["test-db-up"]
+description = "Bring the local test Postgres up to the current schema"
+
+[tasks.test-all]
+cmd = "pytest"
+cwd = "backend"
+depends-on = ["test-db-migrate"]
+description = "Full local run: start Postgres, migrate, then run the test suite"
+
+[tasks.fmt]
+cmd = "ruff format backend"
+description = "Format Python code"
+
+[tasks.lint]
+cmd = "ruff check backend"
+description = "Lint Python code"
+
+[tasks.typecheck]
+cmd = "mypy src"
+cwd = "backend"
+description = "Type-check the backend"
+
+# ── Alembic ──────────────────────────────────────────────────────────────────
+
+[tasks.alembic-rev]
+cmd = "alembic revision --autogenerate -m"
+cwd = "backend"
+description = "Create a new Alembic migration (append a quoted message)"
+
+[tasks.alembic-up]
+cmd = "alembic upgrade head"
+cwd = "backend"
+description = "Apply pending Alembic migrations"
+
+[tasks.mint-worker-token]
+cmd = "python -m shelf.scripts.mint_worker_token"
+cwd = "backend"
+description = "Mint a worker-scoped API token (e.g. for the GPU worker host). Pass a label name as the first positional arg."
+
+[tasks.alembic-down]
+cmd = "alembic downgrade -1"
+cwd = "backend"
+description = "Roll back the last Alembic migration"
+
+# ── Legacy Zotero → Shelf importer ──────────────────────────────────────────
+# One-shot. Reads the legacy MariaDB read-only and copies blobs from the
+# `zotero` Garage bucket into the `shelf` bucket. See migrate/README for
+# the env vars (MIGRATE_LEGACY_*, SHELF_DATABASE_URL, SHELF_S3_*).
+#
+# Default is dry-run; pass `--apply` to actually write.
+[tasks.migrate]
+cmd = "python -m migrate"
+description = "Import the legacy Zotero library into Shelf. Default is dry-run; pass --apply to commit."
+
+# ── Container & chart ────────────────────────────────────────────────────────
+
+[tasks.image-build]
+cmd = "docker build -t shelf:dev ."
+description = "Build the API container image as shelf:dev"
+
+# ── GPU worker (olmOCR / Qwen2.5-VL-7B) ──────────────────────────────────────
+# Tasks for the host with the NVIDIA card. The container subscribes
+# to the `shelf.jobs.attachment.ocr.gpu` JetStream subject and runs
+# olmOCR jobs against the cluster.
+#
+# Two backend modes for DB writes (controlled by SHELF_WORKER_BACKEND):
+#
+# * `api` (recommended for external hosts) — worker reaches Postgres
+#   indirectly, through the shelf API at /api/v1/worker/*. The host
+#   never holds DB credentials. Mint a worker token on the API host
+#   with `pixi run mint-worker-token <label>`.
+# * `sql` — worker connects to Postgres directly. Only sensible when
+#   the host is on the cluster's trusted network (in-cluster pods).
+#
+# Required env vars in the calling shell, by mode:
+#
+#   Common (both modes):
+#     SHELF_NATS_URL              nats://...
+#     SHELF_S3_ENDPOINT           https://...
+#     SHELF_S3_REGION
+#     SHELF_S3_BUCKET
+#     SHELF_S3_ACCESS_KEY_ID
+#     SHELF_S3_SECRET_ACCESS_KEY
+#
+#   API mode (SHELF_WORKER_BACKEND=api):
+#     SHELF_API_BASE_URL          https://shelf.example.com
+#     SHELF_WORKER_API_TOKEN      shelf_<48 hex>
+#
+#   SQL mode (SHELF_WORKER_BACKEND=sql):
+#     SHELF_DATABASE_URL          postgresql+asyncpg://...
+#
+# Optional:
+#   SHELF_WORKER_CONSUMERS  default 'ocr-gpu'; e.g. 'ocr-gpu,outline'
+#
+# Values never enter the repo, the image, or a file on disk —
+# `docker -e VAR` (no value) reads them from the parent process.
+
+[tasks.gpu-image-build]
+cmd = "docker build -f Dockerfile.gpu --build-arg DOCKER_IMAGE_TAG=local-dev -t shelf-gpu:dev ."
+description = "Build the GPU worker image (olmOCR + transformers + bitsandbytes)."
+
+[tasks.gpu-run]
+# `docker run -d` so the container survives the pixi process exiting.
+# `--restart unless-stopped` brings it back automatically when Docker
+# starts (e.g. after a host reboot), but respects manual `docker stop`.
+# `--gpus all` exposes the NVIDIA GPU via NVIDIA Container Toolkit.
+# Each `-e VAR` passes the value through from the calling shell.
+# Named volume keeps the ~7-15 GB Hugging Face model cache across
+# restarts so we don't re-download Qwen weights every boot.
+cmd = "docker run -d --name shelf-gpu-worker --restart unless-stopped --gpus all -e SHELF_WORKER_BACKEND -e SHELF_API_BASE_URL -e SHELF_WORKER_API_TOKEN -e SHELF_DATABASE_URL -e SHELF_NATS_URL -e SHELF_S3_ENDPOINT -e SHELF_S3_REGION -e SHELF_S3_BUCKET -e SHELF_S3_ACCESS_KEY_ID -e SHELF_S3_SECRET_ACCESS_KEY -e SHELF_WORKER_CONSUMERS -v shelf-hf-cache:/app/.cache/huggingface shelf-gpu:dev"
+description = "Start the GPU worker container in the background. Required env vars must be exported in the calling shell."
+
+[tasks.helm-lint]
+cmd = "helm lint deploy/helm/shelf -f deploy/examples/values-example.yaml"
+description = "Lint the Helm chart against the example values"
+
+[tasks.helm-template]
+cmd = "helm template shelf-test deploy/helm/shelf -f deploy/examples/values-example.yaml"
+description = "Render the chart with the example values to stdout"

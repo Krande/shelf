@@ -1,0 +1,104 @@
+[project]
+name = "shelf"
+version = "0.0.0"
+description = "Web library and document management server"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sqlalchemy>=2.0",
+    "asyncpg>=0.30",
+    "alembic>=1.18",
+    "pydantic>=2",
+    "pydantic-settings>=2",
+    "authlib>=1.3",
+    "joserfc>=1.0",
+    "httpx>=0.27",
+    "python-multipart>=0.0.10",
+    "obstore>=0.9",
+    "itsdangerous>=2.2",
+    "pypdf>=5.0",
+    "nats-py>=2.6",
+    # PyMuPDF powers the outline worker (font-heuristic heading
+    # detection + set_toc) on the CPU pod. ~30 MB wheel, no native
+    # GPU deps, so safe to keep in the base install.
+    "pymupdf",
+]
+
+[project.optional-dependencies]
+# CPU-tier OCR engine. Split into its own extra because ocrmypdf
+# pins pypdfium2>=5.0 while marker-pdf (in the [gpu] extra) pulls
+# in pdftext, which transitively pins pypdfium2==4.30.0 — the two
+# can't coexist in one environment. Each image installs only the
+# extras it actually runs:
+#
+#   CPU image  →  pip install '.[ocr]'
+#   GPU image  →  pip install '.[gpu]'
+ocr = [
+    # ocrmypdf 17 introduced the positional ocr() signature the
+    # Phase B worker uses. 16.x would still work but we've moved on.
+    "ocrmypdf>=17.0",
+]
+
+# GPU-only ML deps. shelf.worker.olmocr_runner lazy-imports these
+# inside its entry point so importing the worker module on the CPU
+# pod stays free.
+#
+# Outline generation is no longer here — it runs on the CPU pod
+# (shelf.worker.outline) using the PyMuPDF font heuristic, which
+# needs no GPU. The GPU pod only does the OCR itself; once the
+# OCR'd PDF is uploaded the workflow chains an outline job that any
+# CPU worker picks up.
+gpu = [
+    # olmOCR-2 (Qwen2.5-VL-7B) — high-quality OCR for complex docs.
+    "olmocr",
+    "transformers",
+    "accelerate",
+    "compressed-tensors",
+    "bitsandbytes",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/shelf"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "N", "ASYNC", "RUF"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["shelf"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src"]
+
+[[tool.mypy.overrides]]
+module = "authlib.*"
+ignore_missing_imports = true
+
+# The GPU worker's ML stack plus PyMuPDF. torch / transformers / olmocr live
+# in the `[gpu]` extra and are deliberately absent from the default (and CI)
+# environment — shelf.worker.olmocr_runner lazy-imports them inside its entry
+# points precisely so the CPU image never installs them. fitz (PyMuPDF) *is*
+# installed but ships no py.typed marker. Neither case is something a type
+# annotation here can resolve, so the imports are exempted rather than left to
+# fail the run on every machine that isn't a GPU host.
+[[tool.mypy.overrides]]
+module = ["torch.*", "transformers.*", "olmocr.*", "fitz.*"]
+ignore_missing_imports = true

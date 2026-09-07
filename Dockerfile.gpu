@@ -1,0 +1,108 @@
+# GPU worker image — runs the olmOCR (Qwen2.5-VL-7B) consumer and,
+# eventually, the Marker outline consumer. Built separately from the
+# CPU image (see top-level Dockerfile) so the API + CPU worker stay
+# small (no PyTorch, no model weights).
+#
+# Deploy this on the host with the GPU. Either pull the image
+# straight from your registry (CI builds + pushes alongside the CPU
+# image) or `pixi run gpu-image-build` to build locally; then `pixi
+# run gpu-run` starts a long-running container with --gpus all and
+# --restart unless-stopped. See pixi.toml's GPU tasks for the full
+# flow plus .env.gpu.example for the cluster URLs the worker needs.
+#
+# The GPU pod consumes the same JetStream stream the CPU worker
+# subscribes to; different durables and subjects, no overlap.
+
+# 12.6.3 is the latest stable tag in the cu12 series long-lived on
+# Docker Hub — 12.4.0 was already retired. Pascal (sm_60/sm_61) is
+# still supported in 12.x; only Maxwell sm_50/sm_52 was dropped on
+# the way to CUDA 13. cu124 PyTorch wheels run forward-compatibly
+# on a 12.6 runtime. Ubuntu 24.04 ships python3.12 in the default
+# repos which we need for shelf's `requires-python = ">=3.12"`.
+FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    HF_HOME=/app/.cache/huggingface
+
+WORKDIR /app
+
+# Python 3.12 ships in Ubuntu 24.04 default repos. Plus the system
+# libs that pikepdf / pymupdf and the (optional) Tesseract OCR path
+# need.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3.12 \
+        python3.12-venv \
+        ca-certificates \
+        libgomp1 \
+        # OCR system deps — the GPU worker can also process Tesseract
+        # jobs if the operator opts in via
+        # SHELF_WORKER_CONSUMERS=ocr,ocr-gpu.
+        tesseract-ocr \
+        tesseract-ocr-eng \
+        ghostscript \
+        unpaper \
+        pngquant \
+        poppler-utils \
+        qpdf \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install the application + the [gpu] extras, which pulls in
+# olmocr + transformers + accelerate + bitsandbytes + pymupdf
+# alongside the standard worker deps.
+COPY backend/pyproject.toml ./
+COPY backend/src ./src
+COPY backend/alembic ./alembic
+COPY backend/alembic.ini ./
+
+# uv (Astral's Rust-based pip replacement) instead of pip: dramatically
+# faster + much lower memory usage during dep resolution. pip's
+# resolver was OOM-killing the build on memory-constrained hosts
+# (the GPU dep set is heavy: torch + transformers + olmocr + marker
+# all pull in their own pinned graphs). uv resolves the same set in
+# seconds with a fraction of the memory.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+
+# Build into /opt/venv. Single-purpose container, but a venv keeps
+# us out of PEP 668's externally-managed-environment territory and
+# makes the install set easy to bind-mount for debugging.
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+RUN uv venv --python 3.12 ${VIRTUAL_ENV}
+
+# torch<2.7 keeps Pascal (sm_61) in the default cu124 wheel — the
+# 2.7 release line dropped sm_61 from stock builds. Operators on
+# Turing or newer can lift this; on Pascal cards it's load-bearing.
+RUN uv pip install \
+        --extra-index-url https://download.pytorch.org/whl/cu124 \
+        'torch<2.7' 'torchvision<0.22' \
+    && uv pip install '.[gpu]'
+
+# Image tag is stamped at build time so the worker can surface "I am
+# running sha-XXXXX" in the same way the CPU image does.
+ARG DOCKER_IMAGE_TAG=dev
+ENV SHELF_IMAGE_TAG=${DOCKER_IMAGE_TAG}
+
+# The HF cache lives at /app/.cache/huggingface — mount a PVC there
+# so the model weights (~14 GB unquantised, ~7 GB FP8) don't get
+# re-downloaded on every pod restart.
+RUN mkdir -p ${HF_HOME} \
+    # Ubuntu 24.04 ships with a default `ubuntu` account at UID 1000;
+    # evict it before claiming the same UID for our service user.
+    # `|| true` so we don't error on minimal bases that don't have it.
+    && userdel -r ubuntu 2>/dev/null || true \
+    && useradd -r -u 1000 shelf \
+    && chown -R 1000:1000 /app
+USER 1000
+
+# The worker process. SHELF_WORKER_CONSUMERS picks which JetStream
+# subject(s) this pod consumes; default to ocr-gpu so the GPU image
+# does GPU work by default. Override at the deployment level if a
+# host should also pick up CPU jobs.
+ENV SHELF_WORKER_CONSUMERS=ocr-gpu
+
+CMD ["python", "-m", "shelf.worker"]

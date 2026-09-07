@@ -1,0 +1,49 @@
+# deputy CI config — https://github.com/Krande/deputy
+#
+# The pr-review / tag-on-merge workflows install deputy and call it; the static
+# config lives here so the workflows stay thin. Release behaviour otherwise
+# falls back to deputy's built-in semantic-release defaults (tag "v{version}",
+# angular parser, chore/feat/fix release tags, main branch, push over origin,
+# upload to the VCS release), so only the repo-specific bits are set below.
+#
+# READ "chore/feat/fix release tags" CAREFULLY: it names the commit types the
+# angular parser ACCEPTS, not the ones that release. Only `fix:` -> patch and
+# `feat:` -> minor bump a version. A `chore:` PR under release-auto merges, the
+# tag job runs, every step reports success, and NO TAG IS PRODUCED.
+
+[pr_review]
+# Marker for this repo's sticky PR comment; keeps deputy updating one thread
+# instead of posting a new comment on every run.
+marker = "<!-- SHELF_PR_BOT -->"
+# Release label applied when a PR carries none. deputy's own default is
+# release-skip (no label => no release); release-auto instead lets
+# semantic-release derive the bump from the PR title, so a `fix:` PR cuts a
+# patch and a `feat:` PR cuts a minor with nobody hand-applying a label. An
+# explicit release-skip on a PR still wins. Requires deputy >= 0.4.0.
+#
+# Note that deputy refuses to release when a PR carries MORE THAN ONE release-*
+# label, and says so only in the job log while the job still reports success.
+# Since pr-review APPLIES default_label to a PR that has none, adding
+# release-patch to an existing PR leaves it holding both that and release-auto,
+# and it releases nothing. Remove release-auto; don't just add the other label.
+default_label = "release-auto"
+
+[release]
+# The backend package version — the one `/api` reports as `version`.
+version_toml = ["backend/pyproject.toml:project.version"]
+
+# The two other places the same number is written, kept in lockstep.
+#
+# NOTE the quotes around "version" in the package.json entry: the pattern
+# semantic-release builds is `<variable>\s*[:=]\s*"<semver>"`, so a bare token
+# matches TOML/Python (`x = "..."`) but NOT JSON, where the key is followed by
+# a closing quote before the colon. The quoted form is what matches
+# `"version": "..."`.
+#
+# frontend/package-lock.json is deliberately NOT listed: its version pattern
+# matches once per dependency, and semantic-release replaces every match, so
+# listing it would rewrite the whole dependency tree to the project version.
+version_variables = [
+    "backend/src/shelf/__init__.py:__version__",
+    'frontend/package.json:"version"',
+]

@@ -1,0 +1,317 @@
+@import "tailwindcss";
+
+/* pdfjs ships its own textLayer CSS — the per-span transform
+ * variables (`--scale-x`, `--total-scale-factor`, `--min-font-size`,
+ * etc.) need its rules to render correctly. Without this import the
+ * spans default to no transform and per-character positions don't
+ * line up with the rendered glyphs, which was the source of the
+ * "highlight is offset and wrong size" bug. */
+@import "pdfjs-dist/web/pdf_viewer.css";
+
+/* ── Typography tokens ──────────────────────────────────────────────
+ * Public Sans is the body face — sturdy, restrained, designed for
+ * technical govt documents; it carries the "engineering doc" tone
+ * without feeling generic. JetBrains Mono is reserved for the
+ * "Shelf" wordmark + a handful of small uppercase labels, giving the
+ * chrome a draughtsman's title-block feel.
+ * Both are loaded via <link> in index.html; the stacks below provide
+ * a graceful fallback while fonts load and on offline runs. */
+@theme {
+  --font-sans:
+    "Public Sans", ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", sans-serif;
+  --font-mono:
+    "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas,
+    monospace;
+}
+
+/* ── Palettes ───────────────────────────────────────────────────────
+ *
+ * The app reads six tokens — bg / surface / text / text-muted /
+ * border / accent — through `var(--color-*)`. Swapping a palette is
+ * just rebinding those tokens.
+ *
+ * Selectors layer like this:
+ *   :root                          → graphite, light  (the default)
+ *   .dark                          → graphite, dark
+ *   [data-palette="X"]             → X, light
+ *   [data-palette="X"].dark        → X, dark
+ *
+ * `[data-palette].dark` carries specificity (0,2,0) so it always
+ * wins over the bare `.dark` rule, even when both match.
+ *
+ * All four palettes lean industrial: neutral chrome, one saturated
+ * accent. Inspired by engineering drawings, blueprints, drafting
+ * paper, and terminal/CRT readouts. */
+
+/* Graphite — neutral cool paper + signal yellow. The default. */
+:root {
+  --color-bg: #f4f4f3;
+  --color-surface: #fbfbfa;
+  --color-text: #101113;
+  --color-text-muted: #65686d;
+  --color-border: #dadcdf;
+  --color-accent: #c79400;
+}
+.dark {
+  --color-bg: #0e0f11;
+  --color-surface: #16181b;
+  --color-text: #e7e8ea;
+  --color-text-muted: #8a8d92;
+  --color-border: #26282c;
+  --color-accent: #e6b430;
+}
+
+/* Blueprint — chalk paper with deep navy ink + engineering cyan.
+ * Dark variant flips literal: bright cyan on midnight navy, like an
+ * actual blueprint print. */
+[data-palette="blueprint"] {
+  --color-bg: #eef1f5;
+  --color-surface: #f7f9fc;
+  --color-text: #0d1a2d;
+  --color-text-muted: #5b6b80;
+  --color-border: #cad3dd;
+  --color-accent: #0571c5;
+}
+[data-palette="blueprint"].dark {
+  --color-bg: #0c1828;
+  --color-surface: #142337;
+  --color-text: #dbe7f5;
+  --color-text-muted: #7e95b3;
+  --color-border: #1f3045;
+  --color-accent: #5fb8ff;
+}
+
+/* Drafting — warm drafting paper with brown-black ink + red ink
+ * correction accent. */
+[data-palette="drafting"] {
+  --color-bg: #f4eed8;
+  --color-surface: #faf6e6;
+  --color-text: #1f1810;
+  --color-text-muted: #7a6b52;
+  --color-border: #dccba9;
+  --color-accent: #b32424;
+}
+[data-palette="drafting"].dark {
+  --color-bg: #18130d;
+  --color-surface: #211a12;
+  --color-text: #ebe1cd;
+  --color-text-muted: #998771;
+  --color-border: #332a1f;
+  --color-accent: #e5564a;
+}
+
+/* Carbon — minimal greyscale; in dark mode it becomes a true
+ * carbon-black field with a single phosphor-green accent. */
+[data-palette="carbon"] {
+  --color-bg: #fafafa;
+  --color-surface: #ffffff;
+  --color-text: #0a0a0a;
+  --color-text-muted: #5e5e5e;
+  --color-border: #e2e2e2;
+  --color-accent: #137a2a;
+}
+[data-palette="carbon"].dark {
+  --color-bg: #070707;
+  --color-surface: #0e0e0f;
+  --color-text: #dde0d8;
+  --color-text-muted: #6f7373;
+  --color-border: #1e1f21;
+  --color-accent: #56b66c;
+}
+
+* {
+  transition:
+    background-color 0.2s ease,
+    border-color 0.2s ease,
+    color 0.2s ease;
+}
+
+body {
+  margin: 0;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button {
+  cursor: pointer;
+}
+
+/* ── pdfjs text layer ────────────────────────────────────────────── */
+
+/* We re-use pdfjs's own .textLayer rules (imported above). The
+ * .shelf-textlayer wrapper class is added alongside .textLayer so we
+ * can pin shelf-specific positioning (absolute, inset:0) without
+ * fighting pdfjs's typography/transform CSS. */
+.shelf-textlayer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+/* Explicit selection enable on the pdfjs spans. iOS Safari needs
+ * -webkit-user-select + -webkit-touch-callout set on actual text
+ * to fire the long-press selection magnifier; without this the
+ * spans inherit Tailwind preflight defaults and long-press is a
+ * no-op. */
+.shelf-textlayer span {
+  -webkit-user-select: text;
+  -ms-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}
+
+/* Debug toggle: paints the text-layer spans + their character
+ * boxes so we can see where pdfjs *thinks* glyphs live versus
+ * where the canvas actually drew them. Triggered by the toolbar's
+ * eye icon. */
+.shelf-textlayer.shelf-debug-text > span {
+  color: rgba(255, 0, 200, 0.85) !important;
+  background-color: rgba(255, 255, 0, 0.18);
+  outline: 1px dashed rgba(255, 0, 200, 0.6);
+}
+/* Find-result highlights are absolute-positioned overlay divs
+   sized to the real rendered rectangles of the matched text (via
+   Range.getClientRects on the text-layer text node). Painting them
+   as siblings of the pdfjs spans avoids any per-character alignment
+   issue caused by the text-layer's system-font + transform fudge —
+   the browser knows the actual glyph rectangles. */
+.shelf-textlayer .shelf-find-rect {
+  position: absolute;
+  pointer-events: none;
+  border-radius: 2px;
+}
+.shelf-textlayer .shelf-find-rect.shelf-find-match {
+  background-color: rgba(255, 235, 59, 0.5);
+}
+.shelf-textlayer .shelf-find-rect.shelf-find-current {
+  background-color: rgba(255, 152, 0, 0.75);
+}
+
+/* ── Annotation overlay ─────────────────────────────────────────── */
+
+.shelf-annotations {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  /* Sits above the canvas + text layer so user-drawn marks remain
+     visible regardless of selection state. */
+  z-index: 2;
+}
+.shelf-annotation-rect {
+  position: absolute;
+  border-radius: 2px;
+  /* Multiply blends the highlight colour into the rendered glyphs
+     underneath without obscuring them. */
+  mix-blend-mode: multiply;
+  pointer-events: auto;
+}
+.shelf-annotation-note {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  border: 1.5px solid rgba(0, 0, 0, 0.25);
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+/* Floating "Highlight" button over a pending text selection.
+ * Anchored in the wrapper's coord space so the pinch transform
+ * scales it along with the page. */
+.shelf-highlight-button {
+  position: absolute;
+  z-index: 5;
+  transform: translate(2px, 2px);
+  background-color: var(--color-accent);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 4px 8px;
+  border-radius: 4px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+  cursor: pointer;
+  pointer-events: auto;
+  white-space: nowrap;
+}
+.shelf-highlight-button:hover {
+  opacity: 0.9;
+}
+
+/* ── TipTap editor + rendered output ─────────────────────────────── */
+
+.tiptap p {
+  margin: 0 0 0.5em 0;
+}
+.tiptap p:last-child {
+  margin-bottom: 0;
+}
+.tiptap p.is-editor-empty:first-child::before {
+  color: var(--color-text-muted);
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+}
+.tiptap ul,
+.tiptap-rendered ul {
+  list-style: disc;
+  margin: 0 0 0.5em 1.25em;
+}
+.tiptap ol,
+.tiptap-rendered ol {
+  list-style: decimal;
+  margin: 0 0 0.5em 1.25em;
+}
+.tiptap blockquote,
+.tiptap-rendered blockquote {
+  border-left: 3px solid var(--color-border);
+  padding-left: 0.75em;
+  color: var(--color-text-muted);
+  margin: 0 0 0.5em 0;
+}
+.tiptap code,
+.tiptap-rendered code {
+  background-color: color-mix(in srgb, var(--color-text-muted) 15%, transparent);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 0.92em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+.tiptap pre,
+.tiptap-rendered pre {
+  background-color: color-mix(in srgb, var(--color-text-muted) 15%, transparent);
+  padding: 0.5em 0.75em;
+  border-radius: 4px;
+  overflow-x: auto;
+  margin: 0 0 0.5em 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.92em;
+}
+.tiptap pre code,
+.tiptap-rendered pre code {
+  background: transparent;
+  padding: 0;
+}
+.tiptap h1,
+.tiptap-rendered h1 {
+  font-size: 1.4em;
+  font-weight: 600;
+  margin: 0.5em 0 0.25em 0;
+}
+.tiptap h2,
+.tiptap-rendered h2 {
+  font-size: 1.2em;
+  font-weight: 600;
+  margin: 0.5em 0 0.25em 0;
+}
+.tiptap h3,
+.tiptap-rendered h3 {
+  font-size: 1.05em;
+  font-weight: 600;
+  margin: 0.5em 0 0.25em 0;
+}

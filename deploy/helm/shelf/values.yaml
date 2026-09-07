@@ -1,0 +1,97 @@
+# -- Container image. `repository` is required at install time (e.g. via -f overrides).
+image:
+  repository: ""
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# -- Replica count for the API Deployment.
+replicaCount: 1
+
+# -- Name of an existing Kubernetes Secret containing SHELF_* environment
+# variables. The Secret is mounted via envFrom on both the api Deployment
+# and the migration Job. Required keys at minimum:
+#   SHELF_DATABASE_URL
+#   SHELF_SESSION_SECRET_KEY
+# Optional:
+#   SHELF_REDIS_URL, SHELF_S3_ENDPOINT, SHELF_S3_REGION, SHELF_S3_BUCKET,
+#   SHELF_S3_ACCESS_KEY_ID, SHELF_S3_SECRET_ACCESS_KEY,
+#   SHELF_GOTENBERG_URL, SHELF_DEV_LOGIN_ENABLED, SHELF_CORS_ORIGINS
+existingSecretName: ""
+
+# -- Extra environment variables, appended after envFrom (these win on conflict).
+extraEnv: []
+#   - name: SHELF_CORS_ORIGINS
+#     value: '["https://shelf.example.com"]'
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts: []
+  #   - host: shelf.example.com
+  #     paths:
+  #       - path: /
+  #         pathType: Prefix
+  tls: []
+  #   - secretName: shelf-tls
+  #     hosts: ["shelf.example.com"]
+
+service:
+  type: ClusterIP
+  port: 8000
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+
+# -- Run `alembic upgrade head` as a Helm pre-install / pre-upgrade Job.
+migrations:
+  enabled: true
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# -- Background extraction worker (PDF body text → tsvector).
+# Subscribes to a NATS JetStream subject and updates attachment rows
+# in-place. Disable to skip running the worker (e.g. when nats.url is
+# not yet provisioned); the API still works and rows stay `pending`,
+# the backfill script can pick them up later.
+worker:
+  enabled: true
+  replicas: 1
+  # Resources are set for the combined extract + ocr consumer. OCR
+  # via Tesseract is the heavier of the two (one 1-2 GB working set
+  # per page in flight); the limits here cover a reasonable book-
+  # length scan without thrashing. Bump if you ingest huge scans.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 3Gi
+
+# -- External NATS endpoint. Empty disables job publishing on the API
+# side and prevents the worker from starting (it exits with a clear
+# error). Format: nats://host:port. There's no NATS embedded in this
+# chart — point this at your shared nats namespace.
+nats:
+  url: ""

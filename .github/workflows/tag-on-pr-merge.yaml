@@ -1,0 +1,67 @@
+name: Create Tag on PR Merge
+
+# Thin wrapper: the release decision + semantic-release invocation live in the
+# `deputy` package (https://github.com/Krande/deputy). On a merged PR it reads
+# the release-* label and, when a release is warranted, bumps the version,
+# creates a vX.Y.Z tag, pushes it, and cuts a GitHub Release. The release config
+# comes from deputy's built-in semantic-release defaults plus the [release]
+# table in deputy.toml (which lists all three places the version is written).
+#
+# CRITICAL — the tag is pushed over SSH with the SOURCE_KEY deploy key, NOT the
+# default GITHUB_TOKEN. A GITHUB_TOKEN-pushed tag does not trigger other
+# workflows; a deploy-key push does — so the new tag fires build-and-push.yaml
+# (on: push tags 'v*.*.*'). Without SOURCE_KEY the tag still lands but NO IMAGE
+# IS PUBLISHED, and every job still reports success. Wired via
+# `remote.ignore_token_for_push = true`: semantic-release pushes over the
+# `origin` remote the checkout points at (SSH+SOURCE_KEY), and uses GH_TOKEN
+# only for the Release API call.
+#
+# Requirements:
+#   * secrets.SOURCE_KEY — a deploy key with WRITE access to this repo.
+#   * Don't enable "Do not allow bypassing the above settings" in branch
+#     protection, or the deploy-key push is rejected.
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [closed]
+
+permissions:
+  id-token: write
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: release-${{ github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  tag:
+    name: Tag release
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main (full history; deploy-key auth so the tag push triggers CI)
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}   # base branch (main) — merge is already in
+          fetch-depth: 0
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Configure git identity for the release commit
+        run: |
+          git config user.name "semantic-release"
+          git config user.email "semantic-release@users.noreply.github.com"
+
+      - name: Install deputy
+        # deputy pins gitpython<3.1.60 itself from v0.5.2 — do not re-add it here.
+        run: pip install "deputy @ git+https://github.com/Krande/deputy.git@v0.5.3"
+
+      - name: Tag + release per the PR's release label
+        run: deputy tag-on-merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

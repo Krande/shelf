@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.tox/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Node / frontend
+node_modules/
+.vite/
+.cache/
+.parcel-cache/
+*.tsbuildinfo
+
+# Editor
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Local env
+.env
+.env.*
+!.env.example
+
+# Helm
+deploy/helm/*/charts/
+deploy/helm/*/Chart.lock
+
+# Build artifacts
+*.log
+coverage/
+
+# Pixi environment (lock file is committed; the env itself is local)
+.pixi/
+
+# Per-user agent state
+.claude/

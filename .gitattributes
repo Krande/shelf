@@ -1,0 +1,24 @@
+# Normalise every text file to LF *in the repository*, whatever the
+# contributor's platform or core.autocrlf setting. Without this the repo's
+# line endings depend on each clone's local Git config: a Windows contributor
+# with autocrlf unset commits CRLF, and those carriage returns then travel
+# into the Linux container images built from this tree.
+#
+# `text=auto` only governs what is stored. Checkout still follows the local
+# config, so a Windows worktree keeps CRLF and nothing about the existing
+# working copy churns.
+* text=auto
+
+# These are read inside Linux containers, where a stray CR is not whitespace
+# but part of the token — a `RUN` continuation or an interpreter path. Pin
+# them to LF in the working tree as well, so they are correct even when
+# edited on Windows and mounted straight into a build.
+Dockerfile      text eol=lf
+Dockerfile.gpu  text eol=lf
+*.sh            text eol=lf
+
+# Generated lockfiles. Kept as text so diffs stay readable, but they should
+# never be hand-edited, and marking them here keeps them out of language
+# statistics and collapsed in review.
+pixi.lock                  text linguist-generated=true
+frontend/package-lock.json text linguist-generated=true

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <style>
+    .fg { stroke: #101113; }
+    .fill { fill: #101113; }
+    @media (prefers-color-scheme: dark) {
+      .fg { stroke: #e7e8ea; }
+    }
+  </style>
+  <g class="fg" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <rect class="fill" width="8" height="18" x="3" y="3" rx="1"/>
+    <path d="M7 3v18" fill="none"/>
+    <path class="fill" d="M20.4 18.9c.2.5-.1 1.1-.6 1.3l-1.9.7c-.5.2-1.1-.1-1.3-.6L11.1 5.1c-.2-.5.1-1.1.6-1.3l1.9-.7c.5-.2 1.1.1 1.3.6Z"/>
+  </g>
+</svg>

@@ -1,0 +1,26 @@
+Shelf has been installed.
+
+1. Make sure the Secret named "{{ .Values.existingSecretName }}" exists in the
+   release namespace and contains at least:
+
+     SHELF_DATABASE_URL
+     SHELF_SESSION_SECRET_KEY
+
+   If you also configure object storage / OIDC / Redis, add the
+   corresponding SHELF_* keys.
+
+2. The pre-install / pre-upgrade Job runs `alembic upgrade head`. Watch it
+   finish before traffic hits the API:
+
+     kubectl --namespace {{ .Release.Namespace }} get jobs -w
+
+3. The API is reachable inside the cluster as:
+
+     {{ include "shelf.fullname" . }}-api.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
+
+{{- if .Values.ingress.enabled }}
+4. External hostnames:
+{{- range .Values.ingress.hosts }}
+     - {{ .host }}
+{{- end }}
+{{- end }}

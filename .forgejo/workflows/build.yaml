@@ -1,0 +1,86 @@
+name: Build and push shelf
+
+# Cluster-specific values are read from Forgejo Actions vars/secrets so
+# the workflow stays portable. Required configuration on this repo:
+#   vars.FORGEJO_HOST     — e.g. git.example.com
+#   vars.IMAGE_REPO_BASE  — e.g. registry.example.com/library
+#   vars.GITOPS_REPO      — owner/repo of the gitops repository to bump
+#   vars.CI_EMAIL         — author email used on the auto-bump commit
+#   secrets.HARBOR_DOCKER_CONFIG — docker auth JSON for the registry
+#   secrets.K8S_GITOPS_TOKEN     — PAT with write access to GITOPS_REPO
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: docker-build
+    steps:
+      - name: Checkout
+        run: |
+          git clone \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@${{ vars.FORGEJO_HOST }}/$GITHUB_REPOSITORY.git" \
+            .
+
+      - name: Login to Harbor
+        run: |
+          mkdir -p ~/.docker
+          echo '${{ secrets.HARBOR_DOCKER_CONFIG }}' > ~/.docker/config.json
+
+      - name: Build and push image
+        env:
+          IMAGE_BASE: ${{ vars.IMAGE_REPO_BASE }}/shelf
+        run: |
+          TAG="sha-${GITHUB_SHA::7}"
+          docker build \
+            --build-arg DOCKER_IMAGE_TAG=${TAG} \
+            -t "${IMAGE_BASE}:${TAG}" \
+            -t "${IMAGE_BASE}:latest" \
+            .
+          docker push "${IMAGE_BASE}:${TAG}"
+          docker push "${IMAGE_BASE}:latest"
+
+      - name: Update image tag in k8s-gitops
+        env:
+          GITOPS_TOKEN: ${{ secrets.K8S_GITOPS_TOKEN }}
+          FORGEJO_HOST: ${{ vars.FORGEJO_HOST }}
+          GITOPS_REPO: ${{ vars.GITOPS_REPO }}
+          IMAGE_BASE: ${{ vars.IMAGE_REPO_BASE }}/shelf
+          CI_EMAIL: ${{ vars.CI_EMAIL }}
+        run: |
+          test -n "$GITOPS_TOKEN" || {
+            echo "K8S_GITOPS_TOKEN not set — skipping gitops update."
+            exit 0
+          }
+
+          TAG="sha-${GITHUB_SHA::7}"
+          WORK=$(mktemp -d)
+          cd "$WORK"
+          git clone "https://x-access-token:${GITOPS_TOKEN}@${FORGEJO_HOST}/${GITOPS_REPO}.git" .
+          git config user.name "Forgejo CI"
+          git config user.email "${CI_EMAIL}"
+
+          # Both manifests share one image, so they're bumped together.
+          # The api Deployment runs uvicorn; the worker Deployment runs
+          # `python -m shelf.worker` against the same image — keeping
+          # them in lockstep avoids the api running newer code while the
+          # worker silently lags and crash-loops on missing modules.
+          MANIFESTS="workloads/shelf/deployment.yaml workloads/shelf/worker-deployment.yaml"
+
+          for i in 1 2 3; do
+            git pull --rebase origin main
+            for M in $MANIFESTS; do
+              [ -f "$M" ] && sed -i "s|image: ${IMAGE_BASE}:.*|image: ${IMAGE_BASE}:${TAG}|" "$M"
+            done
+            git add $MANIFESTS
+            git diff --cached --quiet && exit 0
+            git commit -m "[skip ci] ci: update shelf to ${TAG}"
+            git push origin HEAD:main && exit 0
+            echo "Push failed (attempt $i), retrying..."
+            git reset --hard origin/main
+            sleep 2
+          done
+          echo "Failed to push after 3 attempts" >&2
+          exit 1

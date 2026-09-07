@@ -1,0 +1,52 @@
+# Example values for a Shelf deployment.
+#
+# Copy this file, replace the placeholder hostnames and image reference,
+# and apply with:
+#
+#   helm install shelf ./deploy/helm/shelf -f my-values.yaml -n shelf
+#
+# A Kubernetes Secret named in `existingSecretName` must already exist in
+# the same namespace and contain SHELF_DATABASE_URL and
+# SHELF_SESSION_SECRET_KEY at minimum. Any other SHELF_* env var the app
+# reads can be added there.
+
+image:
+  repository: registry.example.com/shelf
+  tag: "0.0.1"
+
+replicaCount: 1
+
+existingSecretName: shelf-config
+
+extraEnv:
+  - name: SHELF_CORS_ORIGINS
+    value: '["https://shelf.example.com"]'
+  - name: SHELF_S3_ENDPOINT
+    value: http://garage.garage.svc.cluster.local:3900
+  - name: SHELF_S3_REGION
+    value: us-east-1
+  - name: SHELF_S3_BUCKET
+    value: shelf
+
+ingress:
+  enabled: true
+  className: traefik
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: shelf.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: shelf-tls
+      hosts:
+        - shelf.example.com
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi
