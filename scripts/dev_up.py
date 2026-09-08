@@ -3,12 +3,13 @@
 Brings a fresh checkout all the way to a browsable app:
 
   1. `docker compose up -d --wait`  (Postgres + Redis + Gotenberg + object store)
-  2. bucket bootstrap               (only the backends that need one)
-  3. `alembic upgrade head`         (schema)
-  4. `npm install`                  (only when frontend/node_modules is absent)
-  5. uvicorn + vite, together, with prefixed interleaved output
+  2. wait for the store on :3900    (from the host, not just in-container)
+  3. bucket bootstrap               (only the backends that need one)
+  4. `alembic upgrade head`         (schema)
+  5. `npm install`                  (only when frontend/node_modules is absent)
+  6. uvicorn + vite, together, with prefixed interleaved output
 
-Steps 1-4 run to completion in order; the two servers then run until
+Steps 1-5 run to completion in order; the two servers then run until
 Ctrl-C, at which point both are torn down. The compose containers are
 deliberately left running — they are the slow part to start, and
 `pixi run dev-down` stops them when you actually want them gone.
@@ -58,6 +59,7 @@ IS_WINDOWS = os.name == "nt"
 # purpose so a fresh checkout needs no setup; both backends are configured
 # with the same ones so SHELF_S3_* doesn't change when you switch.
 S3_ENDPOINT = "http://localhost:3900"
+S3_HOST_PORT = 3900
 S3_REGION = "us-east-1"
 S3_BUCKET = "shelf"
 S3_ACCESS_KEY = "SHELFDEVACCESSKEY"
@@ -142,6 +144,17 @@ def _docker_compose() -> list[str] | None:
     if shutil.which("docker-compose"):
         return ["docker-compose"]
     return None
+
+
+def _wait_for_port(port: int, *, want_open: bool, timeout: float) -> bool:
+    """Block until localhost:port is (or isn't) accepting connections."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if _port_in_use(port) == want_open:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.5)
 
 
 # ── S3 bucket bootstrap ──────────────────────────────────────────────────────
@@ -366,6 +379,7 @@ def main() -> int:
     #    The unselected store is stopped first: both publish :3900, so leaving
     #    the previous one up makes the new one fail to bind — with a port
     #    conflict rather than anything that points at the actual cause.
+    stopped_other = False
     for other in S3_BACKENDS:
         if other not in ("none", args.s3):
             subprocess.run(
@@ -373,6 +387,14 @@ def main() -> int:
                 cwd=ROOT,
                 capture_output=True,
             )
+            stopped_other = True
+
+    # `docker compose stop` returns before the host-side port forward is
+    # necessarily gone. Starting the replacement into that window leaves it
+    # running and passing its healthcheck with no published port at all —
+    # the check after `up` catches that, but waiting avoids provoking it.
+    if stopped_other and args.s3 != "none":
+        _wait_for_port(S3_HOST_PORT, want_open=False, timeout=15)
 
     profile = [] if args.s3 == "none" else ["--profile", args.s3]
     store_label = "no object store" if args.s3 == "none" else args.s3
@@ -381,20 +403,43 @@ def main() -> int:
         _fail("compose failed — is the Docker daemon running?")
         return 1
 
-    # 2. Bucket. Garage's --default-bucket already made one; RustFS starts
+    # 2. The store has to be reachable *from the host*, which is not what
+    #    `--wait` proves: the healthchecks run inside the container against
+    #    127.0.0.1, so one whose published port never got established still
+    #    reports healthy. That happens when it starts while the previous
+    #    store is still releasing :3900 — compose reuses the existing
+    #    container and the binding is silently lost. Recreating re-establishes
+    #    it. Every presigned URL points at the host, so without this check the
+    #    failure surfaces much later as a browser upload error.
+    if args.s3 != "none" and not _wait_for_port(
+        S3_HOST_PORT, want_open=True, timeout=30
+    ):
+        _note(f"{args.s3} is up but :{S3_HOST_PORT} isn't — recreating it")
+        recreate = [*compose, "--profile", args.s3, "up", "-d", "--wait",
+                    "--force-recreate", args.s3]
+        if _run(recreate, cwd=ROOT) != 0 or not _wait_for_port(
+            S3_HOST_PORT, want_open=True, timeout=30
+        ):
+            _fail(
+                f"{args.s3} never published :{S3_HOST_PORT}. "
+                f"Try `pixi run dev-down`, then run this again."
+            )
+            return 1
+
+    # 3. Bucket. Garage's --default-bucket already made one; RustFS starts
     #    empty, and a presigned PUT into a missing bucket just 404s.
     if S3_BACKENDS[args.s3]:
         _step(f"Creating the '{S3_BUCKET}' bucket")
         if not _ensure_bucket():
             return 1
 
-    # 3. Schema.
+    # 4. Schema.
     _step("Applying migrations")
     if _run(["alembic", "upgrade", "head"], cwd=BACKEND) != 0:
         _fail("alembic upgrade failed")
         return 1
 
-    # 4. Frontend deps, only when they are missing. Re-running npm install
+    # 5. Frontend deps, only when they are missing. Re-running npm install
     #    on every `up` would add ~10s to a loop that is otherwise instant.
     npm = "npm.cmd" if IS_WINDOWS else "npm"
     if not (FRONTEND / "node_modules").is_dir():
@@ -403,7 +448,7 @@ def main() -> int:
             _fail("npm install failed")
             return 1
 
-    # 5. Both servers, until Ctrl-C.
+    # 6. Both servers, until Ctrl-C.
     #
     # The API child is told where the object store is. setdefault, not
     # assignment: an SHELF_S3_* already exported in the calling shell (or set
