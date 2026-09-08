@@ -34,5 +34,115 @@ services:
       - --chromium-disable-routes=true
       - --api-timeout=120s
 
+  # ── S3-compatible object store ─────────────────────────────────────────────
+  # Two interchangeable implementations behind compose profiles — pick one:
+  #
+  #   pixi run up --s3 garage     (default)
+  #   pixi run up --s3 rustfs
+  #   pixi run up --s3 none       (no store; metadata-only work)
+  #
+  # Both publish the S3 API on host :3900 and use the same bucket, region and
+  # credentials, so SHELF_S3_* is identical either way and switching is a
+  # restart rather than a reconfiguration. Neither has a profile-less default,
+  # so a plain `docker compose up -d` still starts only Postgres/Redis/
+  # Gotenberg and nothing here changes what `pixi run test-all` does.
+  #
+  # Credentials are dev throwaways, committed so a fresh checkout just works.
+  # They are uppercase-alphanumeric with no "/" because RustFS parses the
+  # credential scope incorrectly otherwise.
+
+  garage:
+    profiles: ["garage"]
+    image: dxflrs/garage:v2.3.0
+    # --single-node does the layout assign/apply that a fresh cluster needs;
+    # --default-bucket creates the bucket and key from the env vars below.
+    # Without both, the container comes up healthy but every request 404s on
+    # a missing bucket.
+    command: ["/garage", "server", "--single-node", "--default-bucket"]
+    environment:
+      GARAGE_DEFAULT_BUCKET: shelf
+      GARAGE_DEFAULT_ACCESS_KEY: SHELFDEVACCESSKEY
+      GARAGE_DEFAULT_SECRET_KEY: shelfdevsecretkey
+    ports:
+      - "3900:3900"
+      - "3903:3903"
+    configs:
+      # An inline config rather than a bind-mounted file: compose hands the
+      # content to the daemon directly, so there is no host path to resolve.
+      # Bind-mounting ./deploy/... breaks whenever the daemon doesn't share
+      # the client's filesystem — a Docker engine running inside WSL rejects
+      # "C:\...\garage.toml:/etc/garage.toml" outright.
+      - source: garage_config
+        target: /etc/garage.toml
+    volumes:
+      - garage_meta:/var/lib/garage/meta
+      - garage_data:/var/lib/garage/data
+    healthcheck:
+      # The admin API's /health reports cluster readiness, which for a
+      # single node means the layout has been applied. Garage's image has
+      # no shell and no curl, so we use the garage binary itself.
+      test: ["CMD", "/garage", "status"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  rustfs:
+    profiles: ["rustfs"]
+    image: rustfs/rustfs:latest
+    environment:
+      RUSTFS_ACCESS_KEY: SHELFDEVACCESSKEY
+      RUSTFS_SECRET_KEY: shelfdevsecretkey
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_CONSOLE_ADDRESS: ":9001"
+      RUSTFS_OBS_LOGGER_LEVEL: error
+    # :3900 on the host so the endpoint matches Garage's; :9000 in the
+    # container is RustFS's own default. 9001 is the web console.
+    ports:
+      - "3900:9000"
+      - "9001:9001"
+    volumes:
+      - rustfs_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://127.0.0.1:9000/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+configs:
+  # Garage insists on a config file — only the three *_TOKEN/SECRET values can
+  # come from the environment, so metadata_dir, replication_factor and the
+  # bind addresses have to live here.
+  #
+  # Everything below is single-node and throwaway, and the secrets are
+  # committed on purpose so a fresh checkout comes up with no setup step.
+  # Don't reuse any of it off your own machine.
+  garage_config:
+    content: |
+      metadata_dir = "/var/lib/garage/meta"
+      data_dir = "/var/lib/garage/data"
+      db_engine = "sqlite"
+
+      replication_factor = 1
+
+      rpc_bind_addr = "[::]:3901"
+      rpc_public_addr = "127.0.0.1:3901"
+      rpc_secret = "3d29b4a1c0f27e6d8b5a4930e1f7c2d6a8b0e3f591c7d24a6b8e0f3c5d7a9b1e"
+
+      [s3_api]
+      # Matches SHELF_S3_REGION's default, so the same env works unchanged
+      # against Garage or RustFS.
+      s3_region = "us-east-1"
+      api_bind_addr = "[::]:3900"
+      root_domain = ".s3.garage.localhost"
+
+      [admin]
+      api_bind_addr = "[::]:3903"
+      admin_token = "dev-admin-token-not-a-secret"
+      metrics_token = "dev-metrics-token-not-a-secret"
+
 volumes:
   postgres_data:
+  garage_meta:
+  garage_data:
+  rustfs_data:

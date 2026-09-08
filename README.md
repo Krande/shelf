@@ -24,6 +24,39 @@ Requires [pixi](https://pixi.sh) and Docker.
 
 ```bash
 pixi install
+pixi run up                  # everything, in one terminal
+```
+
+`up` starts Postgres + Redis + Gotenberg + an object store and waits on their healthchecks, applies migrations, installs the frontend's `node_modules` if they're missing, then runs the backend (`:8000`) and the vite dev server (`:5173`) side by side with prefixed output. Ctrl-C stops both servers; the containers stay up so the next `up` is quick. `pixi run dev-down` stops those when you're done.
+
+### Object store
+
+Two S3 implementations are wired up as compose profiles and are interchangeable — shelf talks to both through the same presigned-URL path:
+
+```bash
+pixi run up --s3 garage      # default — https://garagehq.deuxfleurs.fr
+pixi run up --s3 rustfs      # https://github.com/rustfs/rustfs
+pixi run up --s3 none        # skip it; metadata works, uploads don't
+```
+
+Both publish the S3 API on `:3900` with the same bucket, region and credentials, so `SHELF_S3_*` doesn't change when you switch and the running one is the only difference. `up` stops the other before starting the one you asked for, since they'd otherwise collide on the port. Garage creates its bucket and access key on first boot from `GARAGE_DEFAULT_*`; RustFS starts empty, so `up` creates the bucket itself. RustFS also serves a web console on `:9001`.
+
+The dev credentials are committed in `compose.yaml` on purpose so a fresh checkout needs no setup. They're throwaways — anything exported in your shell wins, so point `SHELF_S3_*` at your own store and `up` leaves it alone.
+
+### Ports
+
+`:5173` is the default vite port and `:8000` a common backend one, so either may already be taken — a second frontend checkout, or a previous run. `up` checks both first and moves to the next free port, printing where it landed:
+
+```
+    5173 is in use — running the frontend on 5174
+==> Open http://localhost:5174 — ...
+```
+
+Nothing else needs adjusting when it moves: the SPA reaches the API through vite's proxy, so its calls are same-origin regardless of port, and OIDC redirect URIs come from the backend's own `SHELF_PUBLIC_BASE_URL`. Pass `--web-port` / `--api-port` to pin a specific one, in which case it's used as given rather than scanned for.
+
+The individual tasks are still there if you'd rather drive one piece at a time:
+
+```bash
 pixi run dev-up              # Postgres + Redis + Gotenberg via compose.yaml
 pixi run alembic-up          # apply migrations
 pixi run dev-api             # backend on http://localhost:8000
@@ -33,7 +66,7 @@ pixi run frontend-install
 pixi run frontend-dev        # http://localhost:5173 (proxies /api and /auth to the backend)
 ```
 
-`SHELF_DEV_LOGIN_ENABLED` defaults to true, so `POST /auth/dev-login` with an email gets you a session without standing up an identity provider. Turn it off anywhere others can reach it — it mints a session for any email presented.
+Open http://localhost:5173. `SHELF_DEV_LOGIN_ENABLED` defaults to true, so the login page offers a dev-login form — enter any address and you're in, no identity provider required. It's the same thing as `POST /auth/dev-login`, and `/auth/providers` reports whether it's available so the SPA knows to show it. Turn it off anywhere others can reach it: it mints a session for any email presented.
 
 ## Running the tests
 

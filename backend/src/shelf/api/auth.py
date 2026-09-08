@@ -36,11 +36,19 @@ router = APIRouter(tags=["auth"])
 
 class ProviderListResponse(BaseModel):
     providers: list[str]
+    # Whether /auth/dev-login will actually mint a session. The SPA needs
+    # this to decide if it can offer the local shortcut: with no provider
+    # configured (the default for a fresh checkout) the login page would
+    # otherwise render no way in at all.
+    dev_login: bool
 
 
 @router.get("/auth/providers", response_model=ProviderListResponse)
 async def list_providers() -> ProviderListResponse:
-    return ProviderListResponse(providers=provider_names())
+    return ProviderListResponse(
+        providers=provider_names(),
+        dev_login=settings.dev_login_enabled,
+    )
 
 
 @router.get("/auth/login/{provider}")

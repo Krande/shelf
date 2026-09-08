@@ -1,6 +1,25 @@
 """Integration tests for /auth/dev-login, /auth/logout, and /api/me."""
 
+import pytest
 from httpx import AsyncClient
+
+from shelf.config import settings
+
+
+async def test_providers_advertises_dev_login(client: AsyncClient) -> None:
+    """The SPA gates its dev-login form on this flag. Without it, a checkout
+    with no OIDC provider configured renders a login page with no way in."""
+    r = await client.get("/auth/providers")
+    assert r.status_code == 200
+    assert r.json() == {"providers": [], "dev_login": True}
+
+
+async def test_providers_hides_dev_login_when_disabled(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "dev_login_enabled", False)
+    r = await client.get("/auth/providers")
+    assert r.json()["dev_login"] is False
 
 
 async def test_me_unauthenticated(client: AsyncClient) -> None:
