@@ -53,6 +53,23 @@ pngquant = "*"
 
 # ── Local dev ────────────────────────────────────────────────────────────────
 
+# The one command that takes a fresh checkout to a browsable app: starts the
+# compose services and waits on their healthchecks, migrates, installs the
+# frontend deps if they're missing, then runs uvicorn and vite side by side
+# until Ctrl-C. The individual tasks below still exist for when you want to
+# drive one piece at a time.
+#
+# It's a script rather than a `depends-on` chain because pixi runs each
+# dependency to completion — fine for the setup steps, but it can't hold two
+# servers up at once, and one Ctrl-C stopping both takes a process-tree kill
+# on Windows.
+#
+# Append `--s3 rustfs` or `--s3 none` to swap the object store; garage is the
+# default. Both publish :3900 with the same bucket and credentials.
+[tasks.up]
+cmd = "python scripts/dev_up.py"
+description = "Start everything for local development: services, migrations, backend and frontend (--s3 garage|rustfs|none)"
+
 [tasks.dev-api]
 cmd = "uvicorn shelf.main:app --reload --host 0.0.0.0 --port 8000"
 cwd = "backend"
@@ -80,14 +97,17 @@ description = "Run the SPA TypeScript compiler in noEmit mode"
 
 [tasks.dev-up]
 cmd = "docker compose up -d"
-description = "Start Postgres + Redis + Gotenberg for local development"
+description = "Start Postgres + Redis + Gotenberg for local development (no object store — see `up --s3`)"
 
+# The profiles are named explicitly so the object store is torn down too.
+# A bare `docker compose down` skips services that belong to a profile,
+# which would leave garage or rustfs holding :3900.
 [tasks.dev-down]
-cmd = "docker compose down"
-description = "Stop the local dev stack"
+cmd = "docker compose --profile garage --profile rustfs down"
+description = "Stop the local dev stack, including whichever object store is running"
 
 [tasks.dev-logs]
-cmd = "docker compose logs -f"
+cmd = "docker compose --profile garage --profile rustfs logs -f"
 description = "Tail logs from the local dev stack"
 
 # ── Quality ──────────────────────────────────────────────────────────────────

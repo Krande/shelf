@@ -38,6 +38,17 @@ def _build_store() -> ObjectStore:
         access_key_id=settings.s3_access_key_id,
         secret_access_key=settings.s3_secret_access_key,
         virtual_hosted_style_request=False,
+        # obstore's own HTTP client refuses a plaintext endpoint unless it's
+        # opted into, failing with reqwest's "BadScheme" before a request is
+        # sent. Presigned URLs hide this — those are handed to the browser (or
+        # to httpx in read_object) and work regardless — so what breaks is
+        # exactly the server-side calls: head, delete and copy. That made
+        # object_exists() report False for objects that exist, and
+        # ensure_original() silently skip the OCR snapshot.
+        #
+        # Scoped to http:// endpoints so a misconfigured https:// deployment
+        # still fails loudly rather than quietly downgrading.
+        client_options={"allow_http": settings.s3_endpoint.startswith("http://")},
     )
 
 
