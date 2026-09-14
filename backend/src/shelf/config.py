@@ -22,6 +22,13 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
 
     s3_endpoint: str = "http://localhost:3900"
+    # Endpoint used only when signing URLs that are handed to a browser.
+    # A presigned URL is bound to the host it was signed for, so it has to
+    # name a host the browser can actually reach - which is not always the
+    # address the server uses to talk to the same bucket (container network
+    # aliases, private service names, split-horizon DNS). Empty means "same
+    # as s3_endpoint", which is correct whenever both sides share a network.
+    s3_endpoint_public: str = ""
     s3_region: str = "us-east-1"
     s3_bucket: str = "shelf"
     s3_access_key_id: str = ""

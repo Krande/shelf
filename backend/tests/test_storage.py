@@ -16,7 +16,9 @@ from shelf.config import settings
 from shelf.services import storage
 
 
-def _captured_store_kwargs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+def _captured_store_kwargs(
+    monkeypatch: pytest.MonkeyPatch, endpoint: str | None = None
+) -> dict[str, Any]:
     """Build the store with S3Store stubbed out, returning its kwargs."""
     captured: dict[str, Any] = {}
 
@@ -25,7 +27,7 @@ def _captured_store_kwargs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         return object()
 
     monkeypatch.setattr(storage, "S3Store", fake_s3_store)
-    storage._build_store()
+    storage._build_store(endpoint if endpoint is not None else settings.s3_endpoint)
     return captured
 
 
@@ -47,6 +49,40 @@ def test_http_endpoint_opts_into_plaintext(
     monkeypatch.setattr(settings, "s3_endpoint", endpoint)
     kwargs = _captured_store_kwargs(monkeypatch)
     assert kwargs["client_options"] == {"allow_http": expected}
+
+
+@pytest.mark.parametrize(
+    ("public", "expect_separate"),
+    [
+        ("", False),
+        ("http://localhost:3900", False),
+        ("https://s3.example.com", True),
+    ],
+)
+def test_browser_store_uses_public_endpoint(
+    monkeypatch: pytest.MonkeyPatch, public: str, expect_separate: bool
+) -> None:
+    """Presigned URLs are signed for s3_endpoint_public when it names a
+    different host, so the URL handed to a browser points somewhere the
+    browser can reach. Unset or identical means one shared store."""
+    monkeypatch.setattr(settings, "s3_endpoint", "http://localhost:3900")
+    monkeypatch.setattr(settings, "s3_endpoint_public", public)
+    storage.reset_store()
+    try:
+        server = storage.get_store()
+        browser = storage._browser_store()
+        assert (browser is not server) == expect_separate
+    finally:
+        storage.reset_store()
+
+
+def test_browser_store_allow_http_follows_its_own_scheme(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The allow_http opt-in is derived from the endpoint the store is built
+    for, so an http:// server endpoint does not leak the opt-in into an
+    https:// browser store."""
+    kwargs = _captured_store_kwargs(monkeypatch, "https://s3.example.com")
+    assert kwargs["client_options"] == {"allow_http": False}
+    assert kwargs["endpoint"] == "https://s3.example.com"
 
 
 async def test_memory_store_roundtrip() -> None:
