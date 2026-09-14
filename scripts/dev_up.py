@@ -605,6 +605,12 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # vite announces itself with a U+279C arrow. On Windows a redirected
+    # stdout defaults to cp1252, which raises on it — inside the pump thread,
+    # where it kills the echo for that server and leaves it running blind.
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(encoding="utf-8", errors="replace")
+
     api_port = args.api_port if args.api_port else _free_port(8000)
     web_port = args.web_port if args.web_port else _free_port(5173)
     for label, chosen, default in (
