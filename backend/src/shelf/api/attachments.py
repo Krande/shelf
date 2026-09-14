@@ -310,10 +310,13 @@ async def stream_attachment(
     the browser saves it under the user-visible filename rather than the
     opaque storage key. Used by the explicit "Download" action; the
     reader still uses /download (presigned URL) to fetch bytes
-    direct-from-storage."""
+    direct-from-storage.
+
+    Signs for the server-side endpoint, not the browser-facing one: this
+    process performs the GET itself, so the URL never leaves the server."""
     att = await _resolve_attachment(db, user, attachment_id)
     storage_key, _ = await _resolve_version(db, att, version)
-    presigned = await storage.presign_download(storage_key)
+    presigned = await storage.presign_download_internal(storage_key)
 
     client = httpx.AsyncClient(follow_redirects=True, timeout=60.0)
     req = client.build_request("GET", presigned)

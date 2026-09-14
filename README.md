@@ -96,6 +96,12 @@ SHELF_REDIS_URL=redis://localhost:6379/0
 # Any S3-compatible store. Uploads and downloads are presigned, so file
 # bytes go browser <-> store without passing through the API.
 SHELF_S3_ENDPOINT=http://localhost:3900
+# Set this when the browser cannot reach SHELF_S3_ENDPOINT - the API and the
+# browser are on different networks, so the address the server uses to reach
+# the bucket is not one a browser can resolve or load. Presigned URLs are
+# signed for this host instead; server-side calls keep using SHELF_S3_ENDPOINT.
+# Leave unset when both sides share a network, as they do in dev.
+SHELF_S3_ENDPOINT_PUBLIC=
 SHELF_S3_REGION=us-east-1
 SHELF_S3_BUCKET=shelf
 SHELF_S3_ACCESS_KEY_ID=

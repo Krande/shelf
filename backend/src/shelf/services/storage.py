@@ -24,16 +24,20 @@ from ..config import settings
 DEFAULT_PRESIGN_TTL = timedelta(minutes=15)
 
 
-def _build_store() -> ObjectStore:
-    """Construct the configured object store.
+def _build_store(endpoint: str) -> ObjectStore:
+    """Construct an object store bound to ``endpoint``.
 
     For now only S3-compatible stores are wired (Garage in dev/prod). The
     function is structured so AzureStore / GCSStore / LocalStore / MemoryStore
     can be selected by config later without changing call sites.
+
+    Takes the endpoint as an argument rather than reading it from settings so
+    the same construction (and its allow_http rule below) is shared by the
+    server-side store and the browser-facing signing store.
     """
     return S3Store(
         bucket=settings.s3_bucket,
-        endpoint=settings.s3_endpoint,
+        endpoint=endpoint,
         region=settings.s3_region,
         access_key_id=settings.s3_access_key_id,
         secret_access_key=settings.s3_secret_access_key,
@@ -48,31 +52,49 @@ def _build_store() -> ObjectStore:
         #
         # Scoped to http:// endpoints so a misconfigured https:// deployment
         # still fails loudly rather than quietly downgrading.
-        client_options={"allow_http": settings.s3_endpoint.startswith("http://")},
+        client_options={"allow_http": endpoint.startswith("http://")},
     )
 
 
 _store: ObjectStore | None = None
+_browser_store_cache: ObjectStore | None = None
 
 
 def get_store() -> ObjectStore:
+    """The store used for server-side calls: head, delete, copy, put."""
     global _store
     if _store is None:
-        _store = _build_store()
+        _store = _build_store(settings.s3_endpoint)
     return _store
 
 
+def _browser_store() -> ObjectStore:
+    """The store used to sign URLs that are handed to a browser.
+
+    Falls back to the server-side store when s3_endpoint_public is unset or
+    identical, so single-network deployments keep exactly one store and the
+    previous behaviour.
+    """
+    public = settings.s3_endpoint_public
+    if not public or public == settings.s3_endpoint:
+        return get_store()
+    global _browser_store_cache
+    if _browser_store_cache is None:
+        _browser_store_cache = _build_store(public)
+    return _browser_store_cache
+
+
 def reset_store() -> None:
-    """Force re-construction of the store (used by tests)."""
-    global _store
+    """Force re-construction of both stores (used by tests)."""
+    global _store, _browser_store_cache
     _store = None
+    _browser_store_cache = None
 
 
 SigningStore = S3Store | AzureStore | GCSStore
 
 
-def _signing_store() -> SigningStore:
-    store = get_store()
+def _signing_store(store: ObjectStore) -> SigningStore:
     if not isinstance(store, S3Store | AzureStore | GCSStore):
         raise RuntimeError(
             f"presign requires a cloud-backed store; got {type(store).__name__}"
@@ -83,13 +105,23 @@ def _signing_store() -> SigningStore:
 async def presign_upload(
     key: str, expires_in: timedelta = DEFAULT_PRESIGN_TTL
 ) -> str:
-    return await sign_async(_signing_store(), "PUT", key, expires_in)
+    """Upload URL for a browser to PUT to - signed for the public endpoint."""
+    return await sign_async(_signing_store(_browser_store()), "PUT", key, expires_in)
 
 
 async def presign_download(
     key: str, expires_in: timedelta = DEFAULT_PRESIGN_TTL
 ) -> str:
-    return await sign_async(_signing_store(), "GET", key, expires_in)
+    """Download URL for a browser to GET - signed for the public endpoint."""
+    return await sign_async(_signing_store(_browser_store()), "GET", key, expires_in)
+
+
+async def presign_download_internal(
+    key: str, expires_in: timedelta = DEFAULT_PRESIGN_TTL
+) -> str:
+    """Download URL for this process to fetch, signed for the server-side
+    endpoint so the request stays on the network the server already uses."""
+    return await sign_async(_signing_store(get_store()), "GET", key, expires_in)
 
 
 async def head_object(key: str) -> dict[str, object]:
@@ -102,7 +134,7 @@ async def read_object(key: str) -> bytes:
     assembly; the presign + httpx round-trip is the lowest-common-
     denominator path that works for every backend obstore supports.
     """
-    url = await presign_download(key)
+    url = await presign_download_internal(key)
     async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as c:
         r = await c.get(url)
         r.raise_for_status()
@@ -220,6 +252,7 @@ __all__ = [
     "object_exists",
     "original_key",
     "presign_download",
+    "presign_download_internal",
     "presign_upload",
     "read_object",
     "reset_store",
