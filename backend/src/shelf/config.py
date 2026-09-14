@@ -64,6 +64,19 @@ class Settings(BaseSettings):
     # mismatch isn't possible.
     nats_url: str = ""
 
+    # Startup dependency checks (see preflight.py). Enabled by default: a
+    # deployment that cannot reach its database, bucket or OIDC provider is
+    # broken, and failing at boot with the reason beats reporting healthy
+    # and failing later in someone's browser. Turn off only where the app
+    # is started without its dependencies on purpose.
+    preflight_enabled: bool = True
+    # Transient failures (connection refused, timeout, 5xx) are retried this
+    # many times before giving up, so a dependency that is slow to come up
+    # does not turn into a crash loop. Configuration faults never retry.
+    preflight_retries: int = 5
+    preflight_retry_delay_seconds: float = 2.0
+    preflight_timeout_seconds: float = 10.0
+
     # Container image tag, e.g. "sha-143a581". Set by the Dockerfile
     # at build time from DOCKER_IMAGE_TAG (CI sets it to the short SHA).
     # "dev" means a local pixi run rather than a baked image. Surfaced

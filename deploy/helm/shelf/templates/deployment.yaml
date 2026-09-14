@@ -37,9 +37,13 @@ spec:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 30
+          # /readyz, not /health: readiness is about whether this instance
+          # can serve a request, which means its database and bucket have to
+          # be reachable. /health stays the liveness probe so a dependency
+          # outage takes the pod out of rotation instead of restarting it.
           readinessProbe:
             httpGet:
-              path: /health
+              path: /readyz
               port: http
             initialDelaySeconds: 2
             periodSeconds: 10

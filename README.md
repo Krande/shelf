@@ -115,10 +115,37 @@ SHELF_SESSION_COOKIE_SECURE=true
 SHELF_DEV_LOGIN_ENABLED=false
 SHELF_PUBLIC_BASE_URL=https://shelf.example.com
 
+# The API checks its dependencies once at startup and refuses to serve if
+# one is misconfigured - see "Startup checks" below. Set to false only to
+# start the app without them on purpose.
+SHELF_PREFLIGHT_ENABLED=true
+
 # Empty disables job publishing; the API still records the queued state on
 # the row, so nothing is lost when no worker is running.
 SHELF_NATS_URL=nats://nats:4222
 ```
+
+## Startup checks
+
+The API verifies its dependencies once at startup and refuses to serve if
+one is misconfigured, so a broken deployment fails at boot with the reason
+in its logs rather than reporting itself healthy and failing later in a
+browser. It checks that the database is reachable and migrated, that the
+bucket exists and the credentials can address it, that the bucket answers
+a CORS preflight for `SHELF_PUBLIC_BASE_URL` (uploads go browser-to-store,
+so a missing rule breaks them and nothing reaches the server), that the
+browser-facing store endpoint is not plaintext when the app is served over
+HTTPS, and that every OIDC issuer resolves a discovery document.
+
+Failures that look transient - connection refused, timeout, 5xx - are
+retried before giving up, so a dependency that is slow to start does not
+become a crash loop. Configuration faults are not retried.
+
+`/readyz` re-runs the cheap subset per request and is the readiness probe;
+`/health` stays a plain liveness check that never touches a dependency, so
+an outage takes an instance out of rotation rather than restarting it.
+
+Set `SHELF_PREFLIGHT_ENABLED=false` to start without them.
 
 ## OIDC / SSO
 
