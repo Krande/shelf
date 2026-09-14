@@ -1,3 +1,12 @@
+# Every published host port is a variable with the conventional port as its
+# default, so a plain `docker compose up` behaves exactly as it always has.
+# `pixi run up` sets them: it probes each one first and picks the next free
+# number when something else on the machine already holds it, which is the
+# difference between a bumped port and a "Bind for 0.0.0.0:3900 failed: port
+# is already allocated" that takes the whole stack down. It also writes the
+# values it chose to ./.env, which compose loads automatically, so `pixi run
+# dev-down`, `dev-logs` and `test-db-up` address the same containers rather
+# than trying to recreate them back onto the busy ports.
 services:
   postgres:
     image: postgres:16
@@ -6,7 +15,7 @@ services:
       POSTGRES_PASSWORD: shelf
       POSTGRES_DB: shelf
     ports:
-      - "5432:5432"
+      - "${SHELF_DEV_POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -18,7 +27,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "${SHELF_DEV_REDIS_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -28,7 +37,7 @@ services:
   gotenberg:
     image: gotenberg/gotenberg:8
     ports:
-      - "3000:3000"
+      - "${SHELF_DEV_GOTENBERG_PORT:-3000}:3000"
     command:
       - gotenberg
       - --chromium-disable-routes=true
@@ -64,8 +73,8 @@ services:
       GARAGE_DEFAULT_ACCESS_KEY: SHELFDEVACCESSKEY
       GARAGE_DEFAULT_SECRET_KEY: shelfdevsecretkey
     ports:
-      - "3900:3900"
-      - "3903:3903"
+      - "${SHELF_DEV_S3_PORT:-3900}:3900"
+      - "${SHELF_DEV_GARAGE_ADMIN_PORT:-3903}:3903"
     configs:
       # An inline config rather than a bind-mounted file: compose hands the
       # content to the daemon directly, so there is no host path to resolve.
@@ -97,10 +106,12 @@ services:
       RUSTFS_CONSOLE_ADDRESS: ":9001"
       RUSTFS_OBS_LOGGER_LEVEL: error
     # :3900 on the host so the endpoint matches Garage's; :9000 in the
-    # container is RustFS's own default. 9001 is the web console.
+    # container is RustFS's own default. 9001 is the web console. Both stores
+    # read the same SHELF_DEV_S3_PORT, so whichever one is running is reachable
+    # at one endpoint and switching stays a restart rather than a reconfigure.
     ports:
-      - "3900:9000"
-      - "9001:9001"
+      - "${SHELF_DEV_S3_PORT:-3900}:9000"
+      - "${SHELF_DEV_RUSTFS_CONSOLE_PORT:-9001}:9001"
     volumes:
       - rustfs_data:/data
     healthcheck:
