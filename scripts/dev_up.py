@@ -332,29 +332,39 @@ def _write_compose_env(port_env: dict[str, str]) -> None:
 
 
 # ── S3 bucket bootstrap ──────────────────────────────────────────────────────
-# A `PUT /{bucket}` signed with SigV4. Hand-rolled rather than pulling in
-# boto3 for one request: shelf's own S3 access goes through obstore, which
-# has no create-bucket call, and a dev-only bootstrap doesn't justify a new
-# dependency. Only the empty-payload, no-query case is handled, which is all
-# CreateBucket needs.
+# Two signed requests — `PUT /{bucket}` and `PUT /{bucket}?cors` — hand-rolled
+# rather than pulling in boto3 for them: shelf's own S3 access goes through
+# obstore, which has neither call, and a dev-only bootstrap doesn't justify a
+# new dependency. Only single-valued queries and an in-memory payload are
+# handled, which is all these two need.
 
 
 def _sigv4_headers(
-    *, method: str, host: str, path: str, region: str, access_key: str, secret_key: str
+    *,
+    method: str,
+    host: str,
+    path: str,
+    region: str,
+    access_key: str,
+    secret_key: str,
+    query: str = "",
+    payload: bytes = b"",
 ) -> dict[str, str]:
     now = dt.datetime.now(dt.timezone.utc)
     amz_date = now.strftime("%Y%m%dT%H%M%SZ")
     datestamp = now.strftime("%Y%m%d")
-    payload_hash = hashlib.sha256(b"").hexdigest()
+    payload_hash = hashlib.sha256(payload).hexdigest()
 
-    canonical_headers = (
-        f"host:{host}\n"
-        f"x-amz-content-sha256:{payload_hash}\n"
-        f"x-amz-date:{amz_date}\n"
-    )
-    signed_headers = "host;x-amz-content-sha256;x-amz-date"
+    headers = {
+        "host": host,
+        "x-amz-content-sha256": payload_hash,
+        "x-amz-date": amz_date,
+    }
+    signed_headers = ";".join(sorted(headers))
+    canonical_headers = "".join(f"{k}:{headers[k]}\n" for k in sorted(headers))
     canonical_request = (
-        f"{method}\n{path}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
+        f"{method}\n{path}\n{query}\n"
+        f"{canonical_headers}\n{signed_headers}\n{payload_hash}"
     )
 
     scope = f"{datestamp}/{region}/s3/aws4_request"
@@ -375,6 +385,8 @@ def _sigv4_headers(
     signature = hmac.new(k, string_to_sign.encode(), hashlib.sha256).hexdigest()
 
     return {
+        # host is signed but not returned: urllib sets it from the URL, and it
+        # has to stay byte-identical to what went into the signature.
         "x-amz-date": amz_date,
         "x-amz-content-sha256": payload_hash,
         "Authorization": (
@@ -415,6 +427,66 @@ def _ensure_bucket(endpoint: str) -> bool:
     except OSError as e:
         _fail(f"could not reach the object store at {endpoint}: {e}")
         return False
+
+
+# Uploads and downloads go straight from the SPA to a presigned URL, which is
+# cross-origin however the stack is arranged: vite and the store are different
+# ports, and a moved port only makes it more so. Garage starts with no CORS
+# rules at all, so the browser's preflight OPTIONS comes back 403 and the
+# upload fails as an opaque "Failed to fetch" before any of shelf's own code
+# runs. `*` is defensible only because this store is a localhost throwaway.
+CORS_RULES = b"""<?xml version="1.0" encoding="UTF-8"?>
+<CORSConfiguration>
+  <CORSRule>
+    <AllowedOrigin>*</AllowedOrigin>
+    <AllowedMethod>GET</AllowedMethod>
+    <AllowedMethod>PUT</AllowedMethod>
+    <AllowedMethod>POST</AllowedMethod>
+    <AllowedMethod>HEAD</AllowedMethod>
+    <AllowedMethod>DELETE</AllowedMethod>
+    <AllowedHeader>*</AllowedHeader>
+    <ExposeHeader>ETag</ExposeHeader>
+    <MaxAgeSeconds>3000</MaxAgeSeconds>
+  </CORSRule>
+</CORSConfiguration>
+"""
+
+
+def _ensure_cors(endpoint: str) -> None:
+    """Put the browser-upload CORS rule on the dev bucket.
+
+    Advisory: a store that answers preflights permissively on its own (or
+    doesn't implement PutBucketCors) is not a reason to refuse to start, and
+    the symptom — should there be one — shows up at the first upload with a
+    message that now has something to point at.
+    """
+    host = endpoint.split("://", 1)[1]
+    path = f"/{S3_BUCKET}"
+    headers = _sigv4_headers(
+        method="PUT",
+        host=host,
+        path=path,
+        region=S3_REGION,
+        access_key=S3_ACCESS_KEY,
+        secret_key=S3_SECRET_KEY,
+        query="cors=",
+        payload=CORS_RULES,
+    )
+    headers["Content-Type"] = "application/xml"
+    req = urllib.request.Request(
+        f"{endpoint}{path}?cors", method="PUT", data=CORS_RULES, headers=headers
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15):
+            return
+    except urllib.error.HTTPError as e:
+        detail = f"HTTP {e.code} {e.read().decode('utf-8', 'replace')[:200]}"
+    except OSError as e:
+        detail = str(e)
+    _note(
+        f"could not set the bucket CORS rule ({detail}) — browser uploads may "
+        f"fail their preflight"
+    )
 
 
 # ── Long-running servers ─────────────────────────────────────────────────────
@@ -636,6 +708,13 @@ def main() -> int:
         _step(f"Creating the '{S3_BUCKET}' bucket")
         if not _ensure_bucket(s3_endpoint):
             return 1
+
+    # Not gated on the bucket bootstrap above: garage makes its own bucket and
+    # still needs the rule, and both stores need it again if it was ever lost
+    # with the volume.
+    if args.s3 != "none":
+        _step("Allowing browser uploads straight to the store (bucket CORS)")
+        _ensure_cors(s3_endpoint)
 
     # A moved container port has to reach the backend's config too: both
     # shelf.config's defaults and backend/.env name the conventional ones, so

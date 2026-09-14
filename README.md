@@ -39,7 +39,7 @@ pixi run up --s3 rustfs      # https://github.com/rustfs/rustfs
 pixi run up --s3 none        # skip it; metadata works, uploads don't
 ```
 
-Both publish the S3 API on `:3900` with the same bucket, region and credentials, so `SHELF_S3_*` doesn't change when you switch and the running one is the only difference. `up` stops the other before starting the one you asked for, since they'd otherwise collide on the port. Garage creates its bucket and access key on first boot from `GARAGE_DEFAULT_*`; RustFS starts empty, so `up` creates the bucket itself. RustFS also serves a web console on `:9001`.
+Both publish the S3 API on `:3900` with the same bucket, region and credentials, so `SHELF_S3_*` doesn't change when you switch and the running one is the only difference. `up` stops the other before starting the one you asked for, since they'd otherwise collide on the port. It also puts a permissive CORS rule on the bucket: uploads go from the browser straight to a presigned URL, which is cross-origin, and Garage refuses the preflight until told otherwise. Garage creates its bucket and access key on first boot from `GARAGE_DEFAULT_*`; RustFS starts empty, so `up` creates the bucket itself. RustFS also serves a web console on `:9001`.
 
 The dev credentials are committed in `compose.yaml` on purpose so a fresh checkout needs no setup. They're throwaways — anything exported in your shell wins, so point `SHELF_S3_*` at your own store and `up` leaves it alone.
 
