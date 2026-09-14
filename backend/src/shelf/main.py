@@ -1,3 +1,6 @@
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -24,8 +27,30 @@ from .api import (
     worker_api,
 )
 from .config import settings
+from .preflight import PreflightError, run_readiness_checks, run_startup_checks
 
-app = FastAPI(title="Shelf", version=__version__)
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    """Verify dependencies before accepting traffic.
+
+    Refusing to start is the point: an instance that cannot reach its
+    database, bucket or OIDC provider has no working request path, and a
+    container that exits with the reason in its logs is far easier to
+    diagnose than one that serves 200s and fails in a browser.
+    """
+    if settings.preflight_enabled:
+        try:
+            await run_startup_checks()
+        except PreflightError as exc:
+            logger.error("preflight failed: %s", exc)
+            raise
+    yield
+
+
+app = FastAPI(title="Shelf", version=__version__, lifespan=lifespan)
 
 # Required by authlib's OIDC code-flow client to stash PKCE/state across
 # the redirect. Separate from the application's own session JWT cookie —
@@ -63,7 +88,31 @@ app.include_router(worker_api.router)
 
 @app.get("/health")
 async def health() -> dict[str, str]:
+    """Liveness only: is the process up. Deliberately checks nothing else,
+    so a dependency outage restarts nothing. Use /readyz for traffic."""
     return {"status": "ok"}
+
+
+@app.get("/readyz")
+async def readyz() -> JSONResponse:
+    """Readiness: can this instance actually serve a request.
+
+    Re-runs the cheap startup checks, so a dependency that disappears
+    after boot takes the instance out of rotation instead of leaving it
+    advertised as healthy while every request fails.
+    """
+    try:
+        results = await run_readiness_checks()
+    except PreflightError as exc:
+        return JSONResponse(
+            {"status": "unready", "detail": str(exc)}, status_code=503
+        )
+    return JSONResponse(
+        {
+            "status": "ok",
+            "checks": {r.name: r.detail for r in results},
+        }
+    )
 
 
 @app.get("/api")
@@ -100,7 +149,7 @@ if _frontend_dir.is_dir():
     ) -> FileResponse | JSONResponse:
         # Anything that looks like an API/auth route should 404 cleanly
         # rather than silently fall through to index.html.
-        if full_path.startswith(("api/", "auth/", "health")):
+        if full_path.startswith(("api/", "auth/", "health", "readyz")):
             return JSONResponse({"detail": "Not Found"}, status_code=404)
         # Pass static files (favicon, robots.txt, etc.) through if present.
         candidate = _frontend_dir / full_path
