@@ -39,20 +39,23 @@ pixi run up --s3 rustfs      # https://github.com/rustfs/rustfs
 pixi run up --s3 none        # skip it; metadata works, uploads don't
 ```
 
-Both publish the S3 API on `:3900` with the same bucket, region and credentials, so `SHELF_S3_*` doesn't change when you switch and the running one is the only difference. `up` stops the other before starting the one you asked for, since they'd otherwise collide on the port. Garage creates its bucket and access key on first boot from `GARAGE_DEFAULT_*`; RustFS starts empty, so `up` creates the bucket itself. RustFS also serves a web console on `:9001`.
+Both publish the S3 API on `:3900` with the same bucket, region and credentials, so `SHELF_S3_*` doesn't change when you switch and the running one is the only difference. `up` stops the other before starting the one you asked for, since they'd otherwise collide on the port. It also puts a permissive CORS rule on the bucket: uploads go from the browser straight to a presigned URL, which is cross-origin, and Garage refuses the preflight until told otherwise. Garage creates its bucket and access key on first boot from `GARAGE_DEFAULT_*`; RustFS starts empty, so `up` creates the bucket itself. RustFS also serves a web console on `:9001`.
 
 The dev credentials are committed in `compose.yaml` on purpose so a fresh checkout needs no setup. They're throwaways — anything exported in your shell wins, so point `SHELF_S3_*` at your own store and `up` leaves it alone.
 
 ### Ports
 
-`:5173` is the default vite port and `:8000` a common backend one, so either may already be taken — a second frontend checkout, or a previous run. `up` checks both first and moves to the next free port, printing where it landed:
+Every port the stack publishes is a common one — `:5173` for vite, `:8000` for the backend, `:5432`, `:6379`, `:3000`, `:3900` for the containers — so any of them may already be taken by another checkout, another project's compose stack, or a service you run anyway. `up` probes each one before it starts anything and moves to the next free number, printing where it landed:
 
 ```
     5173 is in use — running the frontend on 5174
+    3900 is in use — publishing the S3 API on 3901
 ==> Open http://localhost:5174 — ...
 ```
 
-Nothing else needs adjusting when it moves: the SPA reaches the API through vite's proxy, so its calls are same-origin regardless of port, and OIDC redirect URIs come from the backend's own `SHELF_PUBLIC_BASE_URL`. Pass `--web-port` / `--api-port` to pin a specific one, in which case it's used as given rather than scanned for.
+Nothing else needs adjusting when one moves. The SPA reaches the API through vite's proxy, so its calls are same-origin regardless of port, and OIDC redirect URIs come from the backend's own `SHELF_PUBLIC_BASE_URL`. A moved container port is passed to compose and written to `./.env` — which compose reads on its own, so `dev-down`, `dev-logs` and `test-db-up` address the same containers — and the matching `SHELF_DATABASE_URL` / `SHELF_REDIS_URL` / `SHELF_GOTENBERG_URL` / `SHELF_S3_ENDPOINT` is set for the backend and the migrations. Ports one of your own containers already publishes are kept rather than re-picked, so re-running `up` doesn't recreate a working container.
+
+Two things are outside that: `--web-port` / `--api-port` pin the two servers, in which case the port is used as given rather than scanned for; and `pixi run test` reads `backend/.env` directly, so a bumped Postgres needs `SHELF_DATABASE_URL` set there before the suite will connect — `up` says so when it happens.
 
 The individual tasks are still there if you'd rather drive one piece at a time:
 
