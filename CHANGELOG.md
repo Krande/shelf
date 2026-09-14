@@ -2,6 +2,161 @@
 
 
 
+## v0.2.0 (2026-09-14)
+
+### Chore
+
+* chore: sync the frontend lockfile to the released version
+
+package.json carries 0.1.0 and package-lock.json still said 0.0.0, so the
+`npm install` that `up` runs on a fresh checkout rewrites the file and
+hands the developer a dirty tree before they have changed anything.
+
+deputy writes package.json but deliberately leaves the lockfile alone --
+its version pattern matches once per dependency and would rewrite the
+whole tree -- so the two drift apart at every release and this will need
+doing again at 0.2.0. Worth the one line now; the alternative is every
+fresh checkout starting dirty.
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt;
+Claude-Session: https://claude.ai/code/session_01DQRLj2HQmjeioEN3Gz4R4p ([`7a56236`](https://github.com/Krande/shelf/commit/7a56236a9f0315a091e58f41a2411feedba21400))
+
+* chore: keep vite&#39;s output from killing the pump thread
+
+vite announces itself with a U+279C arrow. Windows picks cp1252 for a
+redirected stdout, which raises UnicodeEncodeError on it -- inside the
+thread that echoes a server&#39;s output, so the traceback lands in the middle
+of the log, that server&#39;s echo stops for good, and it goes on running with
+nothing to show for it. The &#34;Open http://localhost:...&#34; line the reader is
+waiting for is printed from the same thread and never arrives.
+
+Reconfigures stdout and stderr to UTF-8 with errors=&#34;replace&#34;, so an
+encoding a console cannot render costs a replacement character rather than
+the rest of the session&#39;s output.
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt;
+Claude-Session: https://claude.ai/code/session_01DQRLj2HQmjeioEN3Gz4R4p ([`b9889e8`](https://github.com/Krande/shelf/commit/b9889e84e2631476a52c2cb5e7bf26936d9afdf1))
+
+* chore: let the browser upload straight to the dev bucket
+
+Dropping a PDF into the SPA failed with &#34;Upload failed: Failed to fetch&#34;,
+and the console explained why:
+
+    Access to fetch at &#39;http://localhost:3901/shelf/items/.../attachments/...&#39;
+    from origin &#39;http://localhost:5174&#39; has been blocked by CORS policy:
+    Response to preflight request doesn&#39;t pass access control check
+
+(Bumped ports either side, from the commit before this one -- the failure
+predates them and happens just the same on :3900 and :5173.)
+
+Uploads and downloads go from the browser straight to a presigned URL, so
+they are cross-origin by construction -- vite and the store are different
+ports, and nothing about the stack can make them the same one. Garage
+starts with no CORS rules on the bucket at all and answers the preflight
+OPTIONS with 403 &#34;This CORS request is not allowed&#34;, which reaches the SPA
+as a bare TypeError with nothing in it to point at a bucket.
+
+`up` now PUTs a rule after the bucket step, for whichever store is running
+-- not gated on the bootstrap above it, since garage makes its own bucket
+and needs the rule just the same. The signer grew query-string and payload
+support to sign ?cors; it was empty-payload, no-query before, which was
+all CreateBucket needed.
+
+Advisory, not fatal: a store that answers preflights permissively on its
+own, or does not implement PutBucketCors, is not a reason to refuse to
+start. It warns instead, so an upload that does fail later has something
+to point at.
+
+Verified against garage on a bumped port by driving the SPA&#39;s own path --
+register, preflight, PUT, complete, download -- with the bytes coming back
+identical. Preflight answers 200 where it was 403.
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt;
+Claude-Session: https://claude.ai/code/session_01DQRLj2HQmjeioEN3Gz4R4p ([`407f11a`](https://github.com/Krande/shelf/commit/407f11a7d0e3db58c98d74067af83705916fab48))
+
+* chore: bump dev host ports that are already taken
+
+`up` scanned for a free port for vite and uvicorn but published the
+container ports as fixed numbers, so anything else on the machine holding
+one took the whole stack down:
+
+    Error response from daemon: driver failed programming external
+    connectivity on endpoint shelf-garage-1: Bind for 0.0.0.0:3900
+    failed: port is already allocated
+
+Every one of them is a number other things want: :5432, :6379, :3000 and
+:3900 are all defaults for what they run, so a second compose stack
+elsewhere on the machine is enough. compose gives up on the first failed
+bind, leaving the services that did start running and the developer with a
+message that names a port but not what to do about it.
+
+Each published port is now a ${VAR:-default} in compose.yaml, so a plain
+`docker compose up` is unchanged, and `up` resolves them before it starts
+anything: probe, and move to the next free number when something answers.
+The choice is threaded through to everything that has to agree with it --
+compose itself, ./.env so the compose commands `up` does not run address
+the same containers, and SHELF_DATABASE_URL / SHELF_REDIS_URL /
+SHELF_GOTENBERG_URL / SHELF_S3_ENDPOINT for uvicorn and alembic, set only
+for the ports that actually moved.
+
+A port one of our own containers already publishes is kept rather than
+re-picked, which needs `docker compose ps` rather than the probe: the
+probe cannot tell our garage from a stranger&#39;s, so every run would find
+itself on :3900, bump to :3901, then find :3900 free next time and bump
+back, recreating a working container each way.
+
+One thing this does not reach: `pixi run test` reads backend/.env
+directly, so a bumped Postgres needs SHELF_DATABASE_URL set there. `up`
+says so when it happens rather than leaving the suite to fail on connect.
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt;
+Claude-Session: https://claude.ai/code/session_01DQRLj2HQmjeioEN3Gz4R4p ([`627cac4`](https://github.com/Krande/shelf/commit/627cac461b146002c75231edacfc86526a9e0327))
+
+### Feature
+
+* feat(storage): allow presigning against a separate public S3 endpoint
+
+Presigned upload and download URLs are handed to a browser, but they were
+signed against s3_endpoint - the address the *server* uses to reach the
+bucket. When the browser and the API are on different networks those are
+not the same host, and the signed URL is unusable: the browser cannot
+resolve an internal service name, and an http:// endpoint is refused
+outright on an https:// page as mixed content. Uploads fail with no
+server-side error, since nothing reaches the server.
+
+Add s3_endpoint_public, used only when signing URLs meant for a browser.
+Empty (the default) means &#34;same as s3_endpoint&#34;, so single-network
+deployments and dev are unchanged and keep a single store.
+
+_build_store now takes the endpoint as an argument instead of reading it
+from settings, so both stores share one construction - and, importantly,
+one allow_http rule, which is derived from the endpoint being built rather
+than from s3_endpoint. Without that, an http:// server endpoint would have
+leaked the plaintext opt-in into an https:// browser store.
+
+Split the two presign consumers that are not browser-facing back onto the
+server-side endpoint: read_object (bulk-export ZIP assembly) and
+stream_attachment (proxy download) both fetch the URL from this process,
+so there is no reason to send that traffic out to a public host and back.
+They now call presign_download_internal.
+
+Tests cover the fallback cases (unset / identical / distinct) and that the
+allow_http opt-in follows each store&#39;s own scheme.
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt;
+Claude-Session: https://claude.ai/code/session_01MgNYH1A9cGSt3nU71SJKyc ([`0d025ee`](https://github.com/Krande/shelf/commit/0d025ee59202b6ef9353b66e0a83a6a5d19821d6))
+
+### Unknown
+
+* Merge pull request #3 from Krande/feat/s3-public-presign-endpoint
+
+feat(storage): allow presigning against a separate public S3 endpoint ([`59afbb4`](https://github.com/Krande/shelf/commit/59afbb400d285252e6c27f67eb2da13ff98ab1b1))
+
+* Merge pull request #2 from Krande/chore/dev-stack-port-conflicts
+
+chore: bump dev ports that are taken, and let the browser upload ([`d62b623`](https://github.com/Krande/shelf/commit/d62b6230dba61d477aea0cbefcb62ee9ab239eb3))
+
+
 ## v0.1.0 (2026-09-08)
 
 ### Feature
