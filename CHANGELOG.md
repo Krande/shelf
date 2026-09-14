@@ -2,6 +2,63 @@
 
 
 
+## v0.3.0 (2026-09-14)
+
+### Feature
+
+* feat: verify dependencies at startup and add a real readiness probe
+
+The app started regardless of whether its dependencies were usable, and
+/health returned {&#34;status&#34;: &#34;ok&#34;} unconditionally. A misconfigured
+deployment therefore reported itself healthy and failed later in a
+browser, far from the cause: a 500 on the login redirect when an issuer
+was not a resolvable URL, an upload blocked by CORS when the bucket
+carried no rule, a presigned URL the browser refused as mixed content.
+None of those are visible to a server-side request, and none of them
+need to wait for a user to find.
+
+Add a startup preflight covering exactly those failures:
+
+  database        reachable, and alembic_version present - an unmigrated
+                  schema only produces confusing errors further in
+  object-store    bucket exists and the credentials can address it
+  browser-upload  a real CORS preflight for public_base_url, plus a
+                  refusal to serve an http:// store endpoint to an
+                  https:// page
+  oidc            every issuer resolves a discovery document carrying an
+                  authorization_endpoint
+  session-secret  not the documented dev value outside dev
+
+The browser-upload check issues an actual OPTIONS request rather than
+reading bucket metadata. A preflight is unauthenticated, so it needs no
+signing, and it tests the thing that matters: whether a browser will be
+allowed to use the URL the API hands it.
+
+Failing fast is only safe if it distinguishes &#34;wrong&#34; from &#34;not up yet&#34;,
+so transient faults - connect errors, timeouts, 5xx - are retried before
+giving up, while configuration faults fail on the first attempt.
+_is_transient matches ConnectionError rather than OSError precisely
+because PermissionError is an OSError too, and retrying a denial only
+delays the same failure.
+
+Add /readyz, which re-runs the cheap subset per request, and point the
+chart&#39;s readinessProbe at it. /health stays a plain liveness check that
+touches nothing, so a dependency outage takes an instance out of
+rotation instead of restarting it.
+
+Preflight is on by default and disabled with SHELF_PREFLIGHT_ENABLED=false
+for deployments that start without their dependencies on purpose.
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt;
+Claude-Session: https://claude.ai/code/session_01MgNYH1A9cGSt3nU71SJKyc ([`25077f5`](https://github.com/Krande/shelf/commit/25077f57677664f763aa15b76abc2bc6efe9789d))
+
+### Unknown
+
+* Merge pull request #4 from Krande/feat/startup-preflight-checks
+
+feat: verify dependencies at startup and add a real readiness probe ([`461419d`](https://github.com/Krande/shelf/commit/461419d01764902dfd0e0d33906df98a0c3a77fa))
+
+
 ## v0.2.0 (2026-09-14)
 
 ### Chore
