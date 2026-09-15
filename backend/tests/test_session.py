@@ -4,7 +4,8 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from authlib.jose import jwt
+from joserfc import jwt
+from joserfc.jwk import OctKey
 
 from shelf.auth.session import InvalidSessionError, issue_session, parse_session
 from shelf.config import settings
@@ -85,8 +86,8 @@ def test_legacy_token_without_accts() -> None:
             "iat": int(now.timestamp()),
             "exp": int((now + timedelta(hours=1)).timestamp()),
         },
-        settings.session_secret_key.encode(),
-    ).decode()
+        OctKey.import_key(settings.session_secret_key.encode()),
+    )
 
     claims = parse_session(legacy)
     assert claims.active_user_id == user_id
@@ -108,11 +109,58 @@ def test_malformed_accts_entries_are_dropped() -> None:
             "iat": int(now.timestamp()),
             "exp": int((now + timedelta(hours=1)).timestamp()),
         },
-        settings.session_secret_key.encode(),
-    ).decode()
+        OctKey.import_key(settings.session_secret_key.encode()),
+    )
 
     claims = parse_session(token)
     assert set(claims.account_ids) == {user_id, other}
+
+
+def test_a_token_without_exp_is_rejected() -> None:
+    """Otherwise it would never expire — a permanent pass rather than a
+    session."""
+    now = datetime.now(UTC)
+    forever = jwt.encode(
+        {"alg": "HS256"},
+        {"sub": str(uuid.uuid4()), "iat": int(now.timestamp())},
+        OctKey.import_key(settings.session_secret_key.encode()),
+    )
+    with pytest.raises(InvalidSessionError):
+        parse_session(forever)
+
+
+def test_the_algorithm_is_pinned() -> None:
+    """The verifier must not take the token's word for how to verify it.
+    A token signed with a different HMAC size, under the same secret, is
+    still a forgery as far as shelf is concerned."""
+    now = datetime.now(UTC)
+    other_alg = jwt.encode(
+        {"alg": "HS512"},
+        {
+            "sub": str(uuid.uuid4()),
+            "iat": int(now.timestamp()),
+            "exp": int((now + timedelta(hours=1)).timestamp()),
+        },
+        OctKey.import_key(settings.session_secret_key.encode()),
+        algorithms=["HS512"],
+    )
+    with pytest.raises(InvalidSessionError):
+        parse_session(other_alg)
+
+
+def test_a_token_signed_with_another_secret_is_rejected() -> None:
+    now = datetime.now(UTC)
+    forged = jwt.encode(
+        {"alg": "HS256"},
+        {
+            "sub": str(uuid.uuid4()),
+            "iat": int(now.timestamp()),
+            "exp": int((now + timedelta(hours=1)).timestamp()),
+        },
+        OctKey.import_key(b"not-the-shelf-secret-at-all-no-really"),
+    )
+    with pytest.raises(InvalidSessionError):
+        parse_session(forged)
 
 
 def test_expires_at_is_carried_not_slid() -> None:

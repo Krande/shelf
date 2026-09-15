@@ -26,9 +26,21 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from authlib.jose import JoseError, jwt
+from joserfc import jwt
+from joserfc.errors import JoseError
+from joserfc.jwk import OctKey
+from joserfc.jwt import JWTClaimsRegistry
 
 from ..config import settings
+
+# The only algorithm shelf issues or accepts. Passing it to `decode`
+# rather than trusting the token's own header is what stops an attacker
+# choosing the algorithm their forgery is verified under.
+_ALG = "HS256"
+
+# `exp` is essential: a session token without one would never expire, so
+# a missing claim has to be a rejection rather than a permanent pass.
+_CLAIMS = JWTClaimsRegistry(exp={"essential": True})
 
 
 class InvalidSessionError(Exception):
@@ -73,9 +85,7 @@ def issue_session(
         "iat": int(now.timestamp()),
         "exp": int(expires_at.timestamp()),
     }
-    header = {"alg": "HS256"}
-    token: bytes = jwt.encode(header, payload, settings.session_secret_key.encode())
-    return token.decode()
+    return jwt.encode({"alg": _ALG}, payload, _key())
 
 
 def dedupe_accounts(
@@ -101,12 +111,19 @@ def dedupe_accounts(
     return tuple(out[: max(1, settings.max_linked_accounts)])
 
 
+def _key() -> OctKey:
+    """Built per call rather than cached at import: the secret comes from
+    settings, and tests patch it."""
+    return OctKey.import_key(settings.session_secret_key.encode())
+
+
 def parse_session(token: str) -> SessionClaims:
     try:
-        claims = jwt.decode(token, settings.session_secret_key.encode())
-        claims.validate()
+        decoded = jwt.decode(token, _key(), algorithms=[_ALG])
+        _CLAIMS.validate(decoded.claims)
     except JoseError as e:
         raise InvalidSessionError(str(e)) from e
+    claims = decoded.claims
 
     sub = claims.get("sub")
     if not isinstance(sub, str):
