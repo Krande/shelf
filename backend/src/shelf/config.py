@@ -71,6 +71,18 @@ class Settings(BaseSettings):
 
     dev_login_enabled: bool = True
 
+    # Role handed to accounts that sign in through /auth/dev-login.
+    #
+    # Defaults to "user", and deliberately so: dev_login_enabled is on by
+    # default, and an instance that forgot to turn it off already mints a
+    # session for any address presented. Making those sessions admin by
+    # default would turn that footgun into an instant-admin one.
+    #
+    # `pixi run up` sets this to "admin" for the backend it launches, so a
+    # fresh checkout can actually reach the Admin tab without hand-editing
+    # env first. Only consulted when dev_login_enabled is true.
+    dev_login_role: str = "user"
+
     # Emails promoted to the admin role on login. Bootstrap only: it
     # promotes and never demotes, so roles changed in the UI stick and
     # editing this list can't accidentally strip someone. A fresh

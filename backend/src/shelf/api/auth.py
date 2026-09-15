@@ -35,7 +35,7 @@ from ..auth.oidc import (
     provider_names,
     upsert_user_from_claims,
 )
-from ..auth.roles import apply_admin_bootstrap
+from ..auth.roles import apply_admin_bootstrap, apply_dev_login_role
 from ..auth.session import InvalidSessionError, issue_session, parse_session
 from ..config import settings
 from ..db import get_session
@@ -269,6 +269,9 @@ async def dev_login(
         await db.commit()
         await db.refresh(user)
 
+    # Both are promote-only, so the order between them doesn't matter;
+    # either can grant admin and neither takes it away.
+    user = await apply_dev_login_role(db, user)
     user = await apply_admin_bootstrap(db, user)
 
     existing: tuple[uuid.UUID, ...] = ()

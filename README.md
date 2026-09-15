@@ -247,6 +247,18 @@ to an existing user without a restart, and `--revoke` reverses it. The last
 remaining admin can't be demoted through the UI, so an instance can't lock
 itself out by accident.
 
+**In local development** you get an admin without any of that: `pixi run up`
+sets `SHELF_DEV_LOGIN_ROLE=admin` for the backend it launches, so accounts made
+through the dev-login form are admins and the Admin tab is there to look at. The
+setting defaults to `user` everywhere else, and deliberately — dev login mints a
+session for any address presented, so defaulting it to `admin` would turn
+"forgot to switch dev login off" into "anyone who can reach this is an admin".
+Set it explicitly in `backend/.env` or the shell to override what `up` picks.
+
+Like `SHELF_ADMIN_EMAILS` it only ever grants. Env can hand out a role; only the
+admin UI or `pixi run grant-admin --revoke` takes one back. A knob that demoted
+would quietly strip, at the next sign-in, a role you'd set on purpose.
+
 Roles are read from the database on every request, so a change takes effect on
 the next one rather than whenever the session happens to expire.
 
