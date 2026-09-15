@@ -28,6 +28,23 @@ export function canEdit(space: Space | undefined | null): boolean {
   return space?.role === "editor" || space?.role === "owner";
 }
 
+/** A user who could be added to a space. */
+export interface DirectoryUser {
+  id: string;
+  email: string;
+  display_name: string;
+}
+
+/**
+ * Everyone with an account on this instance, for the member picker.
+ *
+ * Visible to any signed-in user, not just admins — everyone owns their
+ * personal space, so everyone may need to share one.
+ */
+export function fetchDirectory(): Promise<DirectoryUser[]> {
+  return apiFetch<DirectoryUser[]>("/api/users");
+}
+
 /**
  * Create a shared space, owned by the caller. Admin-only server-side.
  *

@@ -298,11 +298,17 @@ shared spaces** from Settings → Spaces — the creator owns it and picks who e
 is in it. Creation is admin-gated because spaces are cheap to make and awkward
 to clean up; making a space still grants nothing over spaces other people own.
 
-Manage members under Settings → Spaces. People are added by email and must have
-signed in at least once, since shelf has no user directory to search (exposing
-one to every account holder isn't a trade worth making). Removing someone
-revokes their access but leaves the content they created — it belongs to the
-space, not to them.
+Manage members under Settings → Spaces. You pick people from a dropdown of
+everyone with an account; someone has to have signed in at least once before
+they can be added. Removing someone revokes their access but leaves the content
+they created — it belongs to the space, not to them.
+
+That dropdown is backed by `GET /api/users`, which **any signed-in user can
+read**: it lists every account's display name and email address. Everyone owns
+their personal space and so may need to share it, which is why it isn't
+admin-only. Nothing else is exposed — no roles, no identities, nothing about
+anyone's library — but if you hand out accounts to people who shouldn't see each
+other's addresses, this is the endpoint to put behind something narrower.
 
 Attachments uploaded from now on are stored under `spaces/{space_id}/…`, so a
 bucket policy or lifecycle rule can address one space's objects without going

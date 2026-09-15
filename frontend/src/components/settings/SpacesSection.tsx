@@ -12,10 +12,12 @@ import { ChevronDown, ChevronRight, Loader2, Plus, Users } from "lucide-react";
 import {
   addMember,
   createSpace,
+  fetchDirectory,
   fetchMembers,
   fetchMySpaces,
   removeMember,
   updateMemberRole,
+  type DirectoryUser,
   type Space,
   type SpaceMember,
   type SpaceRole,
@@ -230,12 +232,26 @@ function MemberList({ slug }: { slug: string }) {
     retry: (_a, err) => err.status >= 500,
   });
 
+  const directory = useQuery<DirectoryUser[], ApiError>({
+    queryKey: ["directory"],
+    queryFn: fetchDirectory,
+    retry: (_a, err) => err.status >= 500,
+  });
+
+  // Anyone already in the space — the owner included — has nothing to add.
+  const existing = new Set(
+    (members.data ?? []).map((m) => m.email.toLowerCase()),
+  );
+  const addable = (directory.data ?? []).filter(
+    (u) => !existing.has(u.email.toLowerCase()),
+  );
+
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["members", slug] });
   };
 
   const add = useMutation({
-    mutationFn: () => addMember(slug, email.trim(), role),
+    mutationFn: () => addMember(slug, email, role),
     onSuccess: () => {
       setEmail("");
       invalidate();
@@ -260,7 +276,7 @@ function MemberList({ slug }: { slug: string }) {
 
   function onAdd(e: FormEvent) {
     e.preventDefault();
-    if (!email.trim() || add.isPending) return;
+    if (!email || add.isPending) return;
     add.mutate();
   }
 
@@ -335,19 +351,31 @@ function MemberList({ slug }: { slug: string }) {
       </ul>
 
       <form onSubmit={onAdd} className="flex flex-wrap gap-1">
-        <input
-          type="email"
+        <select
           required
           value={email}
           onChange={(e) => setEmail(e.target.value)}
-          placeholder="Add by email…"
-          aria-label="Email of the person to add"
-          className="min-w-0 flex-1 rounded border px-2 py-1 text-xs"
+          aria-label="Person to add"
+          disabled={directory.isLoading || addable.length === 0}
+          className="min-w-0 flex-1 rounded border px-2 py-1 text-xs disabled:opacity-50"
           style={{
             borderColor: "var(--color-border)",
             backgroundColor: "var(--color-surface)",
           }}
-        />
+        >
+          <option value="">
+            {directory.isLoading
+              ? "Loading people…"
+              : addable.length === 0
+                ? "Everyone already has access"
+                : "Choose someone…"}
+          </option>
+          {addable.map((u) => (
+            <option key={u.id} value={u.email}>
+              {u.display_name} ({u.email})
+            </option>
+          ))}
+        </select>
         <select
           value={role}
           aria-label="Role for the new member"
@@ -365,7 +393,7 @@ function MemberList({ slug }: { slug: string }) {
         </select>
         <button
           type="submit"
-          disabled={add.isPending}
+          disabled={add.isPending || !email}
           className="flex shrink-0 items-center gap-1 rounded border px-2 py-1 text-xs hover:opacity-80 disabled:opacity-50"
           style={{ borderColor: "var(--color-border)" }}
         >

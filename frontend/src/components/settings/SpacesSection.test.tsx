@@ -41,10 +41,19 @@ const MEMBERS = [
   },
 ];
 
+// In the order /api/users returns them — it sorts by display name, and
+// the picker trusts that rather than re-sorting.
+const DIRECTORY = [
+  { id: "u1", email: "owner@example.com", display_name: "Ada" },
+  { id: "u3", email: "alan@example.com", display_name: "Alan" },
+  { id: "u2", email: "grace@example.com", display_name: "Grace" },
+];
+
 function stub(spaces: unknown[] = [OWNED, SHARED_VIEWER, SHARED_EDITOR]) {
   return mockFetch({
     "/api/me/spaces": { body: spaces },
     "/api/spaces/u-abc/members": { body: MEMBERS },
+    "/api/users": { body: DIRECTORY },
   });
 }
 
@@ -108,14 +117,14 @@ describe("members", () => {
     ).toBeNull();
   });
 
-  it("adds a member by email", async () => {
+  it("adds a member picked from the directory", async () => {
     const fetchFn = stub();
     await openSharing();
     await screen.findByText("Grace");
 
-    await userEvent.type(
-      screen.getByLabelText(/email of the person to add/i),
-      "new@example.com",
+    await userEvent.selectOptions(
+      await screen.findByLabelText(/person to add/i),
+      "alan@example.com",
     );
     await userEvent.selectOptions(
       screen.getByLabelText(/role for the new member/i),
@@ -131,7 +140,7 @@ describe("members", () => {
       );
       expect(call).toBeDefined();
       expect(JSON.parse((call![1] as RequestInit).body as string)).toEqual({
-        email: "new@example.com",
+        email: "alan@example.com",
         role: "editor",
       });
     });
@@ -141,9 +150,9 @@ describe("members", () => {
     const fetchFn = stub();
     await openSharing();
     await screen.findByText("Grace");
-    await userEvent.type(
-      screen.getByLabelText(/email of the person to add/i),
-      "new@example.com",
+    await userEvent.selectOptions(
+      await screen.findByLabelText(/person to add/i),
+      "alan@example.com",
     );
     await userEvent.click(screen.getByRole("button", { name: /^add$/i }));
 
@@ -159,29 +168,51 @@ describe("members", () => {
     });
   });
 
-  it("explains an unknown email rather than showing a bare 404", async () => {
+  it("offers only people who aren't already in the space", async () => {
+    await openSharing();
+    await screen.findByText("Grace");
+    const picker = await screen.findByLabelText(/person to add/i);
+    const options = within(picker)
+      .getAllByRole("option")
+      .map((o) => o.getAttribute("value"));
+    // Ada owns it and Grace is a member; only Alan is left.
+    expect(options).toEqual(["", "alan@example.com"]);
+  });
+
+  it("says so when there is nobody left to add", async () => {
     mockFetch({
       "/api/me/spaces": { body: [OWNED] },
       "/api/spaces/u-abc/members": { body: MEMBERS },
+      // Just the owner and the existing member — nobody left to add.
+      "/api/users": { body: [DIRECTORY[0], DIRECTORY[2]] },
     });
     renderWithProviders(<SpacesSection user={makeMe()} />);
     await screen.findByText("My shelf");
     await userEvent.click(screen.getByRole("button", { name: /sharing/i }));
     await screen.findByText("Grace");
 
+    const picker = await screen.findByLabelText(/person to add/i);
+    expect(picker).toBeDisabled();
+    expect(picker).toHaveTextContent(/everyone already has access/i);
+  });
+
+  it("still lists people when the space has only its owner", async () => {
     mockFetch({
       "/api/me/spaces": { body: [OWNED] },
-      "/api/spaces/u-abc/members": { status: 404 },
+      "/api/spaces/u-abc/members": { body: [MEMBERS[0]] },
+      "/api/users": { body: DIRECTORY },
     });
-    await userEvent.type(
-      screen.getByLabelText(/email of the person to add/i),
-      "ghost@example.com",
-    );
-    await userEvent.click(screen.getByRole("button", { name: /^add$/i }));
+    renderWithProviders(<SpacesSection user={makeMe()} />);
+    await screen.findByText("My shelf");
+    await userEvent.click(screen.getByRole("button", { name: /sharing/i }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      /has signed in to this instance yet/i,
-    );
+    const picker = await screen.findByLabelText(/person to add/i);
+    const options = within(picker)
+      .getAllByRole("option")
+      .map((o) => o.getAttribute("value"));
+    // Ada owns it, so she's excluded; the other two remain, in the order
+    // the directory returned them.
+    expect(options).toEqual(["", "alan@example.com", "grace@example.com"]);
   });
 
   it("changes a member's role", async () => {
@@ -227,7 +258,12 @@ describe("members", () => {
   it("never offers owner as an assignable role", async () => {
     await openSharing();
     await screen.findByText("Grace");
-    for (const select of screen.getAllByRole("combobox")) {
+    // Role selects only — the person picker is a combobox too.
+    const roleSelects = screen
+      .getAllByRole("combobox")
+      .filter((s) => /role/i.test(s.getAttribute("aria-label") ?? ""));
+    expect(roleSelects.length).toBeGreaterThan(0);
+    for (const select of roleSelects) {
       const options = within(select).getAllByRole("option").map((o) => o.textContent);
       expect(options).toEqual(["viewer", "editor"]);
     }
