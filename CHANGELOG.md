@@ -2,6 +2,70 @@
 
 
 
+## v0.4.0 (2026-09-15)
+
+### Feature
+
+* feat: add admin/user roles and multi-account switching
+
+Shelf had no global role: every authorization check was &#34;does the caller
+own the space that owns this row?&#34;, and api/extraction.py said so out
+loud. It also carried exactly one identity per session, so someone with
+two OIDC accounts had to sign out and back in to move between them.
+
+Roles
+
+  users.role (&#39;admin&#39; | &#39;user&#39;), TEXT with a CHECK rather than a boolean
+  so a third role needs no migration. Named role, not scopes:
+  api_tokens.scopes already owns that word for bearer permissions.
+
+  SHELF_ADMIN_EMAILS promotes on login and never demotes, so in-app
+  changes stick and editing the env cannot strip anyone. `pixi run
+  grant-admin &lt;email&gt;` is the escape hatch when a restart is not
+  practical. Admin is cookie-session only; no token scope grants it.
+
+  The role is re-read from the database per request rather than baked
+  into the session, so a demotion lands on the next request instead of
+  at session expiry.
+
+Account switching
+
+  The session JWT gains an `accts` claim listing every identity linked
+  to this browser session. It is inside the signature, and only a
+  completed OIDC callback can add to it, so a cookie cannot be edited
+  into reaching an account its owner never authenticated as.
+
+  /auth/link/{provider} sends prompt=select_account, without which a
+  provider with an active session signs the same account straight back
+  in and linking a second one is unreachable. Switching re-uses the
+  original expiry: sessions are stateless and unrevocable, so sliding it
+  on every switch would make one immortal.
+
+  /api/me reports each account&#39;s idps, letting the SPA send &#34;switch
+  user&#34; to the right provider&#39;s picker instead of asking which.
+
+Settings
+
+  Rebuilt as tabs - Account, Appearance, Documents, API tokens, and
+  Admin for admins. The tab is a route segment, so it is linkable and
+  survives the reload the switcher performs. /admin redirects to
+  /settings/admin.
+
+Frontend testing
+
+  The SPA had no tests and no CI at all. Adds vitest + Testing Library
+  on jsdom (62 tests) and a workflow running typecheck and the suite.
+  Hard navigations move into lib/navigation.ts, both to document the
+  &#34;reload, do not router-navigate&#34; decision in one place and because
+  jsdom cannot otherwise intercept them. ([`41f5f5d`](https://github.com/Krande/shelf/commit/41f5f5d6adc824fc25a482798c36c5ba2b1de16d))
+
+### Unknown
+
+* Merge pull request #5 from Krande/feat/user-roles-and-account-switching
+
+feat: add admin/user roles and multi-account switching ([`c702c88`](https://github.com/Krande/shelf/commit/c702c8836d895e14cef6388112cc5ea113dee0f1))
+
+
 ## v0.3.0 (2026-09-14)
 
 ### Feature
