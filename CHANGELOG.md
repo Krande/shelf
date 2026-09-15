@@ -2,6 +2,121 @@
 
 
 
+## v0.5.0 (2026-09-15)
+
+### Feature
+
+* feat(reader): deep-link an annotation with ?annotation=&lt;id&gt;
+
+Page was the finest thing a shelf URL could address. ?find= looks like an
+anchor but is a search: it lands on the first textual match, or nowhere
+at all if OCR mangled the word, and nothing in the URL says which
+occurrence was meant.
+
+Annotations are the one sub-page object shelf already identifies. They
+carry a stable id and rects in PDF user-space, chosen so they survive
+zoom and DPI differences, so they resolve to the same passage for
+everyone who can open the space.
+
+  * ?annotation=&lt;id&gt; opens the document at that highlight and rings it,
+    gated on heightsReady for the same reason ?page= is - scrolling
+    before the virtualizer can measure lands on the wrong offset.
+  * Copy link in the highlights panel produces the URL, falling back to
+    a prompt where the clipboard API is unavailable (it needs a secure
+    context, which a plain-http instance has not got).
+  * The ring is drawn with outline, not border, so it costs no layout
+    and cannot nudge the rect out of alignment with the glyphs beneath.
+    prefers-reduced-motion keeps the ring and drops the pulse.
+
+Tables, figures and equations stay unaddressable: nothing extracts them
+as objects, so there is no id to put in a URL. ([`87041cd`](https://github.com/Krande/shelf/commit/87041cd46421769629b1b70b65557aad278d259c))
+
+* feat(spaces): pick members from a directory of registered users ([`2a304ab`](https://github.com/Krande/shelf/commit/2a304aba1f5852c8dc018f74959c250ba412a3c3))
+
+* feat(spaces): let admins create shared spaces ([`ab724ef`](https://github.com/Krande/shelf/commit/ab724ef46bdae1c60f444b1f5b08a381031f1976))
+
+* feat(auth): add SHELF_DEV_LOGIN_ROLE so local dev has an admin ([`4a8857e`](https://github.com/Krande/shelf/commit/4a8857e47c57a2ba2120f35edab520cb8b5db27a))
+
+* feat: add per-space roles, space-scoped storage keys and a configurable subject claim
+
+Spaces have been &#34;the unit of ownership and sharing&#34; in name only: the
+schema carried a space_memberships table since 0001 that nothing read or
+wrote, and every permission check in the app was the same line repeated
+in nine routers - does the caller own the space that owns this row?
+
+Per-space roles
+
+  viewer reads, editor writes, owner also manages membership. The
+  repeated ownership check becomes auth/spaces.py, and each endpoint
+  declares the role it needs, so a read path and a write path in the
+  same router no longer share one answer.
+
+  Space.owner_id stays authoritative for the creator: always owner, no
+  membership row, nothing to delete that would lock them out. Owner is
+  therefore not assignable through the API.
+
+  A caller with no role gets 404 - a space you cannot see should not be
+  confirmed to exist. A caller whose role is merely too low gets 403,
+  naming the role required, since they already know it is there.
+
+  Instance admins get nothing here. Handing out roles and reading
+  everybody&#39;s library are different powers, and conflating them would
+  make the admin role far more dangerous than it looks.
+
+  Bulk operations take writable_space_ids rather than readable: a rescan
+  or an orphan sweep that quietly included read-only spaces would be a
+  privilege escalation even with every individual endpoint correct.
+
+Space-scoped storage keys
+
+  New attachments are written to spaces/{space_id}/items/{item_id}/... so
+  a bucket policy, lifecycle rule or per-space sweep can address one
+  space&#39;s objects without consulting the database.
+
+  New registrations only. Keys are stored per row, so anything written
+  under the older flat items/{id}/... layout keeps working untouched -
+  no rewrite, no dual-read path. Derivation and .original keys extend
+  the parent key, so they follow whichever layout their attachment has.
+
+Configurable subject claim
+
+  OIDCProvider gains subject_claim, defaulting to &#34;sub&#34;. Azure AD needs
+  &#34;oid&#34;: its sub is pairwise, a different value per application
+  registration, so the same person looks like a different subject to
+  every app. Falls back to sub when the configured claim is absent
+  rather than locking those users out.
+
+Also: membership management under Settings -&gt; Spaces, /api/me/spaces now
+reports the caller&#39;s role per space and includes spaces they were added
+to, and the library hides write controls in a read-only space. ([`d18e37c`](https://github.com/Krande/shelf/commit/d18e37cdacaac9ba31b5bda32735efe97dacaf6d))
+
+### Fix
+
+* fix(auth): make the link prompt per-provider and handle provider errors ([`d0f22ec`](https://github.com/Krande/shelf/commit/d0f22ec85a4dbe10e06746c27e42f578ec31143d))
+
+### Unknown
+
+* Merge pull request #6 from Krande/feat/space-roles-and-scoped-storage
+
+feat: add per-space roles, space-scoped storage keys and a configurable subject claim ([`9560c28`](https://github.com/Krande/shelf/commit/9560c283741b5bedf34cc0e1bbcb681dce969b9c))
+
+* refactor(auth): move session JWTs off the deprecated authlib.jose
+
+authlib warns that authlib.jose will not survive its 2.0, and joserfc is
+already a declared dependency. Moving session.py across also lets two
+things be tightened that the old call could not express:
+
+  * the algorithm is pinned at verify time rather than read from the
+    token&#39;s own header, so a forgery cannot choose how it is checked;
+  * exp is now an essential claim, so a token issued without one is
+    rejected instead of never expiring.
+
+Note this does NOT silence the startup notice: authlib emits it from its
+own internals (_joserfc_helpers imports authlib.jose), so it stays until
+authlib 2.0 lands. What it does mean is that shelf itself no longer
+depends on the removed API. ([`94fa7fe`](https://github.com/Krande/shelf/commit/94fa7fe4c54b719642bcb2a5f02202c8110c1e25))
+
+
 ## v0.4.0 (2026-09-15)
 
 ### Feature
