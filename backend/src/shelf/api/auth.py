@@ -12,6 +12,7 @@ active. The set lives in the signed session cookie, so the only way in
 is a completed login in this browser — see `auth/session.py`.
 """
 
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated
@@ -30,6 +31,7 @@ from ..auth.oidc import (
     claims_to_subject,
     is_known_provider,
     oauth,
+    provider_config,
     provider_names,
     upsert_user_from_claims,
 )
@@ -38,6 +40,8 @@ from ..auth.session import InvalidSessionError, issue_session, parse_session
 from ..config import settings
 from ..db import get_session
 from ..models import Space, User
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["auth"])
 
@@ -97,10 +101,12 @@ async def link(
 ) -> Response:
     """Start a code flow that *adds* an identity to the current session.
 
-    `prompt=select_account` is load-bearing. Without it a provider that
-    already has an active browser session (Entra in particular) signs the
-    same account straight back in, and linking a second one is simply not
-    reachable through the UI.
+    The `prompt` is load-bearing: without it a provider that already has
+    an active browser session signs the same account straight back in,
+    and linking a second one is unreachable through the UI. It defaults
+    to the standard `select_account` and is per-provider configurable,
+    since not every provider implements that value — see
+    `OIDCProvider.link_prompt`.
     """
     if not is_known_provider(provider):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown OIDC provider")
@@ -109,8 +115,13 @@ async def link(
     request.session[_LINK_INTENT] = True
     client = oauth.create_client(provider)
     redirect_uri = f"{settings.public_base_url.rstrip('/')}/auth/callback/{provider}"
+
+    config = provider_config(provider)
+    prompt = (config.link_prompt if config is not None else "select_account").strip()
+    extra = {"prompt": prompt} if prompt else {}
+
     response: Response = await client.authorize_redirect(
-        request, redirect_uri, prompt="select_account"
+        request, redirect_uri, **extra
     )
     return response
 
@@ -127,8 +138,41 @@ async def callback(
     linking = bool(request.session.pop(_LINK_INTENT, False))
     client = oauth.create_client(provider)
 
+    # The provider can decline instead of returning a code — the user
+    # cancelled at the consent screen, or the provider rejected something
+    # we asked for. `account_selection_required` is the one to expect
+    # here: a spec-compliant provider that cannot honour
+    # prompt=select_account returns exactly that, and the fix is to set a
+    # different `link_prompt` for it. Let that say so rather than
+    # surfacing as an unhandled exception and a 500.
+    error = request.query_params.get("error")
+    if error:
+        detail = request.query_params.get("error_description") or error
+        if error == "account_selection_required":
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"{provider} does not support prompt=select_account. Set "
+                f'"link_prompt": "login" (or "") for it in '
+                f"SHELF_OIDC_PROVIDERS.",
+            )
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, f"{provider} returned an error: {detail}"
+        )
+
     token = await client.authorize_access_token(request)
-    claims = token.get("userinfo") or {}
+
+    # authlib inlines the id_token's claims as `userinfo` when the
+    # provider returns one. Not all do — and some return an id_token too
+    # thin to identify the user — so fall back to the userinfo endpoint
+    # rather than failing a provider that is behaving perfectly legally.
+    claims = dict(token.get("userinfo") or {})
+    if claims_to_subject(claims, provider) is None:
+        try:
+            claims = dict(await client.userinfo(token=token))
+        except Exception:
+            # Leave `claims` as-is; the subject check below reports it.
+            log.warning("userinfo lookup failed for provider %r", provider)
+
     sub = claims_to_subject(claims, provider)
     if sub is None:
         raise HTTPException(

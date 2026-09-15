@@ -184,22 +184,47 @@ SHELF_OIDC_PROVIDERS='[{"name":"authentik","issuer":"https://authentik.example.c
 
 Register the redirect URI as `{SHELF_PUBLIC_BASE_URL}/auth/callback/{name}`, where `name` is the provider's label in the JSON above — so the example needs `https://shelf.example.com/auth/callback/authentik`. On first login shelf creates the user, the identity record, and a personal space; later logins match on `(idp, subject)`, so a user keeps their library if their email changes.
 
-### Which claim identifies the user
+### Per-provider tuning
 
-`subject_claim` picks the claim shelf keys identities on. It defaults to `sub`,
-which is right for most providers. **Azure AD / Entra needs `"oid"`**: its `sub`
-is pairwise — a different value per application registration — so the same
-person looks like a different subject to every app, while `oid` is stable across
-the tenant.
+Two optional fields exist for providers that deviate from the common case. Both
+default to what a standards-compliant provider expects, so Authentik, Keycloak,
+Google and most others need neither.
 
-```
-SHELF_OIDC_PROVIDERS='[{"name":"entra","issuer":"https://login.microsoftonline.com/<tenant>/v2.0","client_id":"...","client_secret":"...","subject_claim":"oid"}]'
-```
+| Field | Default | Set it when |
+|---|---|---|
+| `subject_claim` | `sub` | the provider's `sub` isn't stable for a user across applications |
+| `link_prompt` | `select_account` | the provider doesn't implement that `prompt` value |
+
+**`subject_claim`** picks the claim shelf keys identities on. Azure AD / Entra
+needs `"oid"`: its `sub` is pairwise — a different value per application
+registration — so the same person looks like a different subject to every app,
+while `oid` is stable across the tenant.
 
 Changing this on a running instance changes what gets matched in `identities`,
 so existing users arrive as a new `(idp, subject)` pair. They're re-linked by
 email on next login and keep their library, as long as the address still
 matches.
+
+**`link_prompt`** is the `prompt` sent when adding a second account. The default
+`select_account` is standard OIDC and makes the provider show its account
+picker; without it, a provider that keeps you signed in silently returns the
+same account and linking a second one is impossible. A provider that doesn't
+implement it returns `account_selection_required` — shelf reports that with the
+fix in the message. Set `"login"` there instead (universally supported; forces
+re-authentication so a different account can be entered), or `""` to send no
+prompt.
+
+```
+# A provider on the defaults needs nothing extra:
+SHELF_OIDC_PROVIDERS='[{"name":"authentik","issuer":"https://authentik.example.com/application/o/shelf/","client_id":"...","client_secret":"..."}]'
+
+# Entra wants both:
+SHELF_OIDC_PROVIDERS='[{"name":"entra","issuer":"https://login.microsoftonline.com/<tenant>/v2.0","client_id":"...","client_secret":"...","subject_claim":"oid"}]'
+```
+
+Several providers can be configured at once; the login page lists each, and the
+account switcher sends "switch user" to whichever one the active account signed
+in with.
 
 Behind a reverse proxy, uvicorn needs `--proxy-headers --forwarded-allow-ips='*'` so redirect URIs are built as `https://…` and match what the IdP has registered. The Dockerfile already does this.
 

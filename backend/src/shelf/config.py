@@ -22,6 +22,19 @@ class OIDCProvider(BaseModel):
     # — they keep their library as long as the address still matches.
     subject_claim: str = "sub"
 
+    # `prompt` sent when linking a second account (/auth/link/{provider}).
+    #
+    # "select_account" is standard OIDC (Core 1.0 §3.1.2.1) and is what
+    # makes a provider offer its account picker rather than silently
+    # re-using the session it already has — without it, linking a second
+    # account is unreachable on any provider that keeps you signed in.
+    #
+    # Not every provider implements it, though, and a spec-compliant one
+    # that cannot returns `account_selection_required`. Set "login" there
+    # (universally supported: forces re-authentication, so a different
+    # account can be entered) or "" to send no prompt at all.
+    link_prompt: str = "select_account"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
