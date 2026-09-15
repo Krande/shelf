@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth.deps import get_current_user
+from ..auth.spaces import SPACE_ROLE_EDITOR, SPACE_ROLE_VIEWER, require_space_role
 from ..db import get_session
 from ..models import Item, Note, Space, User
 
@@ -69,19 +70,24 @@ class NoteResponse(BaseModel):
 
 
 async def _resolve_item(
-    db: AsyncSession, user: User, item_id: uuid.UUID
+    db: AsyncSession,
+    user: User,
+    item_id: uuid.UUID,
+    minimum: str = SPACE_ROLE_VIEWER,
 ) -> Item:
     item = await db.get(Item, item_id)
     if item is None or item.deleted_at is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
     space = await db.get(Space, item.space_id)
-    if space is None or space.owner_id != user.id:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
+    await require_space_role(db, space, user.id, minimum, label="Item not found")
     return item
 
 
 async def _resolve_note(
-    db: AsyncSession, user: User, note_id: uuid.UUID
+    db: AsyncSession,
+    user: User,
+    note_id: uuid.UUID,
+    minimum: str = SPACE_ROLE_VIEWER,
 ) -> Note:
     note = await db.get(Note, note_id)
     if note is None:
@@ -90,8 +96,7 @@ async def _resolve_note(
     if item is None or item.deleted_at is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Note not found")
     space = await db.get(Space, item.space_id)
-    if space is None or space.owner_id != user.id:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Note not found")
+    await require_space_role(db, space, user.id, minimum, label="Note not found")
     return note
 
 
@@ -123,7 +128,7 @@ async def create_note(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> Note:
-    await _resolve_item(db, user, item_id)
+    await _resolve_item(db, user, item_id, SPACE_ROLE_EDITOR)
     note = Note(
         item_id=item_id,
         content_html=payload.content_html,
@@ -142,7 +147,7 @@ async def update_note(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> Note:
-    note = await _resolve_note(db, user, note_id)
+    note = await _resolve_note(db, user, note_id, SPACE_ROLE_EDITOR)
     note.content_html = payload.content_html
     note.content_text = html_to_text(payload.content_html)
     note.updated_at = datetime.now(UTC)
@@ -159,6 +164,6 @@ async def delete_note(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
-    note = await _resolve_note(db, user, note_id)
+    note = await _resolve_note(db, user, note_id, SPACE_ROLE_EDITOR)
     await db.delete(note)
     await db.commit()

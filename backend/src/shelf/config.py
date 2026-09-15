@@ -8,6 +8,32 @@ class OIDCProvider(BaseModel):
     client_id: str
     client_secret: str
     scopes: list[str] = ["openid", "email", "profile"]
+    # Which claim identifies the user. `sub` is correct for most
+    # providers and is the default.
+    #
+    # Azure AD / Entra wants "oid": its `sub` is pairwise, a different
+    # value per application registration, so the same person signing in
+    # to two apps looks like two different subjects. `oid` is stable for
+    # the user across the whole tenant.
+    #
+    # Changing this on a live instance changes what gets matched in
+    # `identities`, so existing users arrive as a new (idp, subject) pair
+    # and are re-linked by the email fallback in `upsert_user_from_claims`
+    # — they keep their library as long as the address still matches.
+    subject_claim: str = "sub"
+
+    # `prompt` sent when linking a second account (/auth/link/{provider}).
+    #
+    # "select_account" is standard OIDC (Core 1.0 §3.1.2.1) and is what
+    # makes a provider offer its account picker rather than silently
+    # re-using the session it already has — without it, linking a second
+    # account is unreachable on any provider that keeps you signed in.
+    #
+    # Not every provider implements it, though, and a spec-compliant one
+    # that cannot returns `account_selection_required`. Set "login" there
+    # (universally supported: forces re-authentication, so a different
+    # account can be entered) or "" to send no prompt at all.
+    link_prompt: str = "select_account"
 
 
 class Settings(BaseSettings):
@@ -44,6 +70,18 @@ class Settings(BaseSettings):
     session_cookie_secure: bool = False
 
     dev_login_enabled: bool = True
+
+    # Role handed to accounts that sign in through /auth/dev-login.
+    #
+    # Defaults to "user", and deliberately so: dev_login_enabled is on by
+    # default, and an instance that forgot to turn it off already mints a
+    # session for any address presented. Making those sessions admin by
+    # default would turn that footgun into an instant-admin one.
+    #
+    # `pixi run up` sets this to "admin" for the backend it launches, so a
+    # fresh checkout can actually reach the Admin tab without hand-editing
+    # env first. Only consulted when dev_login_enabled is true.
+    dev_login_role: str = "user"
 
     # Emails promoted to the admin role on login. Bootstrap only: it
     # promotes and never demotes, so roles changed in the UI stick and

@@ -398,7 +398,10 @@ async def test_v1_uploads_register_returns_presigned_url(
     )
     assert r.status_code == 201, r.text
     body = r.json()
-    assert body["upload_url"].startswith("https://memory/upload/items/")
+    # New attachments key off the space, so a bucket policy or lifecycle
+    # rule can address one space's objects without a database lookup.
+    assert body["upload_url"].startswith("https://memory/upload/spaces/")
+    assert f"/items/{body['item']['id']}/attachments/" in body["upload_url"]
     assert body["item"] is not None
     assert body["item"]["item_type"] == "document"
     assert body["item"]["data"]["title"] == "Migrated Paper"

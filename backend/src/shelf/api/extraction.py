@@ -9,9 +9,11 @@ Surfaces three things to the SPA's settings page:
 * a "rescan" button that re-publishes extraction jobs for any rows
   in the chosen states. Both bulk and per-row variants exist.
 
-All endpoints are scoped to attachments under spaces the caller owns
-— same auth model as the rest of /api/me. There's no global admin
-role; multi-tenant operation lands the day shelf grows one.
+All endpoints are scoped to attachments under spaces the caller can
+reach — same auth model as the rest of /api/me. Reads span every
+readable space; the rescans are writes and so span only writable ones,
+since a viewer membership must not let someone queue work in a space
+they can only look at.
 """
 
 import uuid
@@ -24,6 +26,12 @@ from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth.deps import get_current_user
+from ..auth.spaces import (
+    SPACE_ROLE_EDITOR,
+    readable_space_ids,
+    require_space_role,
+    writable_space_ids,
+)
 from ..db import get_session
 from ..models import Attachment, ExtractionStatus, Item, Space, User
 from ..services import queue
@@ -88,9 +96,9 @@ def _scoped_attachments_query() -> Any:
 
 
 def _scope_filter(stmt: Any, user_id: uuid.UUID) -> Any:
-    """Restrict a query to attachments under spaces the user owns."""
+    """Restrict a query to attachments in spaces the caller can read."""
     return stmt.where(
-        Space.owner_id == user_id,
+        Space.id.in_(readable_space_ids(user_id)),
         Attachment.content_type == PDF_CONTENT_TYPE,
         Attachment.uploaded_at.is_not(None),
     )
@@ -119,7 +127,7 @@ async def stats(
         .join(Item, Item.id == Attachment.item_id)
         .join(Space, Space.id == Item.space_id)
         .where(
-            Space.owner_id == user.id,
+            Space.id.in_(readable_space_ids(user.id)),
             Attachment.content_type == PDF_CONTENT_TYPE,
             Attachment.uploaded_at.is_not(None),
         )
@@ -210,7 +218,10 @@ async def rescan(
         .join(Item, Item.id == Attachment.item_id)
         .join(Space, Space.id == Item.space_id)
         .where(
-            Space.owner_id == user.id,
+            # Writable, not merely readable: a rescan re-enqueues work
+            # against the attachment, so a viewer membership must not
+            # sweep the space in.
+            Space.id.in_(writable_space_ids(user.id)),
             Attachment.content_type == PDF_CONTENT_TYPE,
             Attachment.uploaded_at.is_not(None),
         )
@@ -268,8 +279,9 @@ async def rescan_one(
     if item is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Attachment not found")
     space = await db.get(Space, item.space_id)
-    if space is None or space.owner_id != user.id:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Attachment not found")
+    await require_space_role(
+        db, space, user.id, SPACE_ROLE_EDITOR, label="Attachment not found"
+    )
     if att.content_type != PDF_CONTENT_TYPE:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,

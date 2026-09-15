@@ -9,8 +9,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth.deps import get_current_user, get_session_claims
 from ..auth.session import SessionClaims
+from ..auth.spaces import (
+    SPACE_ROLE_OWNER,
+    SPACE_ROLE_VIEWER,
+    readable_space_ids,
+    writable_space_ids,
+)
 from ..db import get_session
-from ..models import Attachment, Identity, Item, Space, User
+from ..models import Attachment, Identity, Item, Space, SpaceMembership, User
 from ..services import storage
 
 router = APIRouter(tags=["auth"])
@@ -44,6 +50,9 @@ class SpaceResponse(BaseModel):
     slug: str
     name: str
     is_personal: bool
+    # The caller's role in this space: viewer, editor or owner.
+    role: str
+    is_owner: bool
 
 
 @router.get("/api/me", response_model=MeResponse)
@@ -98,19 +107,43 @@ async def my_spaces(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> list[SpaceResponse]:
-    # Phase 1: only spaces the user owns. Membership-based access (shared
-    # spaces) lands in Phase 2 with the SpaceMembership join.
-    result = await db.execute(
-        select(Space).where(Space.owner_id == user.id).order_by(Space.created_at)
-    )
+    """Spaces the caller can see: their own, plus any they've been added
+    to. Each carries the caller's role, so the SPA can hide controls it
+    knows the API would refuse."""
+    spaces = (
+        await db.execute(
+            select(Space)
+            .where(Space.id.in_(readable_space_ids(user.id)))
+            .order_by(Space.created_at)
+        )
+    ).scalars().all()
+
+    # One lookup for every membership rather than a role query per space.
+    member_roles = {
+        space_id: role
+        for space_id, role in (
+            await db.execute(
+                select(SpaceMembership.space_id, SpaceMembership.role).where(
+                    SpaceMembership.user_id == user.id
+                )
+            )
+        ).all()
+    }
+
     return [
         SpaceResponse(
             id=str(s.id),
             slug=s.slug,
             name=s.name,
             is_personal=s.slug.startswith("u-"),
+            role=(
+                SPACE_ROLE_OWNER
+                if s.owner_id == user.id
+                else member_roles.get(s.id, SPACE_ROLE_VIEWER)
+            ),
+            is_owner=s.owner_id == user.id,
         )
-        for s in result.scalars().all()
+        for s in spaces
     ]
 
 
@@ -128,7 +161,7 @@ async def cleanup_orphan_attachments(
     older_than_minutes: Annotated[int, Query(ge=1, le=24 * 60)] = 60,
 ) -> OrphanCleanupResult:
     """Delete attachment rows still pending (uploaded_at NULL) on items
-    in spaces the caller owns.
+    in spaces the caller can write to.
 
     Pending rows happen when a client crashes between /register and
     PUT, or between PUT and /complete — the row sticks around showing
@@ -145,7 +178,9 @@ async def cleanup_orphan_attachments(
             .join(Item, Item.id == Attachment.item_id)
             .join(Space, Space.id == Item.space_id)
             .where(
-                Space.owner_id == user.id,
+                # Writable: this deletes rows, so a viewer membership must
+                # not pull another space's orphans into the sweep.
+                Space.id.in_(writable_space_ids(user.id)),
                 Attachment.uploaded_at.is_(None),
                 Attachment.created_at < cutoff,
             )

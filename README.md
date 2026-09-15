@@ -9,7 +9,7 @@ I wanted a reference manager I could run on my own hardware, that kept the PDFs 
 ## What's in it
 
 - Items with type-specific metadata (JSONB, so item types change without a migration), nested collections, tags, notes, creators.
-- An in-browser PDF reader with annotations, a generated outline, and pinch-zoom.
+- An in-browser PDF reader with annotations, a generated outline, and pinch-zoom. Highlights are linkable — **Copy link** on one gives a URL that opens the document at that passage and rings it.
 - Search over item metadata and the text extracted from each PDF page, using Postgres `tsvector` + GIN with trigram indexes for fuzzy title matching. No separate search service.
 - Background OCR and text extraction: Tesseract (via `ocrmypdf`) on CPU, and optionally [olmOCR](https://github.com/allenai/olmocr) on a GPU host for scans Tesseract mangles. Originals are kept; OCR output becomes a new version you can switch between.
 - Export to BibTeX, CSL-JSON, and Zotero RDF — the last optionally bundled as a ZIP with the files, in the layout Zotero's own translator produces.
@@ -182,16 +182,63 @@ Providers are a JSON list and none is special-cased — Authentik, Keycloak, Ent
 SHELF_OIDC_PROVIDERS='[{"name":"authentik","issuer":"https://authentik.example.com/application/o/shelf/","client_id":"...","client_secret":"..."}]'
 ```
 
-Register the redirect URI as `{SHELF_PUBLIC_BASE_URL}/auth/callback/{name}`, where `name` is the provider's label in the JSON above — so the example needs `https://shelf.example.com/auth/callback/authentik`. On first login shelf creates the user, the identity record, and a personal space; later logins match on `(idp, sub)`, so a user keeps their library if their email changes.
+Register the redirect URI as `{SHELF_PUBLIC_BASE_URL}/auth/callback/{name}`, where `name` is the provider's label in the JSON above — so the example needs `https://shelf.example.com/auth/callback/authentik`. On first login shelf creates the user, the identity record, and a personal space; later logins match on `(idp, subject)`, so a user keeps their library if their email changes.
+
+### Per-provider tuning
+
+Two optional fields exist for providers that deviate from the common case. Both
+default to what a standards-compliant provider expects, so Authentik, Keycloak,
+Google and most others need neither.
+
+| Field | Default | Set it when |
+|---|---|---|
+| `subject_claim` | `sub` | the provider's `sub` isn't stable for a user across applications |
+| `link_prompt` | `select_account` | the provider doesn't implement that `prompt` value |
+
+**`subject_claim`** picks the claim shelf keys identities on. Azure AD / Entra
+needs `"oid"`: its `sub` is pairwise — a different value per application
+registration — so the same person looks like a different subject to every app,
+while `oid` is stable across the tenant.
+
+Changing this on a running instance changes what gets matched in `identities`,
+so existing users arrive as a new `(idp, subject)` pair. They're re-linked by
+email on next login and keep their library, as long as the address still
+matches.
+
+**`link_prompt`** is the `prompt` sent when adding a second account. The default
+`select_account` is standard OIDC and makes the provider show its account
+picker; without it, a provider that keeps you signed in silently returns the
+same account and linking a second one is impossible. A provider that doesn't
+implement it returns `account_selection_required` — shelf reports that with the
+fix in the message. Set `"login"` there instead (universally supported; forces
+re-authentication so a different account can be entered), or `""` to send no
+prompt.
+
+```
+# A provider on the defaults needs nothing extra:
+SHELF_OIDC_PROVIDERS='[{"name":"authentik","issuer":"https://authentik.example.com/application/o/shelf/","client_id":"...","client_secret":"..."}]'
+
+# Entra wants both:
+SHELF_OIDC_PROVIDERS='[{"name":"entra","issuer":"https://login.microsoftonline.com/<tenant>/v2.0","client_id":"...","client_secret":"...","subject_claim":"oid"}]'
+```
+
+Several providers can be configured at once; the login page lists each, and the
+account switcher sends "switch user" to whichever one the active account signed
+in with.
 
 Behind a reverse proxy, uvicorn needs `--proxy-headers --forwarded-allow-ips='*'` so redirect URIs are built as `https://…` and match what the IdP has registered. The Dockerfile already does this.
 
 ## Roles and accounts
 
-Two roles, `user` and `admin`. Everyone is a `user`; admins additionally get an
-Admin tab in Settings, which lists everyone on the instance and hands out roles.
-Admin is a cookie-session thing — no API token scope grants it, so a leaked
-script token can't reach those routes.
+Two *instance* roles, `user` and `admin`. Everyone is a `user`; admins
+additionally get an Admin tab in Settings, which lists everyone on the instance
+and hands out roles. Admin is a cookie-session thing — no API token scope grants
+it, so a leaked script token can't reach those routes.
+
+Being an admin does **not** grant access to anyone's spaces. Handing out roles
+and reading everybody's library are different powers, and keeping them apart
+makes the admin role far less dangerous to hold. An admin who needs a space asks
+its owner, like anyone else.
 
 A fresh instance has no admin. Name yourself in `SHELF_ADMIN_EMAILS` and log in;
 the role is granted on login and then lives in the database, so removing the
@@ -199,6 +246,18 @@ address later doesn't take it away. `pixi run grant-admin <email>` does the same
 to an existing user without a restart, and `--revoke` reverses it. The last
 remaining admin can't be demoted through the UI, so an instance can't lock
 itself out by accident.
+
+**In local development** you get an admin without any of that: `pixi run up`
+sets `SHELF_DEV_LOGIN_ROLE=admin` for the backend it launches, so accounts made
+through the dev-login form are admins and the Admin tab is there to look at. The
+setting defaults to `user` everywhere else, and deliberately — dev login mints a
+session for any address presented, so defaulting it to `admin` would turn
+"forgot to switch dev login off" into "anyone who can reach this is an admin".
+Set it explicitly in `backend/.env` or the shell to override what `up` picks.
+
+Like `SHELF_ADMIN_EMAILS` it only ever grants. Env can hand out a role; only the
+admin UI or `pixi run grant-admin --revoke` takes one back. A knob that demoted
+would quietly strip, at the next sign-in, a role you'd set on purpose.
 
 Roles are read from the database on every request, so a change takes effect on
 the next one rather than whenever the session happens to expire.
@@ -217,6 +276,64 @@ The linked set lives in the session cookie, so it only ever contains accounts
 that completed a login in this browser, and it lasts as long as the session.
 Signing out clears all of them at once; unlink one from Settings to drop just
 that one.
+
+## Linking into a document
+
+The reader reads three query params:
+
+| Param | Points at |
+|---|---|
+| `?page=N` | a page. Written back as you scroll, so reload and back/forward restore your position |
+| `?annotation=<id>` | a highlight — its page, plus a ring on the passage itself |
+| `?find=term` | opens the find toolbar pre-filled. A search, not an address: it lands on the first textual match, or nowhere if OCR mangled the word |
+
+`?annotation=` is the precise one. Annotations carry rects in PDF
+user-space, which survive zoom, re-render and DPI differences, so the link
+resolves to the same passage for everyone who can open the space. Get one from
+**Copy link** in the highlights panel.
+
+Nothing smaller than that is addressable: shelf never extracts tables, figures
+or equations as objects, so there's no identifier to put in a URL for them.
+`?page=N&find=Table%203.1` is the honest workaround and it is a guess, not an
+anchor.
+
+## Sharing a space
+
+Spaces are the unit of sharing. Each one has a creator, who is always its owner,
+plus any number of members at one of two levels:
+
+| Role | Can |
+|---|---|
+| `viewer` | read items, attachments, notes and tags; search; export |
+| `editor` | all of the above, plus create, edit and delete content |
+| `owner` | all of the above, plus manage who has access |
+
+Owner belongs to the creator and isn't assignable — there's no second owner, and
+no membership row to delete that would lock the creator out of their own space.
+An editor can fill a space but can't widen access to it, so "who else can see
+this" stays the owner's decision.
+
+Everyone gets a personal space at first login. **Admins can create additional
+shared spaces** from Settings → Spaces — the creator owns it and picks who else
+is in it. Creation is admin-gated because spaces are cheap to make and awkward
+to clean up; making a space still grants nothing over spaces other people own.
+
+Manage members under Settings → Spaces. You pick people from a dropdown of
+everyone with an account; someone has to have signed in at least once before
+they can be added. Removing someone revokes their access but leaves the content
+they created — it belongs to the space, not to them.
+
+That dropdown is backed by `GET /api/users`, which **any signed-in user can
+read**: it lists every account's display name and email address. Everyone owns
+their personal space and so may need to share it, which is why it isn't
+admin-only. Nothing else is exposed — no roles, no identities, nothing about
+anyone's library — but if you hand out accounts to people who shouldn't see each
+other's addresses, this is the endpoint to put behind something narrower.
+
+Attachments uploaded from now on are stored under `spaces/{space_id}/…`, so a
+bucket policy or lifecycle rule can address one space's objects without going
+through the database. Existing objects keep their original keys and are not
+rewritten; keys are stored per row, so both layouts coexist.
 
 ## Background workers
 

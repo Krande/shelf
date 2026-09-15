@@ -20,10 +20,13 @@ from .api import (
     extraction,
     items,
     me,
+    members,
     notes,
     processing,
+    spaces,
     tags,
     tokens,
+    users,
     v1,
     worker_api,
 )
@@ -75,6 +78,9 @@ app.include_router(auth.router)
 app.include_router(me.router)
 app.include_router(admin.router)
 app.include_router(items.router)
+app.include_router(spaces.router)
+app.include_router(members.router)
+app.include_router(users.router)
 app.include_router(collections.router)
 app.include_router(attachments.router)
 app.include_router(annotations.router)

@@ -11,14 +11,31 @@ Assumes Postgres is reachable at SHELF_DATABASE_URL and the schema has
 been migrated (`pixi run alembic-up`).
 """
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 
+import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 
+from shelf.config import settings
 from shelf.db import engine
 from shelf.main import app
+
+
+@pytest.fixture(autouse=True)
+def _shipped_role_defaults(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Pin the role knobs to their shipped defaults for every test.
+
+    `pixi run test` reads backend/.env, and `pixi run up` encourages
+    SHELF_DEV_LOGIN_ROLE=admin locally — without this, a developer whose
+    .env carries it would see every "a new account is not an admin"
+    assertion fail for reasons that have nothing to do with their change.
+    Tests that care about other values set them explicitly.
+    """
+    monkeypatch.setattr(settings, "dev_login_role", "user")
+    monkeypatch.setattr(settings, "admin_emails", [])
+    yield
 
 _TABLES_TO_TRUNCATE = (
     "api_tokens",

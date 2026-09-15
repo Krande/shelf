@@ -23,10 +23,18 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.types import String
 
+from ..auth.spaces import (
+    SPACE_ROLE_EDITOR,
+    SPACE_ROLE_VIEWER,
+    readable_space_ids,
+    require_space_role,
+    writable_space_ids,
+)
 from ..auth.tokens import TokenAuth, require_scope
 from ..db import get_session
 from ..models import ApiToken, Attachment, Collection, Item, ItemCollection, Space
 from ..services import extraction, storage
+from ..services.storage import attachment_storage_key
 
 router = APIRouter(tags=["v1"], prefix="/api/v1")
 
@@ -62,14 +70,21 @@ class AttachmentSummary(BaseModel):
 
 
 async def _resolve_owned_item(
-    db: AsyncSession, auth: TokenAuth, item_id: uuid.UUID
+    db: AsyncSession,
+    auth: TokenAuth,
+    item_id: uuid.UUID,
+    minimum: str = SPACE_ROLE_VIEWER,
 ) -> Item:
+    """A token acts as the user who minted it, so it reaches exactly the
+    spaces that user can — their own plus any they're a member of. The
+    token's own scopes and collection allow-list narrow it further."""
     item = await db.get(Item, item_id)
     if item is None or item.deleted_at is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
     space = await db.get(Space, item.space_id)
-    if space is None or space.owner_id != auth.user.id:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
+    await require_space_role(
+        db, space, auth.user.id, minimum, label="Item not found"
+    )
     return item
 
 
@@ -177,7 +192,7 @@ async def _resolve_or_create_item(
         )
 
     if item_id is not None:
-        item = await _resolve_owned_item(db, auth, item_id)
+        item = await _resolve_owned_item(db, auth, item_id, SPACE_ROLE_EDITOR)
         await _enforce_collection_scope(db, auth, item)
         return item, None
 
@@ -185,7 +200,8 @@ async def _resolve_or_create_item(
         space = (
             await db.execute(
                 select(Space).where(
-                    Space.slug == space_slug, Space.owner_id == auth.user.id
+                    Space.slug == space_slug,
+                    Space.id.in_(writable_space_ids(auth.user.id)),
                 )
             )
         ).scalar_one_or_none()
@@ -195,7 +211,7 @@ async def _resolve_or_create_item(
         space = (
             await db.execute(
                 select(Space)
-                .where(Space.owner_id == auth.user.id)
+                .where(Space.id.in_(writable_space_ids(auth.user.id)))
                 .order_by(Space.created_at)
             )
         ).scalars().first()
@@ -317,7 +333,9 @@ async def list_collections(
     token is collection-scoped. Each row carries a `path` so callers
     can look up by human-readable location instead of UUID."""
     spaces = (
-        await db.execute(select(Space.id).where(Space.owner_id == auth.user.id))
+        await db.execute(
+            select(Space.id).where(Space.id.in_(readable_space_ids(auth.user.id)))
+        )
     ).scalars().all()
     if not spaces:
         return []
@@ -377,10 +395,14 @@ async def create_collection(
                 status.HTTP_404_NOT_FOUND, "Parent collection not found"
             )
         space = await db.get(Space, parent.space_id)
-        if space is None or space.owner_id != auth.user.id:
-            raise HTTPException(
-                status.HTTP_404_NOT_FOUND, "Parent collection not found"
-            )
+        await require_space_role(
+            db,
+            space,
+            auth.user.id,
+            SPACE_ROLE_EDITOR,
+            label="Parent collection not found",
+        )
+        assert space is not None  # require_space_role raises when it isn't
         allowed = await _effective_allowed_collection_ids(db, auth.token)
         if allowed is not None and parent.id not in allowed:
             raise HTTPException(
@@ -401,7 +423,7 @@ async def create_collection(
                 await db.execute(
                     select(Space).where(
                         Space.slug == payload.space_slug,
-                        Space.owner_id == auth.user.id,
+                        Space.id.in_(writable_space_ids(auth.user.id)),
                     )
                 )
             ).scalar_one_or_none()
@@ -413,7 +435,7 @@ async def create_collection(
             space = (
                 await db.execute(
                     select(Space)
-                    .where(Space.owner_id == auth.user.id)
+                    .where(Space.id.in_(writable_space_ids(auth.user.id)))
                     .order_by(Space.created_at)
                 )
             ).scalars().first()
@@ -487,8 +509,9 @@ async def delete_collection(
     if coll is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Collection not found")
     space = await db.get(Space, coll.space_id)
-    if space is None or space.owner_id != auth.user.id:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Collection not found")
+    await require_space_role(
+        db, space, auth.user.id, SPACE_ROLE_EDITOR, label="Collection not found"
+    )
     allowed = await _effective_allowed_collection_ids(db, auth.token)
     if allowed is not None and coll.id not in allowed:
         raise HTTPException(
@@ -539,7 +562,7 @@ async def set_item_collections(
     when the token is collection-scoped — fall within the allow-list
     (with descendants) so the token can't fling items into folders it
     can't see."""
-    item = await _resolve_owned_item(db, auth, item_id)
+    item = await _resolve_owned_item(db, auth, item_id, SPACE_ROLE_EDITOR)
     await _enforce_collection_scope(db, auth, item)
 
     requested = set(payload.collection_ids)
@@ -620,7 +643,7 @@ async def upload(
     )
 
     att_id = uuid.uuid4()
-    storage_key = f"items/{item.id}/attachments/{att_id}"
+    storage_key = attachment_storage_key(item.space_id, item.id, att_id)
     body = await file.read()
     await put_async(storage.get_store(), storage_key, body)
 
@@ -707,7 +730,7 @@ async def uploads_register(
     )
 
     att_id = uuid.uuid4()
-    storage_key = f"items/{item.id}/attachments/{att_id}"
+    storage_key = attachment_storage_key(item.space_id, item.id, att_id)
     att = Attachment(
         id=att_id,
         item_id=item.id,
@@ -773,10 +796,9 @@ async def uploads_complete(
             status.HTTP_404_NOT_FOUND, "Attachment not found"
         )
     space = await db.get(Space, item.space_id)
-    if space is None or space.owner_id != auth.user.id:
-        raise HTTPException(
-            status.HTTP_404_NOT_FOUND, "Attachment not found"
-        )
+    await require_space_role(
+        db, space, auth.user.id, SPACE_ROLE_EDITOR, label="Attachment not found"
+    )
     await _enforce_collection_scope(db, auth, item)
 
     if verify:
@@ -820,7 +842,9 @@ async def search(
     # Find spaces owned by the user; v1 search is read-only and never
     # touches trash.
     spaces = (
-        await db.execute(select(Space.id).where(Space.owner_id == auth.user.id))
+        await db.execute(
+            select(Space.id).where(Space.id.in_(readable_space_ids(auth.user.id)))
+        )
     ).scalars().all()
     if not spaces:
         return []
@@ -928,8 +952,9 @@ async def download(
     if item is None or item.deleted_at is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Attachment not found")
     space = await db.get(Space, item.space_id)
-    if space is None or space.owner_id != auth.user.id:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Attachment not found")
+    await require_space_role(
+        db, space, auth.user.id, SPACE_ROLE_VIEWER, label="Attachment not found"
+    )
 
     await _enforce_collection_scope(db, auth, item)
 

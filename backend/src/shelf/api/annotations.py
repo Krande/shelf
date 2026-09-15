@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth.deps import get_current_user
+from ..auth.spaces import SPACE_ROLE_EDITOR, SPACE_ROLE_VIEWER, require_space_role
 from ..db import get_session
 from ..models import Annotation, AnnotationKind, Attachment, Item, Space, User
 
@@ -51,7 +52,10 @@ class AnnotationResponse(BaseModel):
 
 
 async def _resolve_attachment(
-    db: AsyncSession, user: User, attachment_id: uuid.UUID
+    db: AsyncSession,
+    user: User,
+    attachment_id: uuid.UUID,
+    minimum: str = SPACE_ROLE_VIEWER,
 ) -> Attachment:
     att = await db.get(Attachment, attachment_id)
     if att is None:
@@ -60,20 +64,24 @@ async def _resolve_attachment(
     if item is None or item.deleted_at is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Attachment not found")
     space = await db.get(Space, item.space_id)
-    if space is None or space.owner_id != user.id:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Attachment not found")
+    await require_space_role(
+        db, space, user.id, minimum, label="Attachment not found"
+    )
     return att
 
 
 async def _resolve_annotation(
-    db: AsyncSession, user: User, annotation_id: uuid.UUID
+    db: AsyncSession,
+    user: User,
+    annotation_id: uuid.UUID,
+    minimum: str = SPACE_ROLE_VIEWER,
 ) -> Annotation:
     ann = await db.get(Annotation, annotation_id)
     if ann is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Annotation not found")
-    # Auth via the attachment so deleted parent items + cross-user
-    # access are rejected uniformly.
-    await _resolve_attachment(db, user, ann.attachment_id)
+    # Auth via the attachment so deleted parent items + inaccessible
+    # spaces are rejected uniformly.
+    await _resolve_attachment(db, user, ann.attachment_id, minimum)
     return ann
 
 
@@ -106,7 +114,7 @@ async def create_annotation(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> Annotation:
-    att = await _resolve_attachment(db, user, attachment_id)
+    att = await _resolve_attachment(db, user, attachment_id, SPACE_ROLE_EDITOR)
     if payload.page_number < 1:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, "page_number must be >= 1"
@@ -146,7 +154,7 @@ async def update_annotation(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> Annotation:
-    ann = await _resolve_annotation(db, user, annotation_id)
+    ann = await _resolve_annotation(db, user, annotation_id, SPACE_ROLE_EDITOR)
     if payload.color is not None:
         ann.color = payload.color
     if payload.text is not None:
@@ -178,6 +186,6 @@ async def delete_annotation(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
-    ann = await _resolve_annotation(db, user, annotation_id)
+    ann = await _resolve_annotation(db, user, annotation_id, SPACE_ROLE_EDITOR)
     await db.delete(ann)
     await db.commit()

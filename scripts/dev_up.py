@@ -781,6 +781,19 @@ def main() -> int:
     # frontend doesn't leave a stale allowlist behind either way.
     api_env.setdefault("SHELF_CORS_ORIGINS", f'["http://localhost:{web_port}"]')
 
+    # A fresh checkout has no OIDC provider and therefore no way to reach
+    # SHELF_ADMIN_EMAILS, so every dev-login account would be a plain user
+    # and the Admin tab would never appear. Local dev is exactly where you
+    # want to see it. setdefault, so an explicit "user" in the shell or in
+    # backend/.env still wins — and the shipped default stays "user", since
+    # dev login mints a session for any address presented.
+    api_env.setdefault("SHELF_DEV_LOGIN_ROLE", "admin")
+    _note(
+        f"Dev-login accounts get the "
+        f"{api_env['SHELF_DEV_LOGIN_ROLE']!r} role "
+        f"(SHELF_DEV_LOGIN_ROLE)"
+    )
+
     # vite.config.ts reads this to point its /api and /auth proxy at the
     # backend; without it a moved api port would leave the proxy talking to
     # :8000 and every request 502-ing.

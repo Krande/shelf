@@ -220,6 +220,49 @@ button {
   pointer-events: auto;
 }
 
+/* Arriving via ?annotation=<id> (or a jump from the highlights panel)
+ * rings the target for a couple of seconds. Scrolling to the right page
+ * is not the same as finding the passage — on a dense page a highlight
+ * is easy to miss, and this is the difference between "here is the
+ * page" and "here is the thing".
+ *
+ * The ring is drawn with outline rather than border so it costs no
+ * layout and cannot nudge the rect out of alignment with the glyphs
+ * underneath. mix-blend-mode is reset to normal on the focused rect so
+ * the ring stays visible against dark scans. */
+.shelf-annotation-focused {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+  animation: shelf-annotation-pulse 900ms ease-out 2;
+}
+.shelf-annotation-rect.shelf-annotation-focused {
+  mix-blend-mode: normal;
+}
+
+@keyframes shelf-annotation-pulse {
+  0% {
+    outline-color: var(--color-accent);
+    outline-offset: 2px;
+  }
+  50% {
+    outline-color: transparent;
+    outline-offset: 5px;
+  }
+  100% {
+    outline-color: var(--color-accent);
+    outline-offset: 2px;
+  }
+}
+
+/* Respect a stated preference for less motion: keep the ring, drop the
+   pulse. The ring is what carries the information. */
+@media (prefers-reduced-motion: reduce) {
+  .shelf-annotation-focused {
+    animation: none;
+  }
+}
+
 /* Floating "Highlight" button over a pending text selection.
  * Anchored in the wrapper's coord space so the pinch transform
  * scales it along with the page. */

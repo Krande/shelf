@@ -1,9 +1,8 @@
 """Item CRUD endpoints.
 
-Phase 1: list / create / get / update / soft-delete / restore /
-permanent-delete. Permissions: only the space owner can read or
-write. Membership-based access lands in Phase 2 along with shared
-spaces and RBAC.
+List / create / get / update / soft-delete / restore /
+permanent-delete. Permissions come from the caller's role in the item's
+space: viewer reads, editor writes (see auth/spaces.py).
 """
 
 import uuid
@@ -18,6 +17,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.types import String
 
 from ..auth.deps import get_current_user
+from ..auth.spaces import (
+    SPACE_ROLE_EDITOR,
+    SPACE_ROLE_VIEWER,
+    require_space_role,
+)
 from ..db import get_session
 from ..models import (
     Attachment,
@@ -192,11 +196,16 @@ class SearchScope(StrEnum):
     fulltext = "fulltext"
 
 
-async def _resolve_space(db: AsyncSession, user: User, slug: str) -> Space:
+async def _resolve_space(
+    db: AsyncSession,
+    user: User,
+    slug: str,
+    minimum: str = SPACE_ROLE_VIEWER,
+) -> Space:
     result = await db.execute(select(Space).where(Space.slug == slug))
     space = result.scalar_one_or_none()
-    if space is None or space.owner_id != user.id:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Space not found")
+    await require_space_role(db, space, user.id, minimum, label="Space not found")
+    assert space is not None  # require_space_role raises when it isn't
     return space
 
 
@@ -205,17 +214,21 @@ async def _resolve_item(
     user: User,
     item_id: uuid.UUID,
     *,
+    minimum: str = SPACE_ROLE_VIEWER,
     include_trashed: bool = False,
 ) -> Item:
     """Look up an item the caller is allowed to see. By default trashed
     items 404 — callers that operate on the trash (restore, permanent
-    delete) opt in via include_trashed=True."""
+    delete) opt in via include_trashed=True.
+
+    `minimum` is the role the caller needs in the item's space: viewer to
+    read, editor to change anything.
+    """
     item = await db.get(Item, item_id)
     if item is None or (item.deleted_at is not None and not include_trashed):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
     space = await db.get(Space, item.space_id)
-    if space is None or space.owner_id != user.id:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
+    await require_space_role(db, space, user.id, minimum, label="Item not found")
     return item
 
 
@@ -397,7 +410,7 @@ async def create_item(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict[str, Any]:
-    space = await _resolve_space(db, user, slug)
+    space = await _resolve_space(db, user, slug, SPACE_ROLE_EDITOR)
     item = Item(
         space_id=space.id,
         item_type=payload.item_type,
@@ -507,7 +520,7 @@ async def update_item(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict[str, Any]:
-    item = await _resolve_item(db, user, item_id)
+    item = await _resolve_item(db, user, item_id, minimum=SPACE_ROLE_EDITOR)
     if payload.item_type is not None:
         item.item_type = payload.item_type
     if payload.data is not None:
@@ -533,7 +546,9 @@ async def delete_item(
     item is rejected so a single accidental click can't take an item
     straight off the shelf.
     """
-    item = await _resolve_item(db, user, item_id, include_trashed=permanent)
+    item = await _resolve_item(
+        db, user, item_id, minimum=SPACE_ROLE_EDITOR, include_trashed=permanent
+    )
     if permanent:
         if item.deleted_at is None:
             raise HTTPException(
@@ -552,7 +567,9 @@ async def restore_item(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> Item:
-    item = await _resolve_item(db, user, item_id, include_trashed=True)
+    item = await _resolve_item(
+        db, user, item_id, minimum=SPACE_ROLE_EDITOR, include_trashed=True
+    )
     if item.deleted_at is None:
         # No-op restore is fine to expose; just don't write.
         return item

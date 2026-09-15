@@ -19,6 +19,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth.deps import get_current_user
+from ..auth.spaces import SPACE_ROLE_EDITOR, SPACE_ROLE_VIEWER, require_space_role
 from ..db import get_session
 from ..models import Collection, Item, ItemCollection, Space, User
 
@@ -63,35 +64,43 @@ class ItemCollectionsUpdate(BaseModel):
     collection_ids: list[uuid.UUID]
 
 
-async def _resolve_space(db: AsyncSession, user: User, slug: str) -> Space:
+async def _resolve_space(
+    db: AsyncSession, user: User, slug: str, minimum: str = SPACE_ROLE_VIEWER
+) -> Space:
     result = await db.execute(select(Space).where(Space.slug == slug))
     space = result.scalar_one_or_none()
-    if space is None or space.owner_id != user.id:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Space not found")
+    await require_space_role(db, space, user.id, minimum, label="Space not found")
+    assert space is not None  # require_space_role raises when it isn't
     return space
 
 
 async def _resolve_collection(
-    db: AsyncSession, user: User, collection_id: uuid.UUID
+    db: AsyncSession,
+    user: User,
+    collection_id: uuid.UUID,
+    minimum: str = SPACE_ROLE_VIEWER,
 ) -> Collection:
     coll = await db.get(Collection, collection_id)
     if coll is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Collection not found")
     space = await db.get(Space, coll.space_id)
-    if space is None or space.owner_id != user.id:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Collection not found")
+    await require_space_role(
+        db, space, user.id, minimum, label="Collection not found"
+    )
     return coll
 
 
 async def _resolve_item(
-    db: AsyncSession, user: User, item_id: uuid.UUID
+    db: AsyncSession,
+    user: User,
+    item_id: uuid.UUID,
+    minimum: str = SPACE_ROLE_VIEWER,
 ) -> Item:
     item = await db.get(Item, item_id)
     if item is None or item.deleted_at is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
     space = await db.get(Space, item.space_id)
-    if space is None or space.owner_id != user.id:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
+    await require_space_role(db, space, user.id, minimum, label="Item not found")
     return item
 
 
@@ -153,7 +162,7 @@ async def create_collection(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> Collection:
-    space = await _resolve_space(db, user, slug)
+    space = await _resolve_space(db, user, slug, SPACE_ROLE_EDITOR)
     if payload.parent_id is not None:
         parent = await _resolve_collection(db, user, payload.parent_id)
         if parent.space_id != space.id:
@@ -189,7 +198,7 @@ async def update_collection(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> Collection:
-    coll = await _resolve_collection(db, user, collection_id)
+    coll = await _resolve_collection(db, user, collection_id, SPACE_ROLE_EDITOR)
     provided = payload.model_fields_set
 
     if "name" in provided and payload.name is not None:
@@ -283,7 +292,7 @@ async def delete_collection(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
-    coll = await _resolve_collection(db, user, collection_id)
+    coll = await _resolve_collection(db, user, collection_id, SPACE_ROLE_EDITOR)
     space_id = coll.space_id
     parent_id = coll.parent_id
     # ON DELETE CASCADE drops both the children (via parent_id) and the
@@ -306,12 +315,12 @@ async def set_item_collections(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> list[uuid.UUID]:
-    item = await _resolve_item(db, user, item_id)
+    item = await _resolve_item(db, user, item_id, SPACE_ROLE_EDITOR)
     # Validate every requested collection belongs to the same space and
-    # the user owns it. De-dup as a side effect of using a set.
+    # the caller can write to it. De-dup as a side effect of using a set.
     requested = set(payload.collection_ids)
     for cid in requested:
-        coll = await _resolve_collection(db, user, cid)
+        coll = await _resolve_collection(db, user, cid, SPACE_ROLE_EDITOR)
         if coll.space_id != item.space_id:
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,

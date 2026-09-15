@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth.deps import get_current_user
+from ..auth.spaces import SPACE_ROLE_VIEWER, require_space_role
 from ..db import get_session
 from ..models import (
     Attachment,
@@ -61,8 +62,11 @@ _FORMAT_META: dict[ExportFormat, tuple[str, str]] = {
 async def _resolve_space(db: AsyncSession, user: User, slug: str) -> Space:
     result = await db.execute(select(Space).where(Space.slug == slug))
     space = result.scalar_one_or_none()
-    if space is None or space.owner_id != user.id:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Space not found")
+    # Export is read-only, so viewer is enough throughout this router.
+    await require_space_role(
+        db, space, user.id, SPACE_ROLE_VIEWER, label="Space not found"
+    )
+    assert space is not None  # require_space_role raises when it isn't
     return space
 
 
@@ -71,8 +75,9 @@ async def _resolve_item(db: AsyncSession, user: User, item_id: uuid.UUID) -> Ite
     if item is None or item.deleted_at is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
     space = await db.get(Space, item.space_id)
-    if space is None or space.owner_id != user.id:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
+    await require_space_role(
+        db, space, user.id, SPACE_ROLE_VIEWER, label="Item not found"
+    )
     return item
 
 
