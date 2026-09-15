@@ -1,8 +1,10 @@
-import { beforeEach, describe, expect, it } from "vitest";
+﻿import { beforeEach, describe, expect, it } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import SpacesSection from "./SpacesSection";
-import { mockFetch, renderWithProviders } from "@/test/utils";
+import { makeMe, mockFetch, renderWithProviders } from "@/test/utils";
+
+const ADMIN = makeMe({ role: "admin", is_admin: true });
 
 const OWNED = {
   id: "s1",
@@ -52,7 +54,7 @@ beforeEach(() => {
 
 describe("listing", () => {
   it("lists every space with the caller's role", async () => {
-    renderWithProviders(<SpacesSection />);
+    renderWithProviders(<SpacesSection user={makeMe()} />);
     expect(await screen.findByText("My shelf")).toBeInTheDocument();
     expect(screen.getByText(/u-abc · you are owner/)).toBeInTheDocument();
     expect(screen.getByText(/team · you are viewer/)).toBeInTheDocument();
@@ -60,13 +62,13 @@ describe("listing", () => {
   });
 
   it("marks the personal space", async () => {
-    renderWithProviders(<SpacesSection />);
+    renderWithProviders(<SpacesSection user={makeMe()} />);
     await screen.findByText("My shelf");
     expect(screen.getByText("personal")).toBeInTheDocument();
   });
 
   it("offers sharing only on spaces the caller owns", async () => {
-    renderWithProviders(<SpacesSection />);
+    renderWithProviders(<SpacesSection user={makeMe()} />);
     await screen.findByText("My shelf");
     // One button, for the one owned space — an editor cannot widen access.
     expect(screen.getAllByRole("button", { name: /sharing/i })).toHaveLength(1);
@@ -74,7 +76,7 @@ describe("listing", () => {
 
   it("reports a load failure", async () => {
     mockFetch({ "/api/me/spaces": { status: 400 } });
-    renderWithProviders(<SpacesSection />);
+    renderWithProviders(<SpacesSection user={makeMe()} />);
     expect(await screen.findByRole("alert")).toHaveTextContent(
       /could not load spaces/i,
     );
@@ -83,13 +85,13 @@ describe("listing", () => {
 
 describe("members", () => {
   async function openSharing() {
-    renderWithProviders(<SpacesSection />);
+    renderWithProviders(<SpacesSection user={makeMe()} />);
     await screen.findByText("My shelf");
     await userEvent.click(screen.getByRole("button", { name: /sharing/i }));
   }
 
   it("is collapsed until asked for", async () => {
-    renderWithProviders(<SpacesSection />);
+    renderWithProviders(<SpacesSection user={makeMe()} />);
     await screen.findByText("My shelf");
     expect(screen.queryByText("grace@example.com")).not.toBeInTheDocument();
   });
@@ -162,7 +164,7 @@ describe("members", () => {
       "/api/me/spaces": { body: [OWNED] },
       "/api/spaces/u-abc/members": { body: MEMBERS },
     });
-    renderWithProviders(<SpacesSection />);
+    renderWithProviders(<SpacesSection user={makeMe()} />);
     await screen.findByText("My shelf");
     await userEvent.click(screen.getByRole("button", { name: /sharing/i }));
     await screen.findByText("Grace");
@@ -229,5 +231,107 @@ describe("members", () => {
       const options = within(select).getAllByRole("option").map((o) => o.textContent);
       expect(options).toEqual(["viewer", "editor"]);
     }
+  });
+});
+
+describe("creating a space", () => {
+  it("is offered to admins only", async () => {
+    renderWithProviders(<SpacesSection user={makeMe()} />);
+    await screen.findByText("My shelf");
+    expect(
+      screen.queryByRole("button", { name: /new space/i }),
+    ).not.toBeInTheDocument();
+
+    renderWithProviders(<SpacesSection user={ADMIN} />);
+    expect(
+      await screen.findByRole("button", { name: /new space/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("starts collapsed", async () => {
+    renderWithProviders(<SpacesSection user={ADMIN} />);
+    await screen.findByRole("button", { name: /new space/i });
+    expect(screen.queryByLabelText(/name for the new space/i)).toBeNull();
+  });
+
+  it("creates a space by name", async () => {
+    const fetchFn = stub();
+    renderWithProviders(<SpacesSection user={ADMIN} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: /new space/i }),
+    );
+    await userEvent.type(
+      screen.getByLabelText(/name for the new space/i),
+      "Engineering",
+    );
+    await userEvent.click(screen.getByRole("button", { name: /^create$/i }));
+
+    await waitFor(() => {
+      const call = fetchFn.mock.calls.find(
+        ([url, init]) =>
+          String(url).endsWith("/api/spaces") &&
+          (init as RequestInit)?.method === "POST",
+      );
+      expect(call).toBeDefined();
+      // Slug omitted entirely, so the server derives it.
+      expect(JSON.parse((call![1] as RequestInit).body as string)).toEqual({
+        name: "Engineering",
+      });
+    });
+  });
+
+  it("passes an explicit slug when given one", async () => {
+    const fetchFn = stub();
+    renderWithProviders(<SpacesSection user={ADMIN} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: /new space/i }),
+    );
+    await userEvent.type(
+      screen.getByLabelText(/name for the new space/i),
+      "Engineering",
+    );
+    await userEvent.type(screen.getByLabelText(/slug for the new space/i), "eng");
+    await userEvent.click(screen.getByRole("button", { name: /^create$/i }));
+
+    await waitFor(() => {
+      const call = fetchFn.mock.calls.find(
+        ([url, init]) =>
+          String(url).endsWith("/api/spaces") &&
+          (init as RequestInit)?.method === "POST",
+      );
+      expect(JSON.parse((call![1] as RequestInit).body as string)).toEqual({
+        name: "Engineering",
+        slug: "eng",
+      });
+    });
+  });
+
+  it("explains a slug clash", async () => {
+    mockFetch({
+      "/api/me/spaces": { body: [OWNED] },
+      "/api/spaces": { status: 409 },
+    });
+    renderWithProviders(<SpacesSection user={ADMIN} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: /new space/i }),
+    );
+    await userEvent.type(
+      screen.getByLabelText(/name for the new space/i),
+      "My shelf",
+    );
+    await userEvent.click(screen.getByRole("button", { name: /^create$/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /slug already exists/i,
+    );
+  });
+
+  it("can be dismissed", async () => {
+    renderWithProviders(<SpacesSection user={ADMIN} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: /new space/i }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: /cancel/i }));
+    expect(screen.queryByLabelText(/name for the new space/i)).toBeNull();
   });
 });

@@ -293,6 +293,11 @@ no membership row to delete that would lock the creator out of their own space.
 An editor can fill a space but can't widen access to it, so "who else can see
 this" stays the owner's decision.
 
+Everyone gets a personal space at first login. **Admins can create additional
+shared spaces** from Settings → Spaces — the creator owns it and picks who else
+is in it. Creation is admin-gated because spaces are cheap to make and awkward
+to clean up; making a space still grants nothing over spaces other people own.
+
 Manage members under Settings → Spaces. People are added by email and must have
 signed in at least once, since shelf has no user directory to search (exposing
 one to every account holder isn't a trade worth making). Removing someone

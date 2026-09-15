@@ -94,7 +94,7 @@ export default function SettingsPage() {
         </nav>
 
         {active.id === "account" && <AccountSection user={me} />}
-        {active.id === "spaces" && <SpacesSection />}
+        {active.id === "spaces" && <SpacesSection user={me} />}
         {active.id === "appearance" && <AppearanceSection />}
         {active.id === "documents" && (
           <>

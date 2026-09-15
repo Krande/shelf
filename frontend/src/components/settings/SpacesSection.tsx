@@ -8,9 +8,10 @@
 
 import { type FormEvent, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, ChevronRight, Loader2, Users } from "lucide-react";
+import { ChevronDown, ChevronRight, Loader2, Plus, Users } from "lucide-react";
 import {
   addMember,
+  createSpace,
   fetchMembers,
   fetchMySpaces,
   removeMember,
@@ -20,6 +21,7 @@ import {
   type SpaceRole,
 } from "@/api/spaces";
 import { ApiError } from "@/api/client";
+import type { Me } from "@/api/me";
 
 const ROLE_BLURB: Record<SpaceRole, string> = {
   viewer: "Can read items, attachments and notes.",
@@ -27,7 +29,7 @@ const ROLE_BLURB: Record<SpaceRole, string> = {
   owner: "Can also manage who has access.",
 };
 
-export default function SpacesSection() {
+export default function SpacesSection({ user }: { user: Me }) {
   const spaces = useQuery<Space[], ApiError>({
     queryKey: ["spaces"],
     queryFn: fetchMySpaces,
@@ -65,7 +67,108 @@ export default function SpacesSection() {
           <SpaceRow key={space.id} space={space} />
         ))}
       </ul>
+
+      {user.is_admin && <NewSpaceForm />}
     </section>
+  );
+}
+
+/**
+ * Admin-only. Spaces are cheap to make and awkward to clean up, so the
+ * API gates creation the same way — this hiding is cosmetic.
+ */
+function NewSpaceForm() {
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [slug, setSlug] = useState("");
+
+  const create = useMutation({
+    mutationFn: () => createSpace(name.trim(), slug.trim() || undefined),
+    onSuccess: () => {
+      setName("");
+      setSlug("");
+      setOpen(false);
+      qc.invalidateQueries({ queryKey: ["spaces"] });
+    },
+  });
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        className="mt-2 flex items-center gap-1 rounded border px-2 py-1 text-xs hover:opacity-80"
+        style={{ borderColor: "var(--color-border)" }}
+      >
+        <Plus className="h-3.5 w-3.5" />
+        New space
+      </button>
+    );
+  }
+
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (name.trim() && !create.isPending) create.mutate();
+      }}
+      className="mt-2 rounded border p-2"
+      style={{ borderColor: "var(--color-border)" }}
+    >
+      <div className="flex flex-wrap gap-1">
+        <input
+          required
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Space name"
+          aria-label="Name for the new space"
+          className="min-w-0 flex-1 rounded border px-2 py-1 text-xs"
+          style={{
+            borderColor: "var(--color-border)",
+            backgroundColor: "var(--color-surface)",
+          }}
+        />
+        <input
+          value={slug}
+          onChange={(e) => setSlug(e.target.value)}
+          placeholder="slug (optional)"
+          aria-label="Slug for the new space"
+          className="min-w-0 flex-1 rounded border px-2 py-1 text-xs"
+          style={{
+            borderColor: "var(--color-border)",
+            backgroundColor: "var(--color-surface)",
+          }}
+        />
+        <button
+          type="submit"
+          disabled={create.isPending}
+          className="flex shrink-0 items-center gap-1 rounded border px-2 py-1 text-xs hover:opacity-80 disabled:opacity-50"
+          style={{ borderColor: "var(--color-border)" }}
+        >
+          {create.isPending && <Loader2 className="h-3 w-3 animate-spin" />}
+          Create
+        </button>
+        <button
+          type="button"
+          onClick={() => setOpen(false)}
+          className="shrink-0 rounded border px-2 py-1 text-xs hover:opacity-80"
+          style={{ borderColor: "var(--color-border)" }}
+        >
+          Cancel
+        </button>
+      </div>
+      <p className="mt-1 text-xs" style={{ color: "var(--color-text-muted)" }}>
+        You'll own it, and can add people from the Sharing control once it
+        exists. The slug is derived from the name when left blank.
+      </p>
+      {create.error && (
+        <p className="mt-1 text-xs text-red-600" role="alert">
+          {create.error instanceof ApiError && create.error.status === 409
+            ? "A space with that slug already exists."
+            : create.error.message}
+        </p>
+      )}
+    </form>
   );
 }
 

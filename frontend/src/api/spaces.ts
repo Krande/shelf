@@ -28,6 +28,19 @@ export function canEdit(space: Space | undefined | null): boolean {
   return space?.role === "editor" || space?.role === "owner";
 }
 
+/**
+ * Create a shared space, owned by the caller. Admin-only server-side.
+ *
+ * `slug` is derived from the name when omitted; it's what appears in
+ * URLs and in API-token scopes, so it's worth letting the caller pick.
+ */
+export function createSpace(name: string, slug?: string): Promise<Space> {
+  return apiFetch<Space>("/api/spaces", {
+    method: "POST",
+    body: JSON.stringify(slug ? { name, slug } : { name }),
+  });
+}
+
 // ── Membership ───────────────────────────────────────────────────────────────
 
 export interface SpaceMember {
