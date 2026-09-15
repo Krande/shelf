@@ -9,7 +9,7 @@ I wanted a reference manager I could run on my own hardware, that kept the PDFs 
 ## What's in it
 
 - Items with type-specific metadata (JSONB, so item types change without a migration), nested collections, tags, notes, creators.
-- An in-browser PDF reader with annotations, a generated outline, and pinch-zoom.
+- An in-browser PDF reader with annotations, a generated outline, and pinch-zoom. Highlights are linkable — **Copy link** on one gives a URL that opens the document at that passage and rings it.
 - Search over item metadata and the text extracted from each PDF page, using Postgres `tsvector` + GIN with trigram indexes for fuzzy title matching. No separate search service.
 - Background OCR and text extraction: Tesseract (via `ocrmypdf`) on CPU, and optionally [olmOCR](https://github.com/allenai/olmocr) on a GPU host for scans Tesseract mangles. Originals are kept; OCR output becomes a new version you can switch between.
 - Export to BibTeX, CSL-JSON, and Zotero RDF — the last optionally bundled as a ZIP with the files, in the layout Zotero's own translator produces.
@@ -276,6 +276,26 @@ The linked set lives in the session cookie, so it only ever contains accounts
 that completed a login in this browser, and it lasts as long as the session.
 Signing out clears all of them at once; unlink one from Settings to drop just
 that one.
+
+## Linking into a document
+
+The reader reads three query params:
+
+| Param | Points at |
+|---|---|
+| `?page=N` | a page. Written back as you scroll, so reload and back/forward restore your position |
+| `?annotation=<id>` | a highlight — its page, plus a ring on the passage itself |
+| `?find=term` | opens the find toolbar pre-filled. A search, not an address: it lands on the first textual match, or nowhere if OCR mangled the word |
+
+`?annotation=` is the precise one. Annotations carry rects in PDF
+user-space, which survive zoom, re-render and DPI differences, so the link
+resolves to the same passage for everyone who can open the space. Get one from
+**Copy link** in the highlights panel.
+
+Nothing smaller than that is addressable: shelf never extracts tables, figures
+or equations as objects, so there's no identifier to put in a URL for them.
+`?page=N&find=Table%203.1` is the honest workaround and it is a guess, not an
+anchor.
 
 ## Sharing a space
 

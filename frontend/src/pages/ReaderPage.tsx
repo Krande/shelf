@@ -11,12 +11,14 @@ import { useNavigate, useParams, useSearchParams } from "react-router";
 import {
   ArrowLeft,
   Bookmark,
+  Check,
   ChevronLeft,
   ChevronRight,
   Eye,
   EyeOff,
   FileText,
   Highlighter,
+  Link2,
   List,
   ListTree,
   Loader2,
@@ -38,6 +40,7 @@ import { useAuth } from "@/auth/session";
 import { getDownloadUrl, getPageDims } from "@/api/attachments";
 import {
   type Annotation,
+  annotationLink,
   type Rect,
   createAnnotation,
   deleteAnnotation,
@@ -594,15 +597,70 @@ export default function ReaderPage() {
     [pinch, mode],
   );
 
+  // The annotation to ring, if any. Set by a deep link or by clicking
+  // through from the panel, and cleared on a timer so the emphasis
+  // fades rather than sticking to the page forever.
+  const [focusedAnnotationId, setFocusedAnnotationId] = useState<string | null>(
+    null,
+  );
+  const focusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const focusAnnotation = useCallback((id: string) => {
+    setFocusedAnnotationId(id);
+    if (focusTimer.current) clearTimeout(focusTimer.current);
+    focusTimer.current = setTimeout(() => setFocusedAnnotationId(null), 2600);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (focusTimer.current) clearTimeout(focusTimer.current);
+    },
+    [],
+  );
+
   const jumpToAnnotation = useCallback(
     (a: Annotation) => {
       goToPage(a.page_number);
+      focusAnnotation(a.id);
       // Auto-close the drawer on coarse-pointer devices so the user
       // can see the highlight without an extra tap.
       if (isCoarsePointer) setHighlightsOpen(false);
     },
-    [goToPage, isCoarsePointer],
+    [goToPage, focusAnnotation, isCoarsePointer],
   );
+
+  // `?annotation=<id>` — open at that annotation and ring it.
+  //
+  // Waits for the annotation list *and* for the page heights the
+  // virtualizer needs: scrolling before it can measure lands on the
+  // wrong offset, the same reason the ?page= effect gates on
+  // heightsReady. Runs once per id, so a later scroll doesn't yank the
+  // reader back.
+  const deepLinkedId = searchParams.get("annotation");
+  const handledDeepLink = useRef<string | null>(null);
+  useEffect(() => {
+    if (!deepLinkedId || handledDeepLink.current === deepLinkedId) return;
+    if (!heightsReady) return;
+    const target = (annotationsQuery.data ?? []).find(
+      (a) => a.id === deepLinkedId,
+    );
+    if (!target) {
+      // Still loading, or it was deleted since the link was made. Only
+      // give up once the query has actually settled.
+      if (annotationsQuery.isFetched) handledDeepLink.current = deepLinkedId;
+      return;
+    }
+    handledDeepLink.current = deepLinkedId;
+    goToPage(target.page_number);
+    focusAnnotation(target.id);
+  }, [
+    deepLinkedId,
+    heightsReady,
+    annotationsQuery.data,
+    annotationsQuery.isFetched,
+    goToPage,
+    focusAnnotation,
+  ]);
 
   const jumpFromOutline = useCallback(
     (page: number) => {
@@ -988,6 +1046,7 @@ export default function ReaderPage() {
                   : null
               }
               annotations={annotationsByPage.get(page) ?? []}
+              focusedAnnotationId={focusedAnnotationId}
               debugText={debugText}
               pinchScaleRef={pinchScaleRef}
               onCreateHighlight={onCreateHighlight}
@@ -1013,6 +1072,7 @@ export default function ReaderPage() {
             findQuery={findQuery}
             currentMatchInfo={currentMatchInfo}
             annotationsByPage={annotationsByPage}
+            focusedAnnotationId={focusedAnnotationId}
             debugText={debugText}
             pinchScaleRef={pinchScaleRef}
             onCreateHighlight={onCreateHighlight}
@@ -1030,6 +1090,7 @@ export default function ReaderPage() {
         {highlightsOpen && (
           <HighlightsPanel
             annotations={annotationsSorted}
+            attachmentId={params.attachmentId!}
             isDeleting={removeAnnotation.isPending}
             onJumpTo={jumpToAnnotation}
             onDelete={(id) => removeAnnotation.mutate(id)}
@@ -1056,6 +1117,7 @@ const HIGHLIGHT_PALETTE: ReadonlyArray<{ name: string; hex: string }> = [
 
 function HighlightsPanel({
   annotations,
+  attachmentId,
   isDeleting,
   onJumpTo,
   onDelete,
@@ -1063,6 +1125,7 @@ function HighlightsPanel({
   onClose,
 }: {
   annotations: Annotation[];
+  attachmentId: string;
   isDeleting: boolean;
   onJumpTo: (a: Annotation) => void;
   onDelete: (id: string) => void;
@@ -1070,6 +1133,25 @@ function HighlightsPanel({
   onClose: () => void;
 }) {
   const [pickerOpenId, setPickerOpenId] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const onCopyLink = useCallback(
+    async (a: Annotation) => {
+      const url = annotationLink(attachmentId, a.id, window.location.origin);
+      try {
+        await navigator.clipboard.writeText(url);
+      } catch {
+        // Clipboard access needs a secure context, so an instance
+        // served over plain http has none. Fall back to selecting the
+        // text in a prompt, which always works.
+        window.prompt("Copy this link", url);
+        return;
+      }
+      setCopiedId(a.id);
+      setTimeout(() => setCopiedId((id) => (id === a.id ? null : id)), 1800);
+    },
+    [attachmentId],
+  );
   return (
     <aside
       className="flex w-full flex-col border-l sm:w-80"
@@ -1152,6 +1234,29 @@ function HighlightsPanel({
                   </button>
                   <button
                     type="button"
+                    onClick={() => onCopyLink(a)}
+                    aria-label="Copy link to highlight"
+                    title={
+                      copiedId === a.id
+                        ? "Link copied"
+                        : "Copy a link to this highlight"
+                    }
+                    className="rounded p-1 hover:opacity-70"
+                    style={{
+                      color:
+                        copiedId === a.id
+                          ? "var(--color-accent)"
+                          : "var(--color-text-muted)",
+                    }}
+                  >
+                    {copiedId === a.id ? (
+                      <Check className="h-3.5 w-3.5" />
+                    ) : (
+                      <Link2 className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => onDelete(a.id)}
                     disabled={isDeleting}
                     aria-label="Delete highlight"
@@ -1223,6 +1328,7 @@ const ContinuousList = forwardRef<
     findQuery: string;
     currentMatchInfo: { page: number; occurrence: number } | null;
     annotationsByPage: Map<number, Annotation[]>;
+    focusedAnnotationId: string | null;
     debugText: boolean;
     pinchScaleRef: React.RefObject<number>;
     onCreateHighlight: (
@@ -1245,6 +1351,7 @@ const ContinuousList = forwardRef<
     findQuery,
     currentMatchInfo,
     annotationsByPage,
+    focusedAnnotationId,
     debugText,
     pinchScaleRef,
     onCreateHighlight,
@@ -1346,6 +1453,7 @@ const ContinuousList = forwardRef<
                   : null
               }
               annotations={annotationsByPage.get(pageNumber) ?? []}
+              focusedAnnotationId={focusedAnnotationId}
               debugText={debugText}
               pinchScaleRef={pinchScaleRef}
               onCreateHighlight={onCreateHighlight}
@@ -1366,6 +1474,7 @@ function PageCanvas({
   findQuery,
   currentOccurrence,
   annotations,
+  focusedAnnotationId,
   debugText,
   pinchScaleRef,
   onCreateHighlight,
@@ -1382,6 +1491,7 @@ function PageCanvas({
   findQuery: string;
   currentOccurrence: number | null;
   annotations: Annotation[];
+  focusedAnnotationId: string | null;
   debugText: boolean;
   pinchScaleRef: React.RefObject<number>;
   onCreateHighlight: (
@@ -1698,6 +1808,7 @@ function PageCanvas({
       {native && cssH != null && annotations.length > 0 && (
         <AnnotationOverlay
           annotations={annotations}
+          focusedAnnotationId={focusedAnnotationId}
           renderScale={renderScale}
           pageHeight={native.height}
         />
@@ -1749,10 +1860,14 @@ function HighlightSelectionButton({
 
 function AnnotationOverlay({
   annotations,
+  focusedAnnotationId,
   renderScale,
   pageHeight,
 }: {
   annotations: Annotation[];
+  /** Ringed briefly after a deep link or a jump from the panel, so the
+   *  eye lands on the passage rather than just the right page. */
+  focusedAnnotationId: string | null;
   renderScale: number;
   /** Native (scale=1) page height in PDF user-space; needed to flip
    *  the y-axis from PDF (origin bottom-left) to CSS (origin top). */
@@ -1761,6 +1876,7 @@ function AnnotationOverlay({
   return (
     <div className="shelf-annotations">
       {annotations.map((a) => {
+        const focused = a.id === focusedAnnotationId;
         if (a.kind === "note") {
           // Notes draw a single pin centred on the rect's origin.
           const r = a.rects[0];
@@ -1771,7 +1887,10 @@ function AnnotationOverlay({
             <button
               key={a.id}
               type="button"
-              className="shelf-annotation-note"
+              className={
+                "shelf-annotation-note" +
+                (focused ? " shelf-annotation-focused" : "")
+              }
               style={{
                 left: `${cssX}px`,
                 top: `${cssY}px`,
@@ -1789,14 +1908,17 @@ function AnnotationOverlay({
           return (
             <div
               key={`${a.id}-${idx}`}
-              className="shelf-annotation-rect"
+              className={
+                "shelf-annotation-rect" +
+                (focused ? " shelf-annotation-focused" : "")
+              }
               style={{
                 left: `${cssX}px`,
                 top: `${cssY}px`,
                 width: `${w * renderScale}px`,
                 height: `${h * renderScale}px`,
                 backgroundColor: a.color,
-                opacity: 0.45,
+                opacity: focused ? 0.65 : 0.45,
               }}
               title={a.text ?? ""}
             />
