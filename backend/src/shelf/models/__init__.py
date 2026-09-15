@@ -13,9 +13,12 @@ from .notes import Note
 from .spaces import Space, SpaceMembership
 from .tags import ItemTag, Tag
 from .tokens import ApiToken
-from .users import Identity, User
+from .users import ROLE_ADMIN, ROLE_USER, ROLES, Identity, User
 
 __all__ = [
+    "ROLES",
+    "ROLE_ADMIN",
+    "ROLE_USER",
     "UUIDPK",
     "Annotation",
     "AnnotationKind",

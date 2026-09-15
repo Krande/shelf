@@ -2,12 +2,9 @@ import { type FormEvent, useEffect, useState } from "react";
 import { Navigate } from "react-router";
 import { LogIn } from "lucide-react";
 import { apiFetch } from "@/api/client";
+import { fetchProviders, providerLabel } from "@/api/providers";
 import { startLogin, useAuth } from "@/auth/session";
-
-interface ProvidersResponse {
-  providers: string[];
-  dev_login: boolean;
-}
+import { hardNavigate } from "@/lib/navigation";
 
 export default function LoginPage() {
   const auth = useAuth();
@@ -18,7 +15,7 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    apiFetch<ProvidersResponse>("/auth/providers")
+    fetchProviders()
       .then((r) => {
         setProviders(r.providers);
         setDevLogin(r.dev_login);
@@ -38,7 +35,7 @@ export default function LoginPage() {
       // Full reload rather than a router navigate: the session cookie is
       // set on this response, and a reload is the simplest way to make
       // every cached query re-run with it attached.
-      window.location.assign("/library");
+      hardNavigate("/library");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setBusy(false);
@@ -90,7 +87,7 @@ export default function LoginPage() {
               style={{ backgroundColor: "var(--color-accent)" }}
             >
               <LogIn className="h-4 w-4" />
-              Sign in with {p[0].toUpperCase() + p.slice(1)}
+              Sign in with {providerLabel(p)}
             </button>
           ))}
         </div>

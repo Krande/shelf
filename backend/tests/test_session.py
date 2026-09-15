@@ -1,17 +1,21 @@
 """Unit tests for the JWT session module."""
 
 import uuid
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
+from authlib.jose import jwt
 
 from shelf.auth.session import InvalidSessionError, issue_session, parse_session
+from shelf.config import settings
 
 
 def test_session_roundtrip() -> None:
     user_id = uuid.uuid4()
     token = issue_session(user_id)
-    assert parse_session(token) == user_id
+    claims = parse_session(token)
+    assert claims.active_user_id == user_id
+    assert claims.account_ids == (user_id,)
 
 
 def test_session_tampered() -> None:
@@ -33,3 +37,91 @@ def test_session_expired() -> None:
 def test_session_garbage() -> None:
     with pytest.raises(InvalidSessionError):
         parse_session("not-a-jwt")
+
+
+# ── Linked accounts ──────────────────────────────────────────────────────────
+
+
+def test_linked_accounts_roundtrip() -> None:
+    a, b = uuid.uuid4(), uuid.uuid4()
+    token = issue_session(b, account_ids=(a, b))
+    claims = parse_session(token)
+    assert claims.active_user_id == b
+    assert set(claims.account_ids) == {a, b}
+
+
+def test_active_account_is_always_present() -> None:
+    """Even if the caller passes a list that omits it."""
+    a, b = uuid.uuid4(), uuid.uuid4()
+    claims = parse_session(issue_session(b, account_ids=(a,)))
+    assert b in claims.account_ids
+
+
+def test_accounts_deduped() -> None:
+    a = uuid.uuid4()
+    claims = parse_session(issue_session(a, account_ids=(a, a, a)))
+    assert claims.account_ids == (a,)
+
+
+def test_accounts_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cap evicts the oldest link, never the account you just became."""
+    monkeypatch.setattr(settings, "max_linked_accounts", 3)
+    olds = [uuid.uuid4() for _ in range(5)]
+    active = uuid.uuid4()
+    claims = parse_session(issue_session(active, account_ids=(*olds, active)))
+    assert len(claims.account_ids) == 3
+    assert claims.account_ids[0] == active
+
+
+def test_legacy_token_without_accts() -> None:
+    """Sessions minted before linking existed must keep working — an
+    upgrade shouldn't sign everybody out."""
+    user_id = uuid.uuid4()
+    now = datetime.now(UTC)
+    legacy = jwt.encode(
+        {"alg": "HS256"},
+        {
+            "sub": str(user_id),
+            "iat": int(now.timestamp()),
+            "exp": int((now + timedelta(hours=1)).timestamp()),
+        },
+        settings.session_secret_key.encode(),
+    ).decode()
+
+    claims = parse_session(legacy)
+    assert claims.active_user_id == user_id
+    assert claims.account_ids == (user_id,)
+
+
+def test_malformed_accts_entries_are_dropped() -> None:
+    """A junk entry shouldn't invalidate an otherwise-valid session; it
+    can't grant anything either, since every id is re-checked against the
+    database before it's used."""
+    user_id = uuid.uuid4()
+    other = uuid.uuid4()
+    now = datetime.now(UTC)
+    token = jwt.encode(
+        {"alg": "HS256"},
+        {
+            "sub": str(user_id),
+            "accts": [str(user_id), "not-a-uuid", 42, str(other)],
+            "iat": int(now.timestamp()),
+            "exp": int((now + timedelta(hours=1)).timestamp()),
+        },
+        settings.session_secret_key.encode(),
+    ).decode()
+
+    claims = parse_session(token)
+    assert set(claims.account_ids) == {user_id, other}
+
+
+def test_expires_at_is_carried_not_slid() -> None:
+    """Re-issuing with an explicit expiry must not extend the session —
+    otherwise switching accounts once a day keeps it alive forever."""
+    a, b = uuid.uuid4(), uuid.uuid4()
+    original = parse_session(issue_session(a, account_ids=(a, b)))
+    switched = parse_session(
+        issue_session(b, account_ids=original.account_ids, expires_at=original.expires_at)
+    )
+    assert switched.expires_at == original.expires_at
+    assert switched.active_user_id == b

@@ -83,7 +83,31 @@ It only starts the `postgres` service, waits on its healthcheck rather than slee
 
 `pixi run lint` and `pixi run typecheck` need no services. `pixi run dev-down` stops the stack when you're done.
 
-CI runs all three — lint, typecheck, and the suite — on every pull request, each as its own status check.
+### Frontend
+
+The SPA has its own suite — vitest and Testing Library on jsdom — which needs
+no services at all: components under test talk to a stubbed `fetch`, never a
+real API.
+
+```bash
+pixi run frontend-test            # once
+pixi run frontend-test-watch      # on change
+pixi run frontend-test-coverage   # with a v8 coverage report
+```
+
+Helpers live in `frontend/src/test/utils.tsx`: `renderWithProviders` wraps a
+component in a router and a throwaway QueryClient, `mockFetch` stubs responses
+by path prefix, and `makeMe` / `makeMeWithTwoAccounts` build the `/api/me`
+shapes. An unstubbed request throws rather than hanging, so a test that reaches
+for the network says so.
+
+Full-page navigations go through `frontend/src/lib/navigation.ts` rather than
+calling `window.location.assign` inline — partly to keep the "reload, don't
+router-navigate" decision documented in one place, partly because jsdom won't
+let a test intercept it otherwise.
+
+CI runs five checks on every pull request, each as its own status check: lint,
+typecheck, and the backend suite; plus the frontend's typecheck and unit tests.
 
 ## Configuration
 
@@ -114,6 +138,9 @@ SHELF_SESSION_SECRET_KEY=<openssl rand -hex 32>
 SHELF_SESSION_COOKIE_SECURE=true
 SHELF_DEV_LOGIN_ENABLED=false
 SHELF_PUBLIC_BASE_URL=https://shelf.example.com
+
+# Emails promoted to admin on login. See "Roles and accounts" below.
+SHELF_ADMIN_EMAILS=["you@example.com"]
 
 # The API checks its dependencies once at startup and refuses to serve if
 # one is misconfigured - see "Startup checks" below. Set to false only to
@@ -158,6 +185,38 @@ SHELF_OIDC_PROVIDERS='[{"name":"authentik","issuer":"https://authentik.example.c
 Register the redirect URI as `{SHELF_PUBLIC_BASE_URL}/auth/callback/{name}`, where `name` is the provider's label in the JSON above — so the example needs `https://shelf.example.com/auth/callback/authentik`. On first login shelf creates the user, the identity record, and a personal space; later logins match on `(idp, sub)`, so a user keeps their library if their email changes.
 
 Behind a reverse proxy, uvicorn needs `--proxy-headers --forwarded-allow-ips='*'` so redirect URIs are built as `https://…` and match what the IdP has registered. The Dockerfile already does this.
+
+## Roles and accounts
+
+Two roles, `user` and `admin`. Everyone is a `user`; admins additionally get an
+Admin tab in Settings, which lists everyone on the instance and hands out roles.
+Admin is a cookie-session thing — no API token scope grants it, so a leaked
+script token can't reach those routes.
+
+A fresh instance has no admin. Name yourself in `SHELF_ADMIN_EMAILS` and log in;
+the role is granted on login and then lives in the database, so removing the
+address later doesn't take it away. `pixi run grant-admin <email>` does the same
+to an existing user without a restart, and `--revoke` reverses it. The last
+remaining admin can't be demoted through the UI, so an instance can't lock
+itself out by accident.
+
+Roles are read from the database on every request, so a change takes effect on
+the next one rather than whenever the session happens to expire.
+
+### Switching between accounts
+
+If you have more than one identity — two work accounts at different tenants, say
+— you can attach them to the same browser session and flip between them without
+logging out, from the menu in the header or **Switch user** under Settings →
+Account. "Add account" runs the normal code flow against
+`/auth/link/{provider}`, asking the provider for its account picker so you
+actually get a choice of which identity to sign in as. Each account keeps its
+own spaces and library; switching changes who you are and nothing else.
+
+The linked set lives in the session cookie, so it only ever contains accounts
+that completed a login in this browser, and it lasts as long as the session.
+Signing out clears all of them at once; unlink one from Settings to drop just
+that one.
 
 ## Background workers
 

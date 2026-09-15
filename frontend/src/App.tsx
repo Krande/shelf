@@ -53,14 +53,18 @@ export default function App() {
           </ProtectedRoute>
         }
       />
+      <Route path="/settings" element={<Navigate to="/settings/account" replace />} />
       <Route
-        path="/settings"
+        path="/settings/:tab"
         element={
           <ProtectedRoute>
             <SettingsPage />
           </ProtectedRoute>
         }
       />
+      {/* Admin moved into Settings as a tab. Kept as a redirect so any
+          bookmark or doc link from when it was top-level still lands. */}
+      <Route path="/admin" element={<Navigate to="/settings/admin" replace />} />
       <Route
         path="/reader/:attachmentId"
         element={
