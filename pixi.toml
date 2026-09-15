@@ -95,6 +95,21 @@ cmd = "npm run typecheck"
 cwd = "frontend"
 description = "Run the SPA TypeScript compiler in noEmit mode"
 
+[tasks.frontend-test]
+cmd = "npm run test"
+cwd = "frontend"
+description = "Run the SPA unit tests (vitest + testing-library, jsdom). No services needed."
+
+[tasks.frontend-test-watch]
+cmd = "npm run test:watch"
+cwd = "frontend"
+description = "Run the SPA tests in watch mode"
+
+[tasks.frontend-test-coverage]
+cmd = "npm run test:coverage"
+cwd = "frontend"
+description = "Run the SPA tests with a v8 coverage report"
+
 [tasks.dev-up]
 cmd = "docker compose up -d"
 description = "Start Postgres + Redis + Gotenberg for local development (no object store — see `up --s3`)"
@@ -178,6 +193,11 @@ description = "Apply pending Alembic migrations"
 cmd = "python -m shelf.scripts.mint_worker_token"
 cwd = "backend"
 description = "Mint a worker-scoped API token (e.g. for the GPU worker host). Pass a label name as the first positional arg."
+
+[tasks.grant-admin]
+cmd = "python -m shelf.scripts.grant_admin"
+cwd = "backend"
+description = "Grant the admin role to an existing user by email (--revoke to take it back). Escape hatch when SHELF_ADMIN_EMAILS isn't practical."
 
 [tasks.alembic-down]
 cmd = "alembic downgrade -1"

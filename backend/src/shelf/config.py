@@ -45,6 +45,20 @@ class Settings(BaseSettings):
 
     dev_login_enabled: bool = True
 
+    # Emails promoted to the admin role on login. Bootstrap only: it
+    # promotes and never demotes, so roles changed in the UI stick and
+    # editing this list can't accidentally strip someone. A fresh
+    # instance has no admin at all — set this once to get the first one,
+    # then manage the rest in-app. `pixi run grant-admin <email>` does
+    # the same thing without a restart.
+    #   SHELF_ADMIN_EMAILS='["you@example.com"]'
+    admin_emails: list[str] = Field(default_factory=list)
+
+    # Upper bound on identities linked to one browser session (the
+    # account switcher). Keeps the session cookie small and bounds how
+    # much one stolen cookie is worth.
+    max_linked_accounts: int = 8
+
     # Public origin for the API, used to construct OIDC redirect URIs.
     public_base_url: str = "http://localhost:8000"
 

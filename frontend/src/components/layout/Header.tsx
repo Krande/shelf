@@ -1,7 +1,12 @@
 import { Link, useLocation } from "react-router";
 import { LibraryBig, Settings } from "lucide-react";
 import { type Me } from "@/api/me";
+import AccountMenu from "./AccountMenu";
 
+// Admin is a tab inside Settings rather than its own nav entry — it
+// belongs with the other instance-level configuration, and keeping the
+// header at two items leaves room for it to stay that way as more
+// admin-only sections land.
 const navItems = [
   { to: "/library", label: "Library", icon: LibraryBig },
   { to: "/settings", label: "Settings", icon: Settings },
@@ -46,13 +51,7 @@ export default function Header({ user }: { user: Me }) {
           })}
         </nav>
       </div>
-      <div
-        className="text-xs"
-        style={{ color: "var(--color-text-muted)" }}
-        title={user.email}
-      >
-        {user.display_name}
-      </div>
+      <AccountMenu user={user} />
     </header>
   );
 }

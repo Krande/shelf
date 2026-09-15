@@ -1,3 +1,4 @@
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
@@ -6,18 +7,36 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..auth.deps import get_current_user
+from ..auth.deps import get_current_user, get_session_claims
+from ..auth.session import SessionClaims
 from ..db import get_session
-from ..models import Attachment, Item, Space, User
+from ..models import Attachment, Identity, Item, Space, User
 from ..services import storage
 
 router = APIRouter(tags=["auth"])
+
+
+class LinkedAccount(BaseModel):
+    id: str
+    email: str
+    display_name: str
+    # OIDC providers this account has an identity with. Lets the SPA send
+    # "switch user" straight to the right provider's account picker
+    # instead of asking which one. Empty for dev-login users, who have no
+    # identity row at all.
+    idps: list[str]
 
 
 class MeResponse(BaseModel):
     id: str
     email: str
     display_name: str
+    role: str
+    is_admin: bool
+    # Every identity linked to this browser session, the active one
+    # included. The SPA's account switcher renders straight from this, so
+    # it doesn't need a second request to draw the menu.
+    accounts: list[LinkedAccount]
 
 
 class SpaceResponse(BaseModel):
@@ -28,11 +47,49 @@ class SpaceResponse(BaseModel):
 
 
 @router.get("/api/me", response_model=MeResponse)
-async def me(user: Annotated[User, Depends(get_current_user)]) -> MeResponse:
+async def me(
+    user: Annotated[User, Depends(get_current_user)],
+    claims: Annotated[SessionClaims, Depends(get_session_claims)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+) -> MeResponse:
+    # Resolve the linked ids against the database rather than trusting the
+    # cookie's copy of them: a user deleted since the session was minted
+    # should drop out of the menu instead of 404-ing on switch.
+    rows = (
+        await db.execute(select(User).where(User.id.in_(claims.account_ids)))
+    ).scalars().all()
+    by_id = {u.id: u for u in rows}
+
+    # One round trip for every linked account's providers, rather than one
+    # per account.
+    idps_by_user: dict[uuid.UUID, list[str]] = {}
+    for user_id, idp in (
+        await db.execute(
+            select(Identity.user_id, Identity.idp)
+            .where(Identity.user_id.in_(claims.account_ids))
+            .order_by(Identity.idp)
+        )
+    ).all():
+        idps_by_user.setdefault(user_id, []).append(idp)
+
+    accounts = [
+        LinkedAccount(
+            id=str(linked.id),
+            email=linked.email,
+            display_name=linked.display_name,
+            idps=idps_by_user.get(linked.id, []),
+        )
+        for account_id in claims.account_ids
+        if (linked := by_id.get(account_id)) is not None
+    ]
+
     return MeResponse(
         id=str(user.id),
         email=user.email,
         display_name=user.display_name,
+        role=user.role,
+        is_admin=user.is_admin,
+        accounts=accounts,
     )
 
 

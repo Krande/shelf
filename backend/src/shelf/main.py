@@ -11,6 +11,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from . import __version__
 from .api import (
+    admin,
     annotations,
     attachments,
     auth,
@@ -72,6 +73,7 @@ app.add_middleware(
 
 app.include_router(auth.router)
 app.include_router(me.router)
+app.include_router(admin.router)
 app.include_router(items.router)
 app.include_router(collections.router)
 app.include_router(attachments.router)

@@ -1,0 +1,48 @@
+name: Frontend
+
+# Type-checks and unit-tests the SPA (vitest + testing-library on jsdom).
+# Independent of the other CI workflows so it reports its own required
+# status check.
+#
+# Until this existed the frontend had no CI at all — a type error or a
+# broken component only showed up in the image build. Both steps share one
+# job because they share an `npm ci`, which dominates the runtime.
+#
+# No services needed: the components under test talk to a stubbed `fetch`,
+# never a real API. Plain Node rather than pixi, since the frontend
+# toolchain is npm's and a conda environment would buy nothing here.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # `ci` rather than `install` so the lockfile is authoritative and a
+      # drifted package.json fails the build instead of being silently
+      # resolved around.
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm run test

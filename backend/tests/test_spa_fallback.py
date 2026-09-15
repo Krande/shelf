@@ -42,9 +42,22 @@ def test_spa_passes_through_static_file(app_with_spa: object) -> None:
     assert "<svg" in r.text
 
 
-def test_spa_falls_back_to_index_for_client_routes(app_with_spa: object) -> None:
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/library",
+        # Nested client routes too — the settings tabs are route segments,
+        # so a reload on one has to reach index.html rather than 404.
+        "/settings/account",
+        "/settings/admin",
+        "/reader/00000000-0000-0000-0000-000000000000",
+    ],
+)
+def test_spa_falls_back_to_index_for_client_routes(
+    app_with_spa: object, path: str
+) -> None:
     client = TestClient(app_with_spa)  # type: ignore[arg-type]
-    r = client.get("/library")
+    r = client.get(path)
     assert r.status_code == 200
     assert "Shelf" in r.text
 

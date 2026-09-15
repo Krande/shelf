@@ -7,11 +7,12 @@
 import { useQuery } from "@tanstack/react-query";
 import { ApiError } from "../api/client";
 import { fetchMe, type Me } from "../api/me";
+import { hardNavigate } from "@/lib/navigation";
 
 export function startLogin(provider: string): void {
   // Full-page redirect — authlib needs the OAuth dance to happen at the
   // top-level browser context, not via fetch.
-  window.location.assign(`/auth/login/${encodeURIComponent(provider)}`);
+  hardNavigate(`/auth/login/${encodeURIComponent(provider)}`);
 }
 
 export type AuthState =
