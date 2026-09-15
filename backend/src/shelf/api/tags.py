@@ -22,6 +22,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth.deps import get_current_user
+from ..auth.spaces import SPACE_ROLE_EDITOR, SPACE_ROLE_VIEWER, require_space_role
 from ..db import get_session
 from ..models import Item, ItemTag, Space, Tag, User
 
@@ -53,33 +54,38 @@ class ItemTagsUpdate(BaseModel):
     tag_ids: list[uuid.UUID]
 
 
-async def _resolve_space(db: AsyncSession, user: User, slug: str) -> Space:
+async def _resolve_space(
+    db: AsyncSession, user: User, slug: str, minimum: str = SPACE_ROLE_VIEWER
+) -> Space:
     result = await db.execute(select(Space).where(Space.slug == slug))
     space = result.scalar_one_or_none()
-    if space is None or space.owner_id != user.id:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Space not found")
+    await require_space_role(db, space, user.id, minimum, label="Space not found")
+    assert space is not None  # require_space_role raises when it isn't
     return space
 
 
-async def _resolve_tag(db: AsyncSession, user: User, tag_id: uuid.UUID) -> Tag:
+async def _resolve_tag(
+    db: AsyncSession, user: User, tag_id: uuid.UUID, minimum: str = SPACE_ROLE_VIEWER
+) -> Tag:
     tag = await db.get(Tag, tag_id)
     if tag is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Tag not found")
     space = await db.get(Space, tag.space_id)
-    if space is None or space.owner_id != user.id:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Tag not found")
+    await require_space_role(db, space, user.id, minimum, label="Tag not found")
     return tag
 
 
 async def _resolve_item(
-    db: AsyncSession, user: User, item_id: uuid.UUID
+    db: AsyncSession,
+    user: User,
+    item_id: uuid.UUID,
+    minimum: str = SPACE_ROLE_VIEWER,
 ) -> Item:
     item = await db.get(Item, item_id)
     if item is None or item.deleted_at is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
     space = await db.get(Space, item.space_id)
-    if space is None or space.owner_id != user.id:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
+    await require_space_role(db, space, user.id, minimum, label="Item not found")
     return item
 
 
@@ -113,7 +119,7 @@ async def create_tag(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> Tag:
-    space = await _resolve_space(db, user, slug)
+    space = await _resolve_space(db, user, slug, SPACE_ROLE_EDITOR)
     name = payload.name.strip()
     if not name:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Name required")
@@ -137,7 +143,7 @@ async def update_tag(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> Tag:
-    tag = await _resolve_tag(db, user, tag_id)
+    tag = await _resolve_tag(db, user, tag_id, SPACE_ROLE_EDITOR)
     if payload.name is not None:
         name = payload.name.strip()
         if not name:
@@ -163,7 +169,7 @@ async def delete_tag(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
-    tag = await _resolve_tag(db, user, tag_id)
+    tag = await _resolve_tag(db, user, tag_id, SPACE_ROLE_EDITOR)
     # ON DELETE CASCADE drops item_tags rows for us.
     await db.delete(tag)
     await db.commit()
@@ -179,12 +185,12 @@ async def set_item_tags(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> list[uuid.UUID]:
-    item = await _resolve_item(db, user, item_id)
+    item = await _resolve_item(db, user, item_id, SPACE_ROLE_EDITOR)
     requested = set(payload.tag_ids)
-    # Validate every requested tag is in the same space and the user
-    # owns it. De-duped via the set.
+    # Validate every requested tag is in the same space and the caller can
+    # write to it. De-duped via the set.
     for tid in requested:
-        tag = await _resolve_tag(db, user, tid)
+        tag = await _resolve_tag(db, user, tid, SPACE_ROLE_EDITOR)
         if tag.space_id != item.space_id:
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,

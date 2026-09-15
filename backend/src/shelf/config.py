@@ -8,6 +8,19 @@ class OIDCProvider(BaseModel):
     client_id: str
     client_secret: str
     scopes: list[str] = ["openid", "email", "profile"]
+    # Which claim identifies the user. `sub` is correct for most
+    # providers and is the default.
+    #
+    # Azure AD / Entra wants "oid": its `sub` is pairwise, a different
+    # value per application registration, so the same person signing in
+    # to two apps looks like two different subjects. `oid` is stable for
+    # the user across the whole tenant.
+    #
+    # Changing this on a live instance changes what gets matched in
+    # `identities`, so existing users arrive as a new (idp, subject) pair
+    # and are re-linked by the email fallback in `upsert_user_from_claims`
+    # — they keep their library as long as the address still matches.
+    subject_claim: str = "sub"
 
 
 class Settings(BaseSettings):

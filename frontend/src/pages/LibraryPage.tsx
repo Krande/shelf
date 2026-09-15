@@ -31,7 +31,7 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { fetchMySpaces, type Space } from "@/api/spaces";
+import { canEdit, fetchMySpaces, type Space } from "@/api/spaces";
 import {
   ALL_SEARCH_SCOPES,
   createItem,
@@ -245,6 +245,15 @@ export default function LibraryPage() {
 
   const [activeSlug, setActiveSlug] = useState<string | null>(null);
   const slug = activeSlug ?? personal?.slug ?? null;
+
+  // A space shared read-only. Hiding the write controls is cosmetic —
+  // the API returns 403 either way — but offering a button that always
+  // fails is worse than not offering it.
+  const activeSpace = useMemo(
+    () => spaces.data?.find((s) => s.slug === slug) ?? null,
+    [spaces.data, slug],
+  );
+  const writable = canEdit(activeSpace);
 
   const collections = useQuery({
     queryKey: ["collections", slug],
@@ -1093,7 +1102,7 @@ export default function LibraryPage() {
                     </button>
                   )}
                   <button
-                    disabled={!slug || uploadPdf.isPending}
+                    disabled={!slug || !writable || uploadPdf.isPending}
                     onClick={() => pdfInput.current?.click()}
                     className="flex items-center gap-1 rounded border px-3 py-1.5 text-sm font-medium disabled:opacity-50"
                     style={{
@@ -1119,8 +1128,13 @@ export default function LibraryPage() {
                     className="hidden"
                   />
                   <button
-                    disabled={!slug}
+                    disabled={!slug || !writable}
                     onClick={() => setFormMode("create")}
+                    title={
+                      writable
+                        ? undefined
+                        : "You have read-only access to this space"
+                    }
                     className="flex items-center gap-1 rounded px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
                     style={{ backgroundColor: "var(--color-accent)" }}
                   >
@@ -1131,6 +1145,19 @@ export default function LibraryPage() {
               )}
             </div>
           </div>
+
+          {activeSpace && !writable && (
+            <div
+              className="border-b px-4 py-1.5 text-xs"
+              style={{
+                borderColor: "var(--color-border)",
+                color: "var(--color-text-muted)",
+              }}
+            >
+              Shared with you as a viewer — you can read and export this
+              space, but not change it.
+            </div>
+          )}
 
           {filterTags.length > 0 && (
             <div

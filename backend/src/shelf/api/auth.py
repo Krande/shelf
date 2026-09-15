@@ -27,6 +27,7 @@ from ..auth.deps import SessionCookie, read_session
 from ..auth.oidc import (
     claims_to_display_name,
     claims_to_email,
+    claims_to_subject,
     is_known_provider,
     oauth,
     provider_names,
@@ -128,9 +129,12 @@ async def callback(
 
     token = await client.authorize_access_token(request)
     claims = token.get("userinfo") or {}
-    sub = claims.get("sub")
-    if not isinstance(sub, str):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Provider returned no sub claim")
+    sub = claims_to_subject(claims, provider)
+    if sub is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Provider returned no usable subject claim",
+        )
 
     email = claims_to_email(claims, idp=provider, sub=sub)
     display_name = claims_to_display_name(claims, email=email)

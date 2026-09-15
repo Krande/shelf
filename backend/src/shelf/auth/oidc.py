@@ -43,6 +43,32 @@ def is_known_provider(name: str) -> bool:
     return name in provider_names()
 
 
+def provider_config(name: str) -> OIDCProvider | None:
+    for p in settings.oidc_providers:
+        if p.name == name:
+            return p
+    return None
+
+
+def claims_to_subject(claims: dict[str, object], provider: str) -> str | None:
+    """The stable per-user identifier for this provider.
+
+    Reads whichever claim the provider is configured with — `sub` for
+    most, `oid` for Azure AD, where `sub` differs per application
+    registration and so isn't stable across apps. Falls back to `sub`
+    when the configured claim is absent, which keeps a provider that
+    only sometimes emits the richer claim working rather than locking
+    those users out.
+    """
+    config = provider_config(provider)
+    claim = config.subject_claim if config is not None else "sub"
+    value = claims.get(claim)
+    if isinstance(value, str) and value:
+        return value
+    fallback = claims.get("sub")
+    return fallback if isinstance(fallback, str) and fallback else None
+
+
 async def upsert_user_from_claims(
     db: AsyncSession,
     *,

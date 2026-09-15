@@ -30,6 +30,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth.deps import get_current_user
+from ..auth.spaces import SPACE_ROLE_EDITOR, SPACE_ROLE_VIEWER, require_space_role
 from ..db import get_session
 from ..models import (
     Attachment,
@@ -41,6 +42,7 @@ from ..models import (
     User,
 )
 from ..services import extraction, storage
+from ..services.storage import attachment_storage_key
 
 log = logging.getLogger(__name__)
 
@@ -119,25 +121,30 @@ class AttachmentProcessingResponse(BaseModel):
 
 
 async def _resolve_item(
-    db: AsyncSession, user: User, item_id: uuid.UUID
+    db: AsyncSession,
+    user: User,
+    item_id: uuid.UUID,
+    minimum: str = SPACE_ROLE_VIEWER,
 ) -> Item:
     item = await db.get(Item, item_id)
     if item is None or item.deleted_at is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
     space = await db.get(Space, item.space_id)
-    if space is None or space.owner_id != user.id:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
+    await require_space_role(db, space, user.id, minimum, label="Item not found")
     return item
 
 
 async def _resolve_attachment(
-    db: AsyncSession, user: User, attachment_id: uuid.UUID
+    db: AsyncSession,
+    user: User,
+    attachment_id: uuid.UUID,
+    minimum: str = SPACE_ROLE_VIEWER,
 ) -> Attachment:
     att = await db.get(Attachment, attachment_id)
     if att is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Attachment not found")
     # Re-using the item resolver keeps the auth check in one place.
-    await _resolve_item(db, user, att.item_id)
+    await _resolve_item(db, user, att.item_id, minimum)
     return att
 
 
@@ -170,13 +177,9 @@ async def register_attachment(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> AttachmentRegisterResponse:
-    item = await _resolve_item(db, user, item_id)
+    item = await _resolve_item(db, user, item_id, SPACE_ROLE_EDITOR)
     att_id = uuid.uuid4()
-    # Storage key embeds item id for easy bucket-level scrubbing if an
-    # item gets hard-deleted later. Filename is *not* part of the key
-    # — it's stored in the row, and the URL is presigned, so leaking
-    # original names via the path is unnecessary.
-    storage_key = f"items/{item.id}/attachments/{att_id}"
+    storage_key = attachment_storage_key(item.space_id, item.id, att_id)
     att = Attachment(
         id=att_id,
         item_id=item.id,
@@ -445,7 +448,7 @@ async def complete_attachment(
     """SPA-side parity with /api/v1/uploads/{id}/complete: the browser
     PUTs the body to the presigned URL, then calls this so the row
     stops looking pending."""
-    att = await _resolve_attachment(db, user, attachment_id)
+    att = await _resolve_attachment(db, user, attachment_id, SPACE_ROLE_EDITOR)
     if att.uploaded_at is None:
         att.uploaded_at = datetime.now(UTC)
         await extraction.mark_and_enqueue(att)
@@ -497,7 +500,7 @@ async def delete_attachment(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
-    att = await _resolve_attachment(db, user, attachment_id)
+    att = await _resolve_attachment(db, user, attachment_id, SPACE_ROLE_EDITOR)
     # Best-effort: if an object isn't there, drop the row anyway so
     # the user can recover from a half-done upload. The processing
     # row + derivation rows cascade via FK; we just have to clean up

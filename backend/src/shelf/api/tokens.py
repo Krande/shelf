@@ -126,14 +126,16 @@ async def create_token(
                     status.HTTP_400_BAD_REQUEST,
                     f"Unknown collection {cid}",
                 )
-            # Confirm ownership via the space.
-            from ..models import Space  # local import to avoid cycle
+            # Confirm access via the space. A token can only ever be
+            # scoped to collections the minter can already reach.
+            from ..auth.spaces import space_role  # local import to avoid cycle
+            from ..models import Space
 
             space = await db.get(Space, coll.space_id)
-            if space is None or space.owner_id != user.id:
+            if space is None or await space_role(db, space, user.id) is None:
                 raise HTTPException(
                     status.HTTP_400_BAD_REQUEST,
-                    f"Collection {cid} is not yours",
+                    f"Collection {cid} is not one you can access",
                 )
 
     minted = mint()

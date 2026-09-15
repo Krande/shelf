@@ -6,6 +6,7 @@ Azure Blob, GCS, or a local filesystem. The backend is chosen by config.
 """
 
 import secrets
+import uuid
 from datetime import timedelta
 
 import httpx
@@ -143,6 +144,31 @@ async def read_object(key: str) -> bytes:
 
 async def delete_object(key: str) -> None:
     await delete_async(get_store(), key)
+
+
+# ── Key layout ───────────────────────────────────────────────────────────────
+
+
+def attachment_storage_key(
+    space_id: uuid.UUID, item_id: uuid.UUID, attachment_id: uuid.UUID
+) -> str:
+    """Where a newly registered attachment's bytes live.
+
+    Leading with the space makes the bucket mirror the ownership model:
+    everything one space holds sits under a single prefix, so a bucket
+    policy, a lifecycle rule or a "delete this space" sweep can address it
+    without consulting the database.
+
+    Only new registrations use this. Keys are stored per row, so
+    attachments written under the older flat ``items/{id}/...`` layout
+    keep working untouched — there is no rewrite and no dual-read path,
+    and derivations follow whatever their parent key already is.
+
+    The filename is deliberately absent: it lives on the row, and the URL
+    is presigned, so putting original names in the path would leak them
+    for nothing.
+    """
+    return f"spaces/{space_id}/items/{item_id}/attachments/{attachment_id}"
 
 
 # ── Original-blob preservation ───────────────────────────────────────────────

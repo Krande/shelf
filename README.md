@@ -182,16 +182,38 @@ Providers are a JSON list and none is special-cased — Authentik, Keycloak, Ent
 SHELF_OIDC_PROVIDERS='[{"name":"authentik","issuer":"https://authentik.example.com/application/o/shelf/","client_id":"...","client_secret":"..."}]'
 ```
 
-Register the redirect URI as `{SHELF_PUBLIC_BASE_URL}/auth/callback/{name}`, where `name` is the provider's label in the JSON above — so the example needs `https://shelf.example.com/auth/callback/authentik`. On first login shelf creates the user, the identity record, and a personal space; later logins match on `(idp, sub)`, so a user keeps their library if their email changes.
+Register the redirect URI as `{SHELF_PUBLIC_BASE_URL}/auth/callback/{name}`, where `name` is the provider's label in the JSON above — so the example needs `https://shelf.example.com/auth/callback/authentik`. On first login shelf creates the user, the identity record, and a personal space; later logins match on `(idp, subject)`, so a user keeps their library if their email changes.
+
+### Which claim identifies the user
+
+`subject_claim` picks the claim shelf keys identities on. It defaults to `sub`,
+which is right for most providers. **Azure AD / Entra needs `"oid"`**: its `sub`
+is pairwise — a different value per application registration — so the same
+person looks like a different subject to every app, while `oid` is stable across
+the tenant.
+
+```
+SHELF_OIDC_PROVIDERS='[{"name":"entra","issuer":"https://login.microsoftonline.com/<tenant>/v2.0","client_id":"...","client_secret":"...","subject_claim":"oid"}]'
+```
+
+Changing this on a running instance changes what gets matched in `identities`,
+so existing users arrive as a new `(idp, subject)` pair. They're re-linked by
+email on next login and keep their library, as long as the address still
+matches.
 
 Behind a reverse proxy, uvicorn needs `--proxy-headers --forwarded-allow-ips='*'` so redirect URIs are built as `https://…` and match what the IdP has registered. The Dockerfile already does this.
 
 ## Roles and accounts
 
-Two roles, `user` and `admin`. Everyone is a `user`; admins additionally get an
-Admin tab in Settings, which lists everyone on the instance and hands out roles.
-Admin is a cookie-session thing — no API token scope grants it, so a leaked
-script token can't reach those routes.
+Two *instance* roles, `user` and `admin`. Everyone is a `user`; admins
+additionally get an Admin tab in Settings, which lists everyone on the instance
+and hands out roles. Admin is a cookie-session thing — no API token scope grants
+it, so a leaked script token can't reach those routes.
+
+Being an admin does **not** grant access to anyone's spaces. Handing out roles
+and reading everybody's library are different powers, and keeping them apart
+makes the admin role far less dangerous to hold. An admin who needs a space asks
+its owner, like anyone else.
 
 A fresh instance has no admin. Name yourself in `SHELF_ADMIN_EMAILS` and log in;
 the role is granted on login and then lives in the database, so removing the
@@ -217,6 +239,33 @@ The linked set lives in the session cookie, so it only ever contains accounts
 that completed a login in this browser, and it lasts as long as the session.
 Signing out clears all of them at once; unlink one from Settings to drop just
 that one.
+
+## Sharing a space
+
+Spaces are the unit of sharing. Each one has a creator, who is always its owner,
+plus any number of members at one of two levels:
+
+| Role | Can |
+|---|---|
+| `viewer` | read items, attachments, notes and tags; search; export |
+| `editor` | all of the above, plus create, edit and delete content |
+| `owner` | all of the above, plus manage who has access |
+
+Owner belongs to the creator and isn't assignable — there's no second owner, and
+no membership row to delete that would lock the creator out of their own space.
+An editor can fill a space but can't widen access to it, so "who else can see
+this" stays the owner's decision.
+
+Manage members under Settings → Spaces. People are added by email and must have
+signed in at least once, since shelf has no user directory to search (exposing
+one to every account holder isn't a trade worth making). Removing someone
+revokes their access but leaves the content they created — it belongs to the
+space, not to them.
+
+Attachments uploaded from now on are stored under `spaces/{space_id}/…`, so a
+bucket policy or lifecycle rule can address one space's objects without going
+through the database. Existing objects keep their original keys and are not
+rewritten; keys are stored per row, so both layouts coexist.
 
 ## Background workers
 

@@ -42,14 +42,21 @@ beforeEach(() => {
   mockFetch({
     "/auth/providers": { body: { providers: [], dev_login: false } },
     "/api/admin/users": { body: [] },
+    "/api/me/spaces": { body: [] },
   });
   signedInAs();
 });
 
 describe("tab visibility", () => {
-  it("shows the four user tabs", () => {
+  it("shows the five user tabs", () => {
     renderSettings("/settings/account");
-    for (const label of ["Account", "Appearance", "Documents", "API tokens"]) {
+    for (const label of [
+      "Account",
+      "Spaces",
+      "Appearance",
+      "Documents",
+      "API tokens",
+    ]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
     }
   });
@@ -77,6 +84,11 @@ describe("tab content", () => {
     renderSettings("/settings/account");
     expect(screen.getByText("Signed in as")).toBeInTheDocument();
     expect(screen.getByText("Linked accounts")).toBeInTheDocument();
+  });
+
+  it("renders the spaces tab", () => {
+    renderSettings("/settings/spaces");
+    expect(screen.getByText("Spaces", { selector: "h2" })).toBeInTheDocument();
   });
 
   it("renders the appearance tab", () => {

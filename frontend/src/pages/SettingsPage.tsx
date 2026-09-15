@@ -11,6 +11,7 @@ import { Navigate, NavLink, useParams } from "react-router";
 import {
   FileText,
   KeyRound,
+  Library,
   Palette,
   ShieldCheck,
   UserRound,
@@ -21,12 +22,14 @@ import AdminSection from "@/components/settings/AdminSection";
 import AppearanceSection from "@/components/settings/AppearanceSection";
 import ExtractionSection from "@/components/settings/ExtractionSection";
 import ProcessingSection from "@/components/settings/ProcessingSection";
+import SpacesSection from "@/components/settings/SpacesSection";
 import StorageCleanupSection from "@/components/settings/StorageCleanupSection";
 import TokenSection from "@/components/settings/TokenSection";
 import { useAuth } from "@/auth/session";
 
 const TABS = [
   { id: "account", label: "Account", Icon: UserRound, adminOnly: false },
+  { id: "spaces", label: "Spaces", Icon: Library, adminOnly: false },
   { id: "appearance", label: "Appearance", Icon: Palette, adminOnly: false },
   { id: "documents", label: "Documents", Icon: FileText, adminOnly: false },
   { id: "tokens", label: "API tokens", Icon: KeyRound, adminOnly: false },
@@ -91,6 +94,7 @@ export default function SettingsPage() {
         </nav>
 
         {active.id === "account" && <AccountSection user={me} />}
+        {active.id === "spaces" && <SpacesSection />}
         {active.id === "appearance" && <AppearanceSection />}
         {active.id === "documents" && (
           <>
