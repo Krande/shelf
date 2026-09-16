@@ -10,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -63,6 +64,22 @@ class Attachment(UUIDPK, Timestamps, Base):
         ForeignKey("items.id", ondelete="CASCADE"), nullable=False
     )
     storage_key: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    # SHA-256 of the bytes **as uploaded**, lowercase hex. Written once
+    # and never recomputed, which matters because OCR rewrites the live
+    # blob in place (`worker/ocr.py`) — after an OCR pass this hash
+    # describes `<storage_key>.original`, not what `storage_key` now
+    # holds. That is the useful invariant: it identifies the file someone
+    # put in, not whatever shelf has since done to it.
+    #
+    # Indexed but deliberately **not** unique: the same file legitimately
+    # lives in two spaces, which is what copying an item does on purpose.
+    # It's for finding things, not for constraining them — and not for
+    # deduplicating storage either, since blobs are keyed by space so a
+    # bucket policy can address one space without consulting the database.
+    #
+    # Nullable: rows predating the column, and uploads whose client never
+    # supplied one and whose extraction hasn't run yet.
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     filename: Mapped[str] = mapped_column(String, nullable=False)
     content_type: Mapped[str] = mapped_column(String, nullable=False)
     size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
@@ -93,6 +110,8 @@ class Attachment(UUIDPK, Timestamps, Base):
             nullable=True,
         )
     )
+
+    __table_args__ = (Index("ix_attachments_sha256", "sha256"),)
 
 
 class AttachmentProcessing(Timestamps, Base):

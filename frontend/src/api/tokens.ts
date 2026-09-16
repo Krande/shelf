@@ -7,6 +7,14 @@ export interface ApiToken {
   name: string;
   prefix: string;
   scopes: TokenScope[];
+  /**
+   * Space ids this token is limited to, or null for "every space the
+   * user can reach" — which includes spaces shared with them and spaces
+   * theirs subscribe to. Never widens access: it's intersected with what
+   * the user can read at request time, so revoking a membership or
+   * dropping a subscription takes the token's reach with it.
+   */
+  allowed_space_ids: string[] | null;
   allowed_collection_ids: string[] | null;
   include_descendants: boolean;
   expires_at: string | null;
@@ -26,6 +34,7 @@ export function listTokens(): Promise<ApiToken[]> {
 export function createToken(payload: {
   name: string;
   scopes: TokenScope[];
+  allowed_space_ids?: string[] | null;
   allowed_collection_ids?: string[] | null;
   include_descendants?: boolean;
   expires_at?: string | null;

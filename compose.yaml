@@ -43,6 +43,32 @@ services:
       - --chromium-disable-routes=true
       - --api-timeout=120s
 
+  # Job queue for the background workers (text extraction, OCR, outline).
+  # Without it the API still accepts uploads and records
+  # `extraction_status = 'pending'` on the row — it just has nobody to tell,
+  # so the PDF never gets its text and full-text search can't see it.
+  #
+  # `-js` turns JetStream on, which is what the code actually uses: the
+  # `shelf-jobs` stream is WorkQueue-retention, so a message survives the
+  # worker being down and is dropped once acked. `-sd /data` puts that
+  # stream on a named volume so a restart doesn't lose queued work.
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports:
+      - "${SHELF_DEV_NATS_PORT:-4222}:4222"
+      - "${SHELF_DEV_NATS_MONITOR_PORT:-8222}:8222"
+    volumes:
+      - nats_data:/data
+    healthcheck:
+      # /healthz on the monitoring port reports JetStream readiness, not
+      # just "the process is up" — the distinction matters because the
+      # stream assertion fails against a server still starting JetStream.
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:8222/healthz || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   # ── S3-compatible object store ─────────────────────────────────────────────
   # Two interchangeable implementations behind compose profiles — pick one:
   #
@@ -154,6 +180,7 @@ configs:
 
 volumes:
   postgres_data:
+  nats_data:
   garage_meta:
   garage_data:
   rustfs_data:

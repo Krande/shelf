@@ -120,11 +120,6 @@ async def test_viewer_cannot_write_anywhere_in_the_space(
     ).status_code == 403
     assert (
         await client.post(
-            f"/api/items/{item_id}/notes", json={"content_html": "<p>no</p>"}
-        )
-    ).status_code == 403
-    assert (
-        await client.post(
             f"/api/items/{item_id}/attachments",
             json={
                 "filename": "x.pdf",
@@ -133,6 +128,27 @@ async def test_viewer_cannot_write_anywhere_in_the_space(
             },
         )
     ).status_code == 403
+
+
+async def test_viewer_can_take_notes_but_they_start_shared(
+    client: AsyncClient,
+) -> None:
+    """Notes are the deliberate exception to "viewer cannot write".
+
+    Annotating a document you can only read is the point of notes, so
+    read access is enough to write one — see auth/visibility.py. In a
+    space the caller is actually a member of, the note is shared with
+    that space, which is the behaviour notes always had; only inherited
+    items default to private.
+    """
+    _slug, item_id, _ = await _setup(client, "viewer")
+
+    created = await client.post(
+        f"/api/items/{item_id}/notes", json={"content_html": "<p>mine</p>"}
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["visibility"] == "space"
+    assert created.json()["is_mine"] is True
 
 
 async def test_viewer_can_export(client: AsyncClient) -> None:

@@ -19,7 +19,12 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth.deps import get_current_user
-from ..auth.spaces import SPACE_ROLE_EDITOR, SPACE_ROLE_VIEWER, require_space_role
+from ..auth.spaces import (
+    SPACE_ROLE_EDITOR,
+    SPACE_ROLE_VIEWER,
+    item_source_space_ids,
+    require_space_role,
+)
 from ..db import get_session
 from ..models import Collection, Item, ItemCollection, Space, User
 
@@ -58,6 +63,15 @@ class CollectionResponse(BaseModel):
     position: int
     created_at: datetime
     updated_at: datetime
+    # Belongs to a space this one inherits, not to this one. Read-only:
+    # it can be browsed and filtered on, but not renamed, reordered, or
+    # added to from here.
+    is_inherited: bool = False
+    # Name of the space it belongs to. Only populated for inherited
+    # rows, where the rail heads each borrowed group with it — a folder
+    # called "Structural" means something different depending on whose
+    # it is, and a flat merged list hides that.
+    space_name: str | None = None
 
 
 class ItemCollectionsUpdate(BaseModel):
@@ -138,17 +152,61 @@ async def list_collections(
     slug: str,
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
-) -> list[Collection]:
+) -> list[CollectionResponse]:
+    """This space's folders, plus those of the spaces it inherits.
+
+    Inheriting a space's items without its organisation leaves a project
+    looking at a flat list of everything the Standards space holds, which
+    is most of the value of subscribing thrown away. So the parent's
+    collections come across too, flagged `is_inherited` and read-only —
+    they're a filter over items already visible here, not somewhere this
+    space can file things.
+
+    Writes are unaffected: create / rename / reorder all go through
+    `_resolve_collection`, which needs editor on the collection's *own*
+    space and so refuses an inherited one.
+    """
     space = await _resolve_space(db, user, slug)
-    # Position-only sort: the client groups by parent_id and the
-    # relative order within each group survives because sibling
+    sources = await item_source_space_ids(db, space.id)
+
+    # Position-only sort within a space: the client groups by parent_id
+    # and the relative order within each group survives because sibling
     # positions are dense and unique per (space_id, parent_id).
+    #
+    # Own collections first. Positions restart at 0 in every space, so
+    # interleaving them by position alone would shuffle a project's own
+    # folders in among the ones it borrows.
     result = await db.execute(
         select(Collection)
-        .where(Collection.space_id == space.id)
+        .where(Collection.space_id.in_(sources))
         .order_by(Collection.position, Collection.name)
     )
-    return list(result.scalars().all())
+    rows = list(result.scalars().all())
+    own = [c for c in rows if c.space_id == space.id]
+    inherited = [c for c in rows if c.space_id != space.id]
+
+    names: dict[uuid.UUID, str] = {}
+    if inherited:
+        names = {
+            sid: name
+            for sid, name in (
+                await db.execute(
+                    select(Space.id, Space.name).where(
+                        Space.id.in_({c.space_id for c in inherited})
+                    )
+                )
+            ).all()
+        }
+
+    return [
+        CollectionResponse.model_validate(c).model_copy(
+            update={
+                "is_inherited": c.space_id != space.id,
+                "space_name": names.get(c.space_id),
+            }
+        )
+        for c in [*own, *inherited]
+    ]
 
 
 @router.post(

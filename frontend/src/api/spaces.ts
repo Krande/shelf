@@ -11,11 +11,25 @@ export interface Space {
   /** The *caller's* role here, not the space's own property. */
   role: SpaceRole;
   is_owner: boolean;
+  /** Only set in an `includeInherited` listing: reached through a
+   *  subscription rather than held directly. Always read-only. */
+  is_inherited?: boolean;
 }
 
-/** Spaces the caller owns plus any they've been added to. */
-export function fetchMySpaces(): Promise<Space[]> {
-  return apiFetch<Space[]>("/api/me/spaces");
+/**
+ * Spaces the caller owns plus any they've been added to.
+ *
+ * `includeInherited` also returns the spaces those subscribe to. Off by
+ * default because the space switcher is a list of places you can
+ * *work*, and an inherited space isn't one — its items already appear
+ * inside the space that subscribes to it. Turn it on where a space is
+ * being named rather than moved to, such as scoping an API token.
+ */
+export function fetchMySpaces(
+  opts: { includeInherited?: boolean } = {},
+): Promise<Space[]> {
+  const qs = opts.includeInherited ? "?include_inherited=true" : "";
+  return apiFetch<Space[]>(`/api/me/spaces${qs}`);
 }
 
 /**
@@ -56,6 +70,36 @@ export function createSpace(name: string, slug?: string): Promise<Space> {
     method: "POST",
     body: JSON.stringify(slug ? { name, slug } : { name }),
   });
+}
+
+/**
+ * Rename a space, change its slug, or both. Omitted fields are left
+ * alone.
+ *
+ * The space's owner may do this; an instance admin may do it to any
+ * *shared* space, which is a label change and grants them no access to
+ * what it holds. A personal space's slug is fixed — `is_personal` is
+ * derived from its `u-` prefix — though its name can still change.
+ *
+ * Changing the slug changes the space's URL, with no redirect from the
+ * old one. Nothing stored points at a slug, so no access breaks.
+ */
+export function updateSpace(
+  slug: string,
+  changes: { name?: string; slug?: string },
+): Promise<UpdatedSpace> {
+  return apiFetch<UpdatedSpace>(`/api/spaces/${encodeURIComponent(slug)}`, {
+    method: "PATCH",
+    body: JSON.stringify(changes),
+  });
+}
+
+/**
+ * Like `Space`, but `role` can be null: an instance admin renaming a
+ * space they hold no role in gets the new name back and nothing else.
+ */
+export interface UpdatedSpace extends Omit<Space, "role"> {
+  role: SpaceRole | null;
 }
 
 // ── Membership ───────────────────────────────────────────────────────────────
@@ -101,5 +145,87 @@ export function removeMember(slug: string, userId: string): Promise<void> {
   return apiFetch<void>(
     `/api/spaces/${encodeURIComponent(slug)}/members/${userId}`,
     { method: "DELETE" },
+  );
+}
+
+// ── Inheritance ──────────────────────────────────────────────────────────────
+//
+// A space can subscribe to another and read its items without holding a
+// copy — the shape a shared "Standards" space wants, with every project
+// and every person subscribing to the one copy.
+//
+// Two sides: the space being read opts in once (`subscribable`), and the
+// space doing the reading adds and drops the subscription.
+
+export interface Subscription {
+  space_id: string;
+  slug: string;
+  name: string;
+  subscribable: boolean;
+}
+
+/** What this space subscribes to. Readable by anyone who can read it. */
+export function fetchInherited(slug: string): Promise<Subscription[]> {
+  return apiFetch<Subscription[]>(
+    `/api/spaces/${encodeURIComponent(slug)}/inherits`,
+  );
+}
+
+/** Point `slug` at another space, gaining its items read-only. */
+export function subscribeToSpace(
+  slug: string,
+  parentSlug: string,
+): Promise<Subscription> {
+  return apiFetch<Subscription>(
+    `/api/spaces/${encodeURIComponent(slug)}/inherits`,
+    { method: "POST", body: JSON.stringify({ parent_slug: parentSlug }) },
+  );
+}
+
+export function unsubscribeFromSpace(
+  slug: string,
+  parentSlug: string,
+): Promise<void> {
+  return apiFetch<void>(
+    `/api/spaces/${encodeURIComponent(slug)}/inherits/${encodeURIComponent(parentSlug)}`,
+    { method: "DELETE" },
+  );
+}
+
+/** Which spaces subscribe to this one. Owner only — it's the same
+ * question as "who can see my items". */
+export function fetchSubscribers(slug: string): Promise<Subscription[]> {
+  return apiFetch<Subscription[]>(
+    `/api/spaces/${encodeURIComponent(slug)}/subscribers`,
+  );
+}
+
+export function removeSubscriber(
+  slug: string,
+  childSlug: string,
+): Promise<void> {
+  return apiFetch<void>(
+    `/api/spaces/${encodeURIComponent(slug)}/subscribers/${encodeURIComponent(childSlug)}`,
+    { method: "DELETE" },
+  );
+}
+
+/**
+ * Shared spaces on this instance whose owners have opened them to be
+ * inherited. Visible to every signed-in user — that's what makes a
+ * Standards space discoverable without being added to it first.
+ */
+export function fetchSubscribable(): Promise<Subscription[]> {
+  return apiFetch<Subscription[]>("/api/spaces/subscribable");
+}
+
+/** Owner-only: open this space to subscriptions, or close it to new ones. */
+export function setSubscribable(
+  slug: string,
+  subscribable: boolean,
+): Promise<Subscription> {
+  return apiFetch<Subscription>(
+    `/api/spaces/${encodeURIComponent(slug)}/settings`,
+    { method: "PATCH", body: JSON.stringify({ subscribable }) },
   );
 }

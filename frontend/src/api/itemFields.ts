@@ -9,6 +9,7 @@
  */
 
 export type ItemType =
+  | "standard"
   | "journalArticle"
   | "book"
   | "bookSection"
@@ -34,6 +35,9 @@ export interface Creator {
 }
 
 export const ITEM_TYPES: { value: ItemType; label: string }[] = [
+  // First in the list rather than alphabetical: on an engineering
+  // instance it is the type most items are.
+  { value: "standard", label: "Engineering Standard" },
   { value: "journalArticle", label: "Journal Article" },
   { value: "book", label: "Book" },
   { value: "bookSection", label: "Book Section" },
@@ -57,6 +61,33 @@ export const COMMON_FIELDS = ["date", "abstractNote", "url", "extra"] as const;
 
 /** Type-specific fields appended after the common ones. */
 export const TYPE_FIELDS: Record<string, readonly string[]> = {
+  // `standardBody` + `designation` + `edition` are the fields that also
+  // feed the revision link (see api/standards.ts) — the standards panel
+  // in the item detail prefills its form from them, so keeping them
+  // spelled the same on both sides is load-bearing.
+  //
+  // `nationalAnnex` matters for anything adopted nationally: an
+  // international standard is often republished by a national body with
+  // an annex carrying that country's own parameters. Two national
+  // adoptions of one standard are not interchangeable, so the annex is
+  // part of identifying which document you're actually designing to.
+  //
+  // `amendments` records the corrigenda and amendments a consolidated
+  // printing has absorbed. Publishers routinely drop those from the
+  // title once they're incorporated, which makes the title alone a poor
+  // record of what's in the file.
+  standard: [
+    "standardBody",
+    "designation",
+    "edition",
+    "nationalAnnex",
+    "amendments",
+    "issuedOn",
+    "supersedes",
+    "language",
+    "committee",
+    "numberOfPages",
+  ],
   journalArticle: ["publicationTitle", "volume", "issue", "pages", "DOI", "ISSN"],
   book: ["publisher", "place", "ISBN", "pages"],
   bookSection: ["bookTitle", "publisher", "place", "ISBN", "pages"],
@@ -76,6 +107,16 @@ export const TYPE_FIELDS: Record<string, readonly string[]> = {
 
 export const FIELD_LABELS: Record<string, string> = {
   title: "Title",
+  standardBody: "Issuing Body",
+  designation: "Designation",
+  edition: "Edition",
+  nationalAnnex: "National Annex",
+  amendments: "Amendments",
+  supersedes: "Supersedes",
+  language: "Language",
+  issuedOn: "Issued",
+  committee: "Committee",
+  numberOfPages: "Pages",
   date: "Date",
   abstractNote: "Abstract",
   url: "URL",

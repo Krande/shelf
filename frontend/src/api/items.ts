@@ -29,6 +29,13 @@ export interface Item {
   deleted_at: string | null;
   collection_ids: string[];
   tag_ids: string[];
+  /**
+   * Reached this listing through an inheritance link rather than living
+   * in the space that was asked for. Read-only here — `space_id` says
+   * where it actually lives. Only set by the per-space listing; the
+   * single-item routes have no "here" to be inherited into.
+   */
+  is_inherited?: boolean;
 }
 
 export type ItemStatus = "active" | "trashed" | "all";
@@ -56,6 +63,14 @@ export const SEARCH_SCOPE_LABELS: Record<SearchScope, string> = {
   extra: "Extra",
   fulltext: "PDF body",
 };
+
+/**
+ * What to do with standards this space has pinned a revision of.
+ *
+ * "pinned" (the server default) shows the chosen revision and hides its
+ * siblings; "all" reveals them. Standards with no pin are unaffected.
+ */
+export type RevisionFilter = "pinned" | "all";
 
 export interface ItemCreate {
   item_type: string;
@@ -85,6 +100,7 @@ export function listItems(
     direction?: SortDirection;
     collection?: string;
     scope?: SearchScope[];
+    revisions?: RevisionFilter;
   } = {},
 ): Promise<ListItemsResponse> {
   const params = new URLSearchParams();
@@ -112,6 +128,9 @@ export function listItems(
     for (const s of opts.scope) params.append("scope", s);
   }
   if (opts.collection) params.set("collection", opts.collection);
+  // Only when overriding: "pinned" is the server default and sending it
+  // would put a redundant param in every URL and every query key.
+  if (opts.revisions === "all") params.set("revisions", "all");
   const qs = params.toString();
   return apiFetch<ListItemsResponse>(
     `/api/spaces/${encodeURIComponent(slug)}/items${qs ? `?${qs}` : ""}`,
@@ -152,6 +171,38 @@ export function permanentDeleteItem(id: string): Promise<void> {
 export function restoreItem(id: string): Promise<Item> {
   return apiFetch<Item>(`/api/items/${encodeURIComponent(id)}/restore`, {
     method: "POST",
+  });
+}
+
+export interface CopyItemResult {
+  item_id: string;
+  space_id: string;
+  space_slug: string;
+  attachments_copied: number;
+  linked_to_standard: boolean;
+}
+
+/**
+ * Copy an item into another space — a real copy, bytes included.
+ *
+ * For a document many spaces need to *read*, subscribing to the space
+ * that owns it is better: one copy, one place to fix a mistake. This is
+ * for when the target genuinely wants its own.
+ *
+ * Notes and highlights deliberately don't come across; they belong to
+ * whoever wrote them, under the visibility they chose.
+ */
+export function copyItem(
+  id: string,
+  targetSlug: string,
+  opts: { includeAttachments?: boolean } = {},
+): Promise<CopyItemResult> {
+  return apiFetch<CopyItemResult>(`/api/items/${encodeURIComponent(id)}/copy`, {
+    method: "POST",
+    body: JSON.stringify({
+      target_slug: targetSlug,
+      include_attachments: opts.includeAttachments ?? true,
+    }),
   });
 }
 

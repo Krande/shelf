@@ -57,7 +57,11 @@ export default function SettingsPage() {
 
   return (
     <AppShell>
-      <div className="mx-auto w-full max-w-2xl p-6">
+      {/* Steps up with the viewport rather than sitting at one width: the
+          users table and the space member rows have real columns in them
+          and were wrapping on a desktop window with room to spare. Capped
+          at 5xl so the text sections don't turn into full-width lines. */}
+      <div className="mx-auto w-full max-w-2xl p-6 lg:max-w-4xl xl:max-w-5xl">
         <h1 className="mb-4 text-lg font-semibold">Settings</h1>
 
         {/* overflow-y-hidden is load-bearing: setting only overflow-x to

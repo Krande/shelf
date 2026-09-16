@@ -35,11 +35,12 @@ from ..auth.oidc import (
     provider_names,
     upsert_user_from_claims,
 )
+from ..auth.provisioning import create_user_with_personal_space
 from ..auth.roles import apply_admin_bootstrap, apply_dev_login_role
 from ..auth.session import InvalidSessionError, issue_session, parse_session
 from ..config import settings
 from ..db import get_session
-from ..models import Space, User
+from ..models import User
 
 log = logging.getLogger(__name__)
 
@@ -254,18 +255,9 @@ async def dev_login(
     result = await db.execute(select(User).where(User.email == payload.email))
     user = result.scalar_one_or_none()
     if user is None:
-        user = User(
-            email=payload.email,
-            display_name=payload.display_name or payload.email.split("@", 1)[0],
+        user = await create_user_with_personal_space(
+            db, email=payload.email, display_name=payload.display_name
         )
-        db.add(user)
-        await db.flush()
-        space = Space(
-            slug=f"u-{user.id.hex[:8]}",
-            name=f"{user.display_name}'s shelf",
-            owner_id=user.id,
-        )
-        db.add(space)
         await db.commit()
         await db.refresh(user)
 

@@ -3,6 +3,13 @@
 List / create / get / update / soft-delete / restore /
 permanent-delete. Permissions come from the caller's role in the item's
 space: viewer reads, editor writes (see auth/spaces.py).
+
+A space's listing covers its own items *and* the items of every space it
+inherits, which is what makes a project space show the standards it
+subscribes to without holding a copy. Inherited rows are read-only —
+`require_space_role` refuses the writes — and carry `is_inherited` so the
+SPA can say where they came from. Writes still address one space: a
+create lands in the space named in the URL, never in an inherited one.
 """
 
 import uuid
@@ -20,6 +27,7 @@ from ..auth.deps import get_current_user
 from ..auth.spaces import (
     SPACE_ROLE_EDITOR,
     SPACE_ROLE_VIEWER,
+    item_source_space_ids,
     require_space_role,
 )
 from ..db import get_session
@@ -30,6 +38,8 @@ from ..models import (
     ItemCollection,
     ItemTag,
     Space,
+    SpaceStandardPin,
+    StandardRevision,
     Tag,
     User,
 )
@@ -101,6 +111,10 @@ class ItemResponse(BaseModel):
     deleted_at: datetime | None = None
     collection_ids: list[uuid.UUID] = []
     tag_ids: list[uuid.UUID] = []
+    # True when this row reached the listing through an inheritance link
+    # rather than living in the space that was asked for. Read-only here;
+    # `space_id` says where it actually lives.
+    is_inherited: bool = False
 
 
 class ListItemsResponse(BaseModel):
@@ -114,12 +128,17 @@ class ListItemsResponse(BaseModel):
 
 
 async def _attach_collection_ids(
-    db: AsyncSession, items: list[Item]
+    db: AsyncSession, items: list[Item], *, home_space_id: uuid.UUID | None = None
 ) -> list[dict[str, Any]]:
     """Hydrate items with their collection_ids and tag_ids in two
     single queries (one per join). Returning bare ORM rows would force
     the response_model to figure out the joins lazily; we emit dicts
     so FastAPI can serialise without issuing an N+1.
+
+    `home_space_id` is the space the caller asked about, when they asked
+    about one. Anything living elsewhere came in through an inheritance
+    link and is flagged. Omitted for the single-item routes, which are
+    addressed by item id and have no "here" to be inherited into.
     """
     if not items:
         return []
@@ -149,6 +168,8 @@ async def _attach_collection_ids(
             "deleted_at": it.deleted_at,
             "collection_ids": coll_by_item.get(it.id, []),
             "tag_ids": tag_by_item.get(it.id, []),
+            "is_inherited": home_space_id is not None
+            and it.space_id != home_space_id,
         }
         for it in items
     ]
@@ -173,6 +194,20 @@ class ItemSort(StrEnum):
 class SortDirection(StrEnum):
     asc = "asc"
     desc = "desc"
+
+
+class RevisionFilter(StrEnum):
+    """What to do with standards this space has pinned a revision of.
+
+    `pinned` (the default) shows the chosen revision and hides its
+    siblings — a project library that answers "which edition do we build
+    to" rather than listing five. `all` reveals them again. Standards the
+    space has no pin for are unaffected either way, as are items that
+    aren't revisions of anything.
+    """
+
+    pinned = "pinned"
+    all = "all"
 
 
 class SearchScope(StrEnum):
@@ -246,9 +281,32 @@ async def list_items(
     direction: Annotated[SortDirection, Query()] = SortDirection.desc,
     collection: Annotated[str | None, Query(max_length=64)] = None,
     scope: Annotated[list[SearchScope] | None, Query()] = None,
+    revisions: Annotated[RevisionFilter, Query()] = RevisionFilter.pinned,
 ) -> dict[str, Any]:
     space = await _resolve_space(db, user, slug)
-    stmt = select(Item).where(Item.space_id == space.id)
+    # This space plus everything it inherits. One query for the lot: an
+    # inherited standard should sort and paginate alongside the space's
+    # own items, not arrive as a second list the client has to merge.
+    sources = await item_source_space_ids(db, space.id)
+    stmt = select(Item).where(Item.space_id.in_(sources))
+
+    if revisions is RevisionFilter.pinned:
+        # Hide the revisions this space passed over. Phrased as "there is
+        # a pin for my family naming a different item", so a family with
+        # no pin keeps every revision and the pinned item keeps itself.
+        stmt = stmt.where(
+            ~select(StandardRevision.item_id)
+            .join(
+                SpaceStandardPin,
+                SpaceStandardPin.family_id == StandardRevision.family_id,
+            )
+            .where(
+                StandardRevision.item_id == Item.id,
+                SpaceStandardPin.space_id == space.id,
+                SpaceStandardPin.item_id != Item.id,
+            )
+            .exists()
+        )
     if status_ is ItemStatus.active:
         stmt = stmt.where(Item.deleted_at.is_(None))
     elif status_ is ItemStatus.trashed:
@@ -338,7 +396,11 @@ async def list_items(
                     .join(Tag, Tag.id == ItemTag.tag_id)
                     .where(
                         ItemTag.item_id == Item.id,
-                        Tag.space_id == space.id,
+                        # Every source space, not just this one: an
+                        # inherited standard carries the tags it was
+                        # given where it lives, and filtering against
+                        # only the local tag table would drop it.
+                        Tag.space_id.in_(sources),
                         Tag.name == t_clean,
                     )
                     .exists()
@@ -395,7 +457,9 @@ async def list_items(
     total = (await db.execute(count_stmt)).scalar_one()
 
     result = await db.execute(stmt.limit(limit).offset(offset))
-    items = await _attach_collection_ids(db, list(result.scalars().all()))
+    items = await _attach_collection_ids(
+        db, list(result.scalars().all()), home_space_id=space.id
+    )
     return {"items": items, "total": total}
 
 

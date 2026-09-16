@@ -16,9 +16,18 @@ class ApiToken(UUIDPK, Timestamps, Base):
     SHA-256 hash and a 12-char prefix for display (so the user can
     recognise their tokens in a list). Scopes are simple labels
     ("upload", "search", "download") — coarse-grained on purpose.
-    `allowed_collection_ids` further constrains the token to a subset
-    of the user's collections; NULL means "all collections the user
-    can see".
+    Two optional allow-lists narrow a token below what its user can
+    reach. Both default to NULL, meaning "everything the user can":
+
+    * `allowed_space_ids` — the coarse one. A token for an import script
+      that should only ever touch one project space, or a read-only
+      token for a tool that should see the shared Standards space and
+      nothing of your own.
+    * `allowed_collection_ids` — finer, within a space.
+
+    Neither can widen access: both are intersected with what the user
+    can read at request time, so a token outlives neither a revoked
+    membership nor a dropped subscription.
     """
 
     __tablename__ = "api_tokens"
@@ -30,6 +39,12 @@ class ApiToken(UUIDPK, Timestamps, Base):
     token_hash: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     prefix: Mapped[str] = mapped_column(String, nullable=False)
     scopes: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    # Space ids as strings, not slugs: slugs are renameable, and an
+    # allow-list that silently stops matching when someone tidies a name
+    # would be a nasty way to lose access.
+    allowed_space_ids: Mapped[list[str] | None] = mapped_column(
+        JSONB, nullable=True
+    )
     allowed_collection_ids: Mapped[list[str] | None] = mapped_column(
         JSONB, nullable=True
     )

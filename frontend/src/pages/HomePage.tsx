@@ -55,7 +55,10 @@ export default function HomePage() {
     [scope],
   );
 
-  const spaces = useQuery({ queryKey: ["spaces"], queryFn: fetchMySpaces });
+  const spaces = useQuery({
+    queryKey: ["spaces"],
+    queryFn: () => fetchMySpaces(),
+  });
   const personal = useMemo(
     () => spaces.data?.find((s) => s.is_personal) ?? spaces.data?.[0] ?? null,
     [spaces.data],

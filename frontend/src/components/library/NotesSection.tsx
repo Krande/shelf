@@ -1,11 +1,12 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Pencil, Plus, Trash2 } from "lucide-react";
+import { Lock, Pencil, Plus, Trash2, Users } from "lucide-react";
 import {
   type Note,
   createNote,
   deleteNote,
   listNotes,
+  setNoteVisibility,
   updateNote,
 } from "@/api/notes";
 import RichTextEditor from "./RichTextEditor";
@@ -15,6 +16,12 @@ import RichTextEditor from "./RichTextEditor";
  * with edit + delete inline; a "+ Note" button opens the editor in
  * create mode. Notes are not part of `item.data` — they live in
  * the normalised `notes` table and are loaded on demand.
+ *
+ * The list holds notes shared with the item's space plus the caller's
+ * own private ones. A note on an inherited document starts private; the
+ * author shares it deliberately, and sharing reaches everyone who can
+ * read the space that owns the document — the other subscribers, not
+ * just whoever can see the reader's own space.
  */
 export default function NotesSection({ itemId }: { itemId: string }) {
   const qc = useQueryClient();
@@ -48,6 +55,12 @@ export default function NotesSection({ itemId }: { itemId: string }) {
 
   const remove = useMutation({
     mutationFn: (id: string) => deleteNote(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["notes", itemId] }),
+  });
+
+  const share = useMutation({
+    mutationFn: ({ id, next }: { id: string; next: Note["visibility"] }) =>
+      setNoteVisibility(id, next),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["notes", itemId] }),
   });
 
@@ -170,42 +183,89 @@ export default function NotesSection({ itemId }: { itemId: string }) {
                   </div>
                 </div>
               ) : (
-                <div className="flex items-start gap-2 p-2">
-                  <div
-                    className="tiptap-rendered min-w-0 flex-1 text-sm"
-                    // The note HTML is authored only by the item's
-                    // owner (no shared editing yet). When shared spaces
-                    // land, route this through DOMPurify before render.
-                    // eslint-disable-next-line react/no-danger
-                    dangerouslySetInnerHTML={{ __html: n.content_html }}
-                  />
-                  <div className="flex shrink-0 items-center gap-0.5">
-                    <button
-                      type="button"
-                      onClick={() => startEdit(n)}
-                      aria-label="Edit note"
-                      title="Edit note"
-                      className="rounded p-1 hover:opacity-70"
-                      style={{ color: "var(--color-text-muted)" }}
-                    >
-                      <Pencil className="h-3.5 w-3.5" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (
-                          window.confirm("Delete this note? Cannot be undone.")
-                        ) {
-                          remove.mutate(n.id);
+                <div className="p-2">
+                  <div className="flex items-start gap-2">
+                    <div
+                      className="tiptap-rendered min-w-0 flex-1 text-sm"
+                      // Authored by someone who can read this item, which
+                      // since inheritance can be a wider set than before.
+                      // Worth routing through DOMPurify when there's a
+                      // reason to; the editor still only emits its own
+                      // TipTap subset.
+                      // eslint-disable-next-line react/no-danger
+                      dangerouslySetInnerHTML={{ __html: n.content_html }}
+                    />
+                    {n.is_mine && (
+                      <div className="flex shrink-0 items-center gap-0.5">
+                        <button
+                          type="button"
+                          onClick={() => startEdit(n)}
+                          aria-label="Edit note"
+                          title="Edit note"
+                          className="rounded p-1 hover:opacity-70"
+                          style={{ color: "var(--color-text-muted)" }}
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (
+                              window.confirm(
+                                "Delete this note? Cannot be undone.",
+                              )
+                            ) {
+                              remove.mutate(n.id);
+                            }
+                          }}
+                          aria-label="Delete note"
+                          title="Delete note"
+                          className="rounded p-1 hover:bg-red-500/10"
+                          style={{ color: "var(--color-text-muted)" }}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="mt-1 flex items-center gap-2 text-xs">
+                    {n.visibility === "private" ? (
+                      <span
+                        className="inline-flex items-center gap-1"
+                        style={{ color: "var(--color-text-muted)" }}
+                      >
+                        <Lock className="h-3 w-3" />
+                        Only you
+                      </span>
+                    ) : (
+                      <span
+                        className="inline-flex items-center gap-1"
+                        style={{ color: "var(--color-text-muted)" }}
+                      >
+                        <Users className="h-3 w-3" />
+                        Shared with this space
+                      </span>
+                    )}
+                    {n.is_mine && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          share.mutate({
+                            id: n.id,
+                            next:
+                              n.visibility === "private" ? "space" : "private",
+                          })
                         }
-                      }}
-                      aria-label="Delete note"
-                      title="Delete note"
-                      className="rounded p-1 hover:bg-red-500/10"
-                      style={{ color: "var(--color-text-muted)" }}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
+                        disabled={share.isPending}
+                        className="rounded border px-1.5 py-0.5 text-xs hover:opacity-80 disabled:opacity-50"
+                        style={{ borderColor: "var(--color-border)" }}
+                      >
+                        {n.visibility === "private"
+                          ? "Share"
+                          : "Make private"}
+                      </button>
+                    )}
                   </div>
                 </div>
               )}
@@ -213,6 +273,12 @@ export default function NotesSection({ itemId }: { itemId: string }) {
           );
         })}
       </ul>
+
+      {share.error && (
+        <p className="px-1 text-xs text-red-600" role="alert">
+          Could not change who sees that note: {share.error.message}
+        </p>
+      )}
 
       {notes.length === 0 && editingId !== "" && (
         <div

@@ -211,7 +211,22 @@ async def _run() -> None:
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, _on_signal)
+        try:
+            loop.add_signal_handler(sig, _on_signal)
+        except NotImplementedError:
+            # Windows' ProactorEventLoop doesn't implement it at all —
+            # this raises rather than degrading, so without the fallback
+            # the worker cannot start on Windows, which is where it gets
+            # developed against. `signal.signal` works there; the handler
+            # runs on the main thread between bytecodes, so it hops back
+            # onto the loop rather than touching the Event directly.
+            #
+            # Shutdown is delayed until the current `fetch` times out
+            # (FETCH_TIMEOUT), since the handler only runs once the
+            # interpreter regains control.
+            signal.signal(
+                sig, lambda *_a: loop.call_soon_threadsafe(_on_signal)
+            )
 
     log.info(
         "worker ready: %s",
