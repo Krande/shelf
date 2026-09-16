@@ -99,6 +99,10 @@ CORE_PORTS = (
     PortSpec("postgres", "SHELF_DEV_POSTGRES_PORT", 5432, 5432, "Postgres"),
     PortSpec("redis", "SHELF_DEV_REDIS_PORT", 6379, 6379, "Redis"),
     PortSpec("gotenberg", "SHELF_DEV_GOTENBERG_PORT", 3000, 3000, "Gotenberg"),
+    PortSpec("nats", "SHELF_DEV_NATS_PORT", 4222, 4222, "NATS"),
+    PortSpec(
+        "nats", "SHELF_DEV_NATS_MONITOR_PORT", 8222, 8222, "the NATS monitor"
+    ),
 )
 
 # Per-store ports, S3 API first — everything downstream (the endpoint, the
@@ -131,6 +135,11 @@ BACKEND_URLS = {
     "SHELF_DEV_REDIS_PORT": ("SHELF_REDIS_URL", "redis://localhost:{port}/0"),
     "SHELF_DEV_GOTENBERG_PORT": ("SHELF_GOTENBERG_URL", "http://localhost:{port}"),
 }
+
+# SHELF_NATS_URL is handled separately from BACKEND_URLS because that table
+# only rewrites a var when its port *moved*, and the queue's config default
+# is empty rather than localhost — so on the conventional port it would
+# never be set at all, and the API would silently go on not publishing.
 
 # compose reads ./.env by itself, so writing the chosen ports there is what
 # keeps `pixi run dev-down`, `dev-logs` and `test-db-up` pointed at the
@@ -203,6 +212,31 @@ def _free_port(start: int, tries: int = 20, avoid: set[int] | None = None) -> in
         if (avoid is None or port not in avoid) and not _port_in_use(port):
             return port
     return start
+
+
+def _available_consumers() -> tuple[list[str], str | None]:
+    """Which worker consumers this machine can actually run.
+
+    `extract` (pypdf) and `outline` (PyMuPDF) are pure-Python and always
+    available. `ocr` shells out to Tesseract and Ghostscript, which
+    pixi.toml only installs on linux-64 — the Python package is there on
+    every platform, so the import succeeds and the failure would only
+    show up mid-job, on the first scanned PDF someone tries.
+
+    Returns the consumer list plus a note to print when OCR was left out,
+    so "OCR did nothing" is answered before it's asked.
+    """
+    consumers = ["extract", "outline"]
+    missing = [
+        binary for binary in ("tesseract", "gs") if shutil.which(binary) is None
+    ]
+    if not missing:
+        consumers.insert(1, "ocr")
+        return consumers, None
+    return consumers, (
+        f"OCR consumer off — {' and '.join(missing)} not on PATH. Text "
+        f"extraction and outlines still run; scanned PDFs stay un-OCR'd."
+    )
 
 
 def _docker_compose() -> list[str] | None:
@@ -492,6 +526,30 @@ def _ensure_cors(endpoint: str) -> None:
 # ── Long-running servers ─────────────────────────────────────────────────────
 
 
+# How many times a server may die and be brought back, and the window the
+# count decays over. Generous enough to absorb a reloader that exits on a
+# bad edit, tight enough that a server failing on startup — a port that
+# really is taken, a missing dependency — still stops instead of spinning.
+RESTART_LIMIT = 5
+RESTART_WINDOW = 60.0
+
+# How long after a child announces a reload we treat an incoming SIGINT as
+# that reload's doing rather than the user's.
+#
+# On Windows, uvicorn's reloader stops its worker with a console control
+# event, and `GenerateConsoleCtrlEvent` goes to every process attached to
+# the console — this script included. So every single `--reload` cycle
+# delivered us a SIGINT and took the whole stack down with it, which is
+# exactly what a Ctrl-C looks like from here.
+#
+# The two are genuinely indistinguishable by signal alone, so we go on
+# timing: a SIGINT within this window of "Reloading..." is the reloader.
+# A user who really did mean it presses Ctrl-C again a moment later and
+# gets what they asked for.
+RELOAD_SIGINT_GRACE = 5.0
+_RELOAD_ANNOUNCEMENTS = ("Reloading...", "WatchFiles detected changes")
+
+
 class Server:
     """A child process whose output is echoed with a coloured prefix."""
 
@@ -511,8 +569,26 @@ class Server:
         self.announce = announce
         self.prefix = _paint(f"[{name}]", color)
         self.proc: subprocess.Popen[str] | None = None
+        # Timestamps of recent restarts, used to decide whether this one is
+        # a blip worth absorbing or a server that cannot start at all.
+        self.restarts: list[float] = []
+        # When this server last said it was reloading. Read by the SIGINT
+        # handler — see RELOAD_SIGINT_GRACE.
+        self.reload_announced_at: float | None = None
+        # True while the watcher is deliberately cycling this server.
+        # Without it the supervisor sees the stopped process, calls that
+        # a crash, and restarts it as well — two restarts per edit, and
+        # the restart budget exhausted in a handful of saves.
+        self.restarting = False
 
     def start(self) -> None:
+        # Never leak the previous process. Overwriting `self.proc` while
+        # the old one is still alive loses the only handle we have on it,
+        # and it goes on holding the port — which then bumps the next run
+        # to :8001 and leaves a stale server answering on :8000.
+        if self.proc is not None and self.proc.poll() is None:
+            self.stop()
+
         # A new process group (Unix) / no CTRL_C propagation (Windows) keeps
         # our own Ctrl-C handler in charge of the shutdown order instead of
         # the console signalling every child at once.
@@ -536,11 +612,22 @@ class Server:
         )
         threading.Thread(target=self._pump, daemon=True).start()
 
+    def may_restart(self) -> bool:
+        """True if this server has restarts left in the current window."""
+        now = time.monotonic()
+        self.restarts = [t for t in self.restarts if now - t < RESTART_WINDOW]
+        if len(self.restarts) >= RESTART_LIMIT:
+            return False
+        self.restarts.append(now)
+        return True
+
     def _pump(self) -> None:
         assert self.proc is not None and self.proc.stdout is not None
         announced = False
         for line in self.proc.stdout:
             print(f"{self.prefix} {line.rstrip()}", flush=True)
+            if any(marker in line for marker in _RELOAD_ANNOUNCEMENTS):
+                self.reload_announced_at = time.monotonic()
             if self.announce is not None and not announced:
                 m = self.announce.search(line)
                 if m:
@@ -575,6 +662,69 @@ class Server:
             proc.kill()
 
 
+def _watch_and_restart(
+    server: Server, root: Path, port: int, stopping: threading.Event
+) -> None:
+    """Restart `server` whenever anything under `root` changes.
+
+    This script owns the file watching rather than delegating it to
+    `uvicorn --reload`, for one reason: when uvicorn's watcher stops —
+    which it does on Windows, and did repeatedly here — the server goes
+    on serving happily with the code it had. Nothing looks wrong. You
+    edit a file, reload the page, and read a stale answer, and the only
+    way to find out is to notice a route you just wrote returning 404.
+
+    Owning it costs a full process restart per edit instead of an
+    in-process one (a second or so), and buys a reload that either
+    announces itself or has visibly crashed. Every restart prints what
+    triggered it, so a reload storm names the file causing it.
+    """
+    from watchfiles import watch
+
+    def is_source(_change: object, path: str) -> bool:
+        """Only Python sources. watchfiles already skips `__pycache__`,
+        but an editor's swap file or a stray artifact under src/ would
+        otherwise restart the API for nothing — and a restart triggered
+        by a restart is an infinite loop, not a slow reload."""
+        return path.endswith(".py")
+
+    try:
+        for changes in watch(
+            root,
+            watch_filter=is_source,
+            stop_event=stopping,
+            debounce=400,
+            step=50,
+        ):
+            if stopping.is_set():
+                return
+            names = sorted({Path(p).name for _kind, p in changes})
+            shown = ", ".join(names[:3]) + ("…" if len(names) > 3 else "")
+            _note(f"{shown} changed — restarting the API")
+            # Tell the supervisor this stop is on purpose, or it counts
+            # the exit as a crash and restarts the server a second time.
+            server.restarting = True
+            try:
+                server.stop()
+                # taskkill returns before Windows has torn the listener
+                # down, and the replacement would then fail to bind. Wait
+                # for the port to go quiet; carry on regardless if it
+                # doesn't, so a stuck socket doesn't end the watch loop.
+                _wait_for_port(port, want_open=False, timeout=10)
+                server.start()
+            finally:
+                server.restarting = False
+    except Exception as e:
+        # A dead watcher must not be silent — that is the whole bug this
+        # replaced. The stack stays up and usable; it just stops
+        # reloading, and now says so.
+        _fail(
+            f"file watcher stopped ({type(e).__name__}: {e}). The API will "
+            f"keep serving but will no longer pick up edits — restart "
+            f"`pixi run up` to get reloading back."
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="pixi run up", description="Start the full local development stack."
@@ -602,6 +752,30 @@ def main() -> int:
         "--api-port",
         type=int,
         help="backend port (default: first free from 8000)",
+    )
+    parser.add_argument(
+        "--no-worker",
+        action="store_true",
+        help=(
+            "don't run the background worker. Uploads still work; PDFs just "
+            "never get their text extracted, so full-text search won't see "
+            "them."
+        ),
+    )
+    parser.add_argument(
+        "--no-watch",
+        action="store_true",
+        help=(
+            "don't restart the API when backend source changes. Useful when "
+            "running a long job you don't want interrupted by an editor save."
+        ),
+    )
+    parser.add_argument(
+        "--consumers",
+        help=(
+            "comma-separated worker consumers (extract, ocr, outline). "
+            "Default: everything this machine has the binaries for."
+        ),
     )
     args = parser.parse_args()
 
@@ -744,6 +918,17 @@ def main() -> int:
             continue
         backend_env[var] = template.format(port=port)
 
+    # The job queue. Unlike the vars above this is set whether or not the
+    # port moved: shelf.config defaults `nats_url` to "" and treats empty
+    # as "don't publish", so leaving it unset means uploads enqueue
+    # nothing and every PDF sits at extraction_status='pending' forever.
+    nats_port = chosen[CORE_PORTS[3]]
+    nats_url = f"nats://localhost:{nats_port}"
+    if os.environ.get("SHELF_NATS_URL"):
+        _note("SHELF_NATS_URL is set in your environment — leaving it alone")
+    else:
+        backend_env["SHELF_NATS_URL"] = nats_url
+
     # 4. Schema.
     _step("Applying migrations")
     if _run(["alembic", "upgrade", "head"], cwd=BACKEND, env=backend_env) != 0:
@@ -800,13 +985,30 @@ def main() -> int:
     web_env = os.environ.copy()
     web_env["SHELF_DEV_API_PORT"] = str(api_port)
 
+    # The worker reads the same database and object store as the API —
+    # SHELF_WORKER_BACKEND defaults to "sql", which is the in-cluster
+    # mode and exactly right for a local stack. api_env already carries
+    # the store credentials and the queue URL, so it's the right base.
+    worker_env = api_env.copy()
+    consumers, ocr_note = (
+        ([c.strip() for c in args.consumers.split(",") if c.strip()], None)
+        if args.consumers
+        else _available_consumers()
+    )
+    worker_env["SHELF_WORKER_CONSUMERS"] = ",".join(consumers)
+
     servers = [
         Server(
             "api",
             [
                 "uvicorn",
                 "shelf.main:app",
-                "--reload",
+                # Deliberately NOT --reload; this script does the watching
+                # (see _watch_and_restart). uvicorn's own reloader has a
+                # failure mode on Windows where the watcher thread stops
+                # but the server keeps serving, so the stack looks healthy
+                # and quietly answers with stale code — which is far worse
+                # than a reload that visibly doesn't happen.
                 "--host",
                 "0.0.0.0",
                 "--port",
@@ -829,21 +1031,100 @@ def main() -> int:
         ),
     ]
 
-    _step(
-        f"Starting backend (:{api_port}) and frontend "
-        f"(:{web_port}) — Ctrl-C to stop"
+    if not args.no_worker:
+        servers.append(
+            Server(
+                "worker",
+                [sys.executable, "-m", "shelf.worker"],
+                BACKEND,
+                "1;34",
+                env=worker_env,
+            )
+        )
+
+    if args.no_worker:
+        _note(
+            "worker disabled — uploads will sit at extraction_status="
+            "'pending' and full-text search won't see them"
+        )
+    else:
+        _note(f"worker consumers: {', '.join(consumers)}")
+        if ocr_note:
+            _note(ocr_note)
+
+    # Anything that was uploaded while no queue was running has a row but
+    # no message — nothing ever told the worker about it. Re-publishing is
+    # idempotent (WorkQueue retention drops the duplicate once acked), so
+    # it's safe to do on every start and it means a stack that gains a
+    # worker catches up on its backlog instead of quietly ignoring it.
+    if not args.no_worker:
+        _step("Re-queueing attachments that never got extracted")
+        _run(
+            [sys.executable, "-m", "shelf.scripts.backfill_extract"],
+            cwd=BACKEND,
+            env=worker_env,
+        )
+
+    running = ", ".join(
+        [f"backend (:{api_port})", f"frontend (:{web_port})"]
+        + ([] if args.no_worker else ["worker"])
     )
+    _step(f"Starting {running} — Ctrl-C to stop")
 
     for s in servers:
         s.start()
 
     stopping = threading.Event()
 
-    def _shutdown(*_: object) -> None:
+    # Watch the backend source and restart the API on change. Started
+    # after the servers so the first restart can't race the first start,
+    # and daemon so Ctrl-C doesn't wait on it.
+    if not args.no_watch:
+        api_server = servers[0]
+        threading.Thread(
+            target=_watch_and_restart,
+            args=(api_server, BACKEND / "src", api_port, stopping),
+            daemon=True,
+        ).start()
+        _note(f"watching {BACKEND / 'src'} — the API restarts on edit")
+    else:
+        _note("--no-watch: the API will not pick up code edits")
+
+    def _reloading_now() -> Server | None:
+        """The server that announced a reload within the grace window."""
+        now = time.monotonic()
+        for s in servers:
+            at = s.reload_announced_at
+            if at is not None and now - at < RELOAD_SIGINT_GRACE:
+                return s
+        return None
+
+    def _shutdown(reason: object = None, *_: object) -> None:
         if stopping.is_set():
             return
+
+        # A SIGINT that lands in the shadow of a reload is the reloader's
+        # console control event reaching us by accident, not the user.
+        # Swallow it — taking the stack down on every edit is the bug this
+        # exists to stop.
+        if isinstance(reason, int) and reason == int(signal.SIGINT):
+            culprit = _reloading_now()
+            if culprit is not None:
+                culprit.reload_announced_at = None
+                _note(
+                    f"ignoring the SIGINT from {culprit.name}'s reload "
+                    f"(press Ctrl-C again to stop)"
+                )
+                return
+
         stopping.set()
         print()
+        if isinstance(reason, int):
+            try:
+                name = signal.Signals(reason).name
+            except ValueError:
+                name = str(reason)
+            _note(f"received {name}")
         _step("Shutting down servers (containers stay up; `pixi run dev-down`)")
         for s in servers:
             s.stop()
@@ -855,14 +1136,35 @@ def main() -> int:
         signal.signal(signal.SIGTERM, _shutdown)
 
     try:
-        # If either server dies on its own, take the other one down with it
-        # rather than leaving half a stack running and looking healthy.
+        # A server that dies on its own is brought back rather than taking
+        # the other one with it. `uvicorn --reload` handles a bad edit by
+        # itself and its parent is supposed to outlive every reload, but
+        # when it doesn't — and on Windows it sometimes doesn't — losing
+        # vite, the vite port and every bit of browser state along with it
+        # is a bad trade for a typo you're about to fix anyway.
+        #
+        # Repeated failures inside RESTART_WINDOW do stop the stack: that
+        # is a server which cannot start, and restarting it forever would
+        # bury the reason under its own output.
         while not stopping.is_set():
             for s in servers:
-                if s.proc is not None and s.proc.poll() is not None:
-                    _fail(f"{s.name} exited with code {s.proc.returncode}")
+                # Mid-restart by the watcher: the exit is expected and
+                # the replacement is already on its way.
+                if s.restarting:
+                    continue
+                if s.proc is None or s.proc.poll() is None:
+                    continue
+                code = s.proc.returncode
+                if not s.may_restart():
+                    _fail(
+                        f"{s.name} exited with code {code} and has restarted "
+                        f"{RESTART_LIMIT} times in the last "
+                        f"{int(RESTART_WINDOW)}s — giving up"
+                    )
                     _shutdown()
-                    return s.proc.returncode or 1
+                    return code or 1
+                _note(f"{s.name} exited with code {code} — restarting it")
+                s.start()
             time.sleep(0.3)
     except KeyboardInterrupt:
         _shutdown()
