@@ -2,6 +2,173 @@
 
 
 
+## v0.6.0 (2026-09-16)
+
+### Feature
+
+* feat(spaces): inherit another space, with standards, pinning and private notes
+
+One shared Standards space holding one copy of each standard, read by
+every project space and every person who wants them — plus the machinery
+that makes that usable. The pieces interlock, so they land together.
+
+Inheritance. A space subscribes to another and reads its items without
+holding a copy. Two owners have to agree: the space being read opts in
+once (Space.subscribable), and the space doing the reading adds the
+subscription. It grants read and nothing else, it does not chain (A
+inherits B, B inherits C — A does not see C), and the parent&#39;s owner
+keeps a subscriber list they can revoke from. Inherited items, and the
+collections that organise them, come across read-only and flagged, with
+borrowed collections rendered as their own group per source space rather
+than mixed in among the space&#39;s own.
+
+Engineering standards. A new item type plus standard_families /
+standard_revisions, so editions of one standard know they are the same
+standard: a revision dropdown, and a badge saying whether this is the
+current one. &#34;Latest&#34; is relative to the caller — the newest edition they
+can actually open — because telling someone their copy is out of date and
+then 404-ing the newer one is worse than staying quiet. is_latest_known
+reports when the instance holds something newer than they can reach.
+Undated and withdrawn editions never claim latest, since labels like
+&#34;Rev. 5&#34; and &#34;2020&#34; cannot be compared to each other.
+
+Pinning. A project pins the edition it builds to and its library stops
+listing the siblings, with a toggle to reveal them. Owner-level, because
+it changes what everyone else in the space sees by default.
+
+Private notes and highlights. Once one document is read by the whole
+company, &#34;everyone who can read this PDF&#34; is the wrong audience for a
+working note. Both now carry an author and a visibility; on an inherited
+document they start private, and sharing one publishes to the space that
+owns the document — the other subscribers — not to the personal shelf it
+was read from. Only the author can share or retract. Writing a note needs
+only read access, which is the case the feature exists for.
+
+Alongside, because each was a gap the above exposed:
+
+  - copy an item to another space (bytes, tags and page text; not notes
+    or highlights, which belong to whoever wrote them)
+  - rename a space — previously impossible for anyone. Open to its owner,
+    and to instance admins for shared spaces, which is a label change
+    rather than a way in: an admin who renames a space still cannot list
+    one item in it.
+  - scope an API token to specific spaces, stored as ids rather than
+    slugs since slugs are now renameable
+  - set item metadata and file standards over the token API, so an import
+    no longer ends with hand-typing in the SPA
+  - attachments carry the SHA-256 of the bytes as uploaded, which is what
+    lets two instances agree on a document that has no business identity
+  - a resizable detail panel, remembered per browser
+
+Two token-facing bugs fixed in passing: /api/v1/search and
+/api/v1/collections bounded themselves with readable_space_ids, so an
+inherited space was plainly visible in the SPA and invisible to scripts;
+and copying an item dropped the attachment hash, making the copy look
+like a different file to anything matching on content. ([`441a999`](https://github.com/Krande/shelf/commit/441a9991f54d7ab83d16262d647177c8dee59754))
+
+* feat(admin): pre-provision a user from an email address
+
+Nothing is synced from the identity provider, so a colleague assigned the
+app in Entra still does not exist here until they have signed in once —
+and until then they cannot be picked as a space member. Admins can now
+create the account ahead of that from Settings -&gt; Admin.
+
+The row is created with no Identity attached. On first sign-in
+upsert_user_from_claims finds it by email (users.email is CITEXT, so case
+does not matter) and links the provider identity onto it rather than
+minting a second account. That match is on the address alone, so a
+mistyped address leaves a stray empty account behind; nothing breaks, but
+the form says so.
+
+Extracts create_user_with_personal_space, which was the third copy of
+&#34;add a user row and the personal space everything else assumes exists&#34;.
+Keeping it in one place means a fourth caller cannot forget the space and
+leave an account that can hold nothing. ([`71b3585`](https://github.com/Krande/shelf/commit/71b3585a2009a010f9d1d6e70ac7cb85259c177b))
+
+* feat(cli): add a command-line client for the REST API
+
+Modelled on deputy: src layout, hatchling, argparse, and a pixi-build
+manifest so it installs in one command without a checkout —
+
+    pixi global install shelf-cli --git &lt;repo&gt; --subdirectory cli --tag vX.Y.Z
+
+It lives inside this repo rather than beside it so it is versioned with
+the API it talks to; --subdirectory is what makes that installable on its
+own. Config layers the way deputy&#39;s does, except the token is
+deliberately not read from shelf.toml, because config files get committed
+by accident.
+
+Two things it does. `shelf items set` changes metadata fields without
+curl, merging by default so setting one field doesn&#39;t drop the rest of a
+document&#39;s record. And `shelf profiles push` sends **document profiles** —
+metadata kept in JSON files, outside this repo — into an instance
+whenever one is ready.
+
+Pushing twice has to update rather than duplicate, and item ids can&#39;t be
+the link because they differ per instance, which is the whole situation
+profiles exist for. So matching walks three rules, most specific first:
+an explicit item id, the document&#39;s own identity (body, designation,
+edition) for a standard, then the SHA-256 of its first attachment. The
+last is what makes this work for a report or a drawing, which have no
+designation to be known by — there the bytes are the only thing two
+instances can agree on. It sits below the business identity rather than
+above because bytes can change while the document does not: publishers
+stamp per-download watermarks, and shelf&#39;s own OCR rewrites blobs.
+
+CI covered neither lint nor tests for a new package, so both are wired up
+here. ([`228bec6`](https://github.com/Krande/shelf/commit/228bec609d9b72fb058bf84332fbfb0f84a99679))
+
+* feat(dev): run NATS and a background worker in the local stack
+
+`pixi run up` started Postgres, an object store and the two servers, but
+no queue — so every uploaded PDF sat at extraction_status=&#39;pending&#39; with
+nobody to tell, and full-text search never saw it. Add a JetStream NATS
+service and a supervised worker process, and re-publish orphaned
+attachments on each start so a stack that gains a worker catches up on
+its backlog.
+
+Consumers are chosen by what the machine can run: extract and outline are
+pure Python, while ocr shells out to tesseract and ghostscript, which
+pixi only installs on linux-64. It is skipped with a printed reason
+rather than failing on the first scanned PDF someone tries.
+
+Also takes over file watching from uvicorn&#39;s own reloader. That watcher
+thread stops on Windows while the server keeps serving, so the stack
+looks healthy and quietly answers with stale code — the worst shape this
+can take, since nothing appears wrong until a route you just wrote
+returns 404. Owning the watch costs a full process restart per edit and
+buys a reload that either announces itself or has visibly failed.
+
+Two supervisor bugs fixed alongside: a watcher-initiated stop was counted
+as a crash and restarted a second time, exhausting the restart budget in
+a handful of saves; and Server.start() could overwrite a live process
+handle, orphaning a server that went on holding the port and pushing the
+next run onto :8001. ([`e631814`](https://github.com/Krande/shelf/commit/e6318145563da4f7785492c5992283e75828bfd0))
+
+### Fix
+
+* fix(worker): start on Windows
+
+`loop.add_signal_handler` is implemented on Unix only; asyncio raises
+NotImplementedError from it on Windows&#39; ProactorEventLoop rather than
+degrading. The worker therefore could not start at all on Windows —
+it died during consumer setup, before fetching a single job, which is
+awkward given that is where it gets developed against.
+
+Fall back to `signal.signal`, hopping back onto the loop via
+`call_soon_threadsafe` since that handler runs on the main thread
+between bytecodes. Shutdown is then delayed until the current fetch
+times out, which is FETCH_TIMEOUT at worst. ([`01986cf`](https://github.com/Krande/shelf/commit/01986cfbdf20810eb16b1961554b8a0b49f1a4c7))
+
+### Unknown
+
+* Merge pull request #7 from Krande/feat/space-roles-and-scoped-storage
+
+feat: inherit shared spaces, with engineering standards, private notes and a CLI ([`e211663`](https://github.com/Krande/shelf/commit/e211663f314736198ae93e4864e11e6a67f2d48e))
+
+* Merge branch &#39;main&#39; into feat/space-roles-and-scoped-storage ([`3e724cc`](https://github.com/Krande/shelf/commit/3e724cc6a812c1a1562434a6ccfb584b90777640))
+
+
 ## v0.5.0 (2026-09-15)
 
 ### Feature
