@@ -101,6 +101,117 @@ describe("listing", () => {
   });
 });
 
+describe("adding a user", () => {
+  async function openForm() {
+    renderWithProviders(<AdminSection user={ME} />);
+    await screen.findByText("Ada");
+    await userEvent.click(screen.getByRole("button", { name: /add user/i }));
+  }
+
+  it("POSTs the address, name and role", async () => {
+    const fetchFn = mockFetch({
+      "/api/admin/users": { body: USERS },
+    });
+    await openForm();
+
+    await userEvent.type(
+      screen.getByRole("textbox", { name: /email address for the new user/i }),
+      "  new@example.com  ",
+    );
+    await userEvent.type(
+      screen.getByRole("textbox", { name: /display name for the new user/i }),
+      "New Person",
+    );
+    await userEvent.selectOptions(
+      screen.getByRole("combobox", { name: /role for the new user/i }),
+      "admin",
+    );
+    await userEvent.click(screen.getByRole("button", { name: /^add$/i }));
+
+    await waitFor(() => {
+      const call = fetchFn.mock.calls.find(
+        ([, init]) => (init as RequestInit)?.method === "POST",
+      );
+      expect(call).toBeDefined();
+      expect(JSON.parse((call![1] as RequestInit).body as string)).toEqual({
+        email: "new@example.com",
+        display_name: "New Person",
+        role: "admin",
+      });
+    });
+  });
+
+  it("omits an empty display name so the server derives one", async () => {
+    const fetchFn = mockFetch({ "/api/admin/users": { body: USERS } });
+    await openForm();
+
+    await userEvent.type(
+      screen.getByRole("textbox", { name: /email address for the new user/i }),
+      "new@example.com",
+    );
+    await userEvent.click(screen.getByRole("button", { name: /^add$/i }));
+
+    await waitFor(() => {
+      const call = fetchFn.mock.calls.find(
+        ([, init]) => (init as RequestInit)?.method === "POST",
+      );
+      expect(call).toBeDefined();
+      expect(
+        JSON.parse((call![1] as RequestInit).body as string).display_name,
+      ).toBeUndefined();
+    });
+  });
+
+  it("explains a duplicate address in plain language", async () => {
+    // Hand-rolled rather than mockFetch: the listing and the create share
+    // a path and only differ by method, which the helper doesn't split on.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) =>
+        init?.method === "POST"
+          ? new Response(JSON.stringify({ detail: "already has an account" }), {
+              status: 409,
+              headers: { "Content-Type": "application/json" },
+            })
+          : new Response(JSON.stringify(USERS), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }),
+      ),
+    );
+    await openForm();
+
+    await userEvent.type(
+      screen.getByRole("textbox", { name: /email address for the new user/i }),
+      "b@example.com",
+    );
+    await userEvent.click(screen.getByRole("button", { name: /^add$/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /already has an account/i,
+    );
+  });
+
+  it("closes the form once the user is created", async () => {
+    mockFetch({ "/api/admin/users": { body: USERS } });
+    await openForm();
+
+    await userEvent.type(
+      screen.getByRole("textbox", { name: /email address for the new user/i }),
+      "new@example.com",
+    );
+    await userEvent.click(screen.getByRole("button", { name: /^add$/i }));
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("textbox", {
+          name: /email address for the new user/i,
+        }),
+      ).toBeNull();
+    });
+  });
+});
+
 describe("changing a role", () => {
   it("PATCHes the selected role", async () => {
     const fetchFn = mockFetch({

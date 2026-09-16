@@ -7,14 +7,13 @@ personal Space on first sight. The route handlers stay thin and the
 upsert is unit-testable without an OIDC server.
 """
 
-import uuid
-
 from authlib.integrations.starlette_client import OAuth
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import OIDCProvider, settings
-from ..models import Identity, Space, User
+from ..models import Identity, User
+from .provisioning import create_user_with_personal_space
 
 
 def build_oauth(providers: list[OIDCProvider]) -> OAuth:
@@ -110,15 +109,9 @@ async def upsert_user_from_claims(
     ).scalar_one_or_none()
 
     if user is None:
-        user = User(email=email, display_name=display_name)
-        db.add(user)
-        await db.flush()
-        space = Space(
-            slug=f"u-{uuid.UUID(str(user.id)).hex[:8]}",
-            name=f"{user.display_name}'s shelf",
-            owner_id=user.id,
+        user = await create_user_with_personal_space(
+            db, email=email, display_name=display_name
         )
-        db.add(space)
 
     db.add(Identity(user_id=user.id, idp=idp, subject=sub))
     await db.commit()

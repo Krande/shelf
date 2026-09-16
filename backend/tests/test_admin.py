@@ -151,6 +151,154 @@ async def test_patch_unknown_user(
     assert resp.status_code == 404
 
 
+async def _as_admin(client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> str:
+    monkeypatch.setattr(settings, "admin_emails", ["admin@example.com"])
+    return await login(client, "admin@example.com")
+
+
+async def test_create_user_pre_provisions(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _as_admin(client, monkeypatch)
+
+    resp = await client.post(
+        "/api/admin/users",
+        json={"email": "new@example.com", "display_name": "New Person"},
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["email"] == "new@example.com"
+    assert body["display_name"] == "New Person"
+    assert body["role"] == "user"
+
+    # Visible to the admin list and to the member picker straight away —
+    # the whole point is being able to share a space with them before
+    # they've ever signed in.
+    assert "new@example.com" in {u["email"] for u in (await client.get("/api/admin/users")).json()}
+    assert "new@example.com" in {u["email"] for u in (await client.get("/api/users")).json()}
+
+
+async def test_created_user_gets_a_personal_space(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without one they'd sign in to an account that can't hold anything."""
+    await _as_admin(client, monkeypatch)
+    await client.post("/api/admin/users", json={"email": "new@example.com"})
+
+    await login(client, "new@example.com", link=True)
+    spaces = (await client.get("/api/me/spaces")).json()
+    assert len(spaces) == 1
+    assert spaces[0]["is_personal"] is True
+    assert spaces[0]["is_owner"] is True
+
+
+async def test_first_login_links_onto_the_pre_provisioned_row(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The email match in `upsert_user_from_claims` is what makes
+    pre-provisioning worth anything: signing in must adopt the seeded
+    row, not mint a second account beside it."""
+    await _as_admin(client, monkeypatch)
+    created = (
+        await client.post(
+            "/api/admin/users",
+            json={"email": "new@example.com", "display_name": "New Person"},
+        )
+    ).json()
+
+    logged_in_id = await login(client, "new@example.com", link=True)
+    assert logged_in_id == created["id"]
+    me = await get_me(client)
+    assert me["display_name"] == "New Person"
+
+
+async def test_display_name_defaults_to_the_local_part(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _as_admin(client, monkeypatch)
+    resp = await client.post("/api/admin/users", json={"email": "jo.blogs@example.com"})
+    assert resp.json()["display_name"] == "jo.blogs"
+
+
+async def test_create_user_can_seed_an_admin(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _as_admin(client, monkeypatch)
+    resp = await client.post(
+        "/api/admin/users", json={"email": "two@example.com", "role": "admin"}
+    )
+    assert resp.status_code == 201
+    assert resp.json()["role"] == "admin"
+
+
+async def test_create_user_rejects_a_duplicate(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _as_admin(client, monkeypatch)
+    await client.post("/api/admin/users", json={"email": "dup@example.com"})
+
+    resp = await client.post("/api/admin/users", json={"email": "dup@example.com"})
+    assert resp.status_code == 409
+
+
+async def test_duplicate_check_ignores_case(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """users.email is CITEXT; a second row differing only in case would
+    be rejected by the unique index as a 500 rather than a 409."""
+    await _as_admin(client, monkeypatch)
+    await client.post("/api/admin/users", json={"email": "dup@example.com"})
+
+    resp = await client.post("/api/admin/users", json={"email": "DUP@Example.com"})
+    assert resp.status_code == 409
+
+
+async def test_create_user_rejects_an_existing_login(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    admin_id = await _as_admin(client, monkeypatch)
+    await login(client, "b@example.com", link=True)
+    await client.post("/auth/switch", json={"user_id": admin_id})
+
+    resp = await client.post("/api/admin/users", json={"email": "b@example.com"})
+    assert resp.status_code == 409
+
+
+@pytest.mark.parametrize(
+    "email", ["not-an-email", "@example.com", "nobody@", "a b@example.com", "x@localhost"]
+)
+async def test_create_user_rejects_malformed_addresses(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch, email: str
+) -> None:
+    await _as_admin(client, monkeypatch)
+    resp = await client.post("/api/admin/users", json={"email": email})
+    assert resp.status_code in (400, 422), resp.text
+
+
+async def test_create_user_trims_whitespace(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _as_admin(client, monkeypatch)
+    resp = await client.post(
+        "/api/admin/users",
+        json={"email": "  spaced@example.com  ", "display_name": "  Spaced  "},
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["email"] == "spaced@example.com"
+    assert resp.json()["display_name"] == "Spaced"
+
+
+async def test_create_user_refused_to_non_admins(client: AsyncClient) -> None:
+    await login(client, "a@example.com")
+    resp = await client.post("/api/admin/users", json={"email": "new@example.com"})
+    assert resp.status_code == 403
+
+
+async def test_create_user_refused_to_anonymous(client: AsyncClient) -> None:
+    resp = await client.post("/api/admin/users", json={"email": "new@example.com"})
+    assert resp.status_code == 401
+
+
 async def test_role_change_takes_effect_immediately(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
