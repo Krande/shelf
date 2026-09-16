@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "shelf-cli"
+version = "0.4.0"
+description = "Command-line client for a shelf instance — drive the REST API and push document profiles from files."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio", "respx"]
+
+[project.scripts]
+shelf = "shelf_cli.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/shelf_cli"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# ── pixi-build: makes the CLI installable in one command, without a
+# checkout of the repo it lives in:
+#
+#   pixi global install shelf-cli \
+#       --git https://github.com/Krande/shelf.git \
+#       --subdirectory cli --tag v0.4.0
+#
+# It lives inside the shelf repo rather than beside it so it is versioned
+# with the API it talks to — a CLI that has drifted from its server is a
+# worse problem than a slightly larger repo. `--subdirectory` is what
+# makes that possible.
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["win-64", "linux-64", "osx-64", "osx-arm64"]
+preview = ["pixi-build"]
+
+[tool.pixi.package.build]
+backend = { name = "pixi-build-python", version = "*" }
+
+[tool.pixi.package.host-dependencies]
+hatchling = "*"
+
+[tool.pixi.package.run-dependencies]
+python = ">=3.12"
+httpx = ">=0.27"

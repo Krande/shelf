@@ -1,7 +1,7 @@
 name: Test
 
-# Runs the backend pytest suite. Independent of the other CI workflows so it
-# reports its own required status check.
+# Runs the backend pytest suite, plus the CLI's. Independent of the other CI
+# workflows so it reports its own required status check.
 #
 # The suite is not DB-free: conftest's `client` fixture TRUNCATEs the core
 # tables against a live Postgres, so a service container is started and the
@@ -53,3 +53,9 @@ jobs:
         run: pixi run alembic-up
 
       - run: pixi run test
+
+      # The CLI's tests fake the HTTP client, so they need neither the
+      # database above nor a running instance. They ride along here
+      # rather than in their own job to avoid a second pixi install for
+      # half a second of work.
+      - run: pixi run cli-test

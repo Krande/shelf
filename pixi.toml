@@ -32,6 +32,10 @@ hatchling = "*"
 [pypi-dependencies]
 shelf = { path = "./backend", editable = true }
 shelf-migrate = { path = "./migrate", editable = true }
+# The CLI ships its own pixi-build manifest so it can be installed on its
+# own (`pixi global install shelf-cli --git … --subdirectory cli`); this
+# entry is just so a checkout has `shelf` on PATH without a second step.
+shelf-cli = { path = "./cli", editable = true }
 arq = "*"
 obstore = "*"
 aiomysql = "*"
@@ -69,6 +73,21 @@ pngquant = "*"
 [tasks.up]
 cmd = "python scripts/dev_up.py"
 description = "Start everything for local development: services, migrations, backend and frontend (--s3 garage|rustfs|none)"
+
+[tasks.cli-test]
+cmd = "pytest"
+cwd = "cli"
+description = "Run the CLI's unit tests (no services needed — the client is faked)."
+
+[tasks.worker]
+cmd = "python -m shelf.worker"
+cwd = "backend"
+description = "Run the background worker (extract/ocr/outline). Needs SHELF_NATS_URL; `pixi run up` starts one for you."
+
+[tasks.backfill-extract]
+cmd = "python -m shelf.scripts.backfill_extract"
+cwd = "backend"
+description = "Re-queue PDF attachments that have no extracted text — use after the queue or worker was down."
 
 [tasks.dev-api]
 cmd = "uvicorn shelf.main:app --reload --host 0.0.0.0 --port 8000"
@@ -165,12 +184,12 @@ depends-on = ["test-db-migrate"]
 description = "Full local run: start Postgres, migrate, then run the test suite"
 
 [tasks.fmt]
-cmd = "ruff format backend"
+cmd = "ruff format backend cli"
 description = "Format Python code"
 
 [tasks.lint]
-cmd = "ruff check backend"
-description = "Lint Python code"
+cmd = "ruff check backend cli"
+description = "Lint Python code (backend and the CLI)"
 
 [tasks.typecheck]
 cmd = "mypy src"
