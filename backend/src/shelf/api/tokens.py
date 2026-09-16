@@ -15,9 +15,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth.deps import get_current_user
+from ..auth.spaces import effective_role, readable_item_space_ids
 from ..auth.tokens import mint
 from ..db import get_session
-from ..models import ApiToken, Collection, User
+from ..models import ApiToken, Collection, Space, User
 
 router = APIRouter(tags=["tokens"])
 
@@ -33,6 +34,10 @@ _OPERATOR_ONLY_SCOPES: set[str] = {"worker"}
 class ApiTokenCreate(BaseModel):
     name: str
     scopes: list[Scope]
+    # Omit for "every space I can reach". Ids rather than slugs: slugs
+    # are renameable, and an allow-list that stopped matching when
+    # somebody fixed a typo would be a bad way to lose access.
+    allowed_space_ids: list[uuid.UUID] | None = None
     allowed_collection_ids: list[uuid.UUID] | None = None
     include_descendants: bool = False
     expires_at: datetime | None = None
@@ -47,6 +52,7 @@ class ApiTokenResponse(BaseModel):
     name: str
     prefix: str
     scopes: list[str]
+    allowed_space_ids: list[str] | None
     allowed_collection_ids: list[str] | None
     include_descendants: bool
     expires_at: datetime | None
@@ -110,6 +116,34 @@ async def create_token(
             f"{', '.join(operator_only)}",
         )
 
+    if payload.allowed_space_ids is not None:
+        if not payload.allowed_space_ids:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "allowed_space_ids is empty — drop the field for access to "
+                "every space you can reach",
+            )
+        # Each one has to be a space the minter can already read, so a
+        # token can never be minted into somewhere its owner can't go.
+        # Inherited spaces count: reading a subscribed Standards space
+        # from a script is a real thing to want.
+        reachable = {
+            sid
+            for sid in (
+                await db.execute(
+                    select(Space.id).where(
+                        Space.id.in_(readable_item_space_ids(user.id))
+                    )
+                )
+            ).scalars().all()
+        }
+        for sid in payload.allowed_space_ids:
+            if sid not in reachable:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    f"Space {sid} is not one you can access",
+                )
+
     if payload.allowed_collection_ids is not None:
         # Empty list would mean "no collections" — silently treat that
         # as a configuration error rather than minting a useless token.
@@ -128,11 +162,8 @@ async def create_token(
                 )
             # Confirm access via the space. A token can only ever be
             # scoped to collections the minter can already reach.
-            from ..auth.spaces import space_role  # local import to avoid cycle
-            from ..models import Space
-
             space = await db.get(Space, coll.space_id)
-            if space is None or await space_role(db, space, user.id) is None:
+            if space is None or (await effective_role(db, space, user.id))[0] is None:
                 raise HTTPException(
                     status.HTTP_400_BAD_REQUEST,
                     f"Collection {cid} is not one you can access",
@@ -145,6 +176,11 @@ async def create_token(
         token_hash=minted.token_hash,
         prefix=minted.prefix,
         scopes=list(payload.scopes),
+        allowed_space_ids=(
+            [str(s) for s in payload.allowed_space_ids]
+            if payload.allowed_space_ids
+            else None
+        ),
         allowed_collection_ids=(
             [str(c) for c in payload.allowed_collection_ids]
             if payload.allowed_collection_ids
@@ -166,6 +202,7 @@ async def create_token(
         name=token.name,
         prefix=token.prefix,
         scopes=token.scopes,
+        allowed_space_ids=token.allowed_space_ids,
         allowed_collection_ids=token.allowed_collection_ids,
         include_descendants=token.include_descendants,
         expires_at=token.expires_at,

@@ -19,6 +19,7 @@ Heuristics:
 
 from __future__ import annotations
 
+import hashlib
 import io
 import logging
 import uuid
@@ -89,6 +90,23 @@ async def extract_attachment(attachment_id: str | uuid.UUID) -> None:
         ).scalar_one_or_none()
         source_key = latest_ocr or att.storage_key
         body = await _fetch_body(source_key)
+
+        # Backfill the content hash while the bytes are in hand — the
+        # presigned upload paths never see them, so this is the only
+        # place the server can compute one for its own account.
+        #
+        # Only when it's absent, and only from the *original* blob: the
+        # hash is defined as the bytes as uploaded, and `source_key` is
+        # the OCR'd derivation whenever one exists. Hashing that would
+        # quietly redefine the column the first time OCR ran.
+        if att.sha256 is None:
+            original = (
+                body
+                if latest_ocr is None
+                else await _fetch_body(att.storage_key)
+            )
+            att.sha256 = hashlib.sha256(original).hexdigest()
+
         pages, toc_count = _extract_pages_and_toc(body)
         # `text_content` stays as the joined text — the search EXISTS
         # path against per-page rows is the live one, but the

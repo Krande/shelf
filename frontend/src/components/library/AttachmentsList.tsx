@@ -38,7 +38,23 @@ function formatSize(bytes: number | null): string {
  * a new tab) and a delete button. Upload state is local — no global
  * progress because the typical attachment is a single PDF.
  */
-export default function AttachmentsList({ itemId }: { itemId: string }) {
+export default function AttachmentsList({
+  itemId,
+  readOnly = false,
+}: {
+  itemId: string;
+  /**
+   * Viewing this item somewhere it is only borrowed from another space.
+   * Files can be opened and downloaded; adding and removing them is
+   * done in the space that owns the document.
+   *
+   * A view-level rule, not an authorization one: someone who owns the
+   * source space genuinely may change it, and the API lets them — they
+   * just switch to that space to do it, rather than editing a shared
+   * document from inside their own shelf by accident.
+   */
+  readOnly?: boolean;
+}) {
   const qc = useQueryClient();
   const nav = useNavigate();
   const [dragActive, setDragActive] = useState(false);
@@ -100,11 +116,12 @@ export default function AttachmentsList({ itemId }: { itemId: string }) {
   return (
     <section
       onDragOver={(e) => {
+        if (readOnly) return;
         e.preventDefault();
         setDragActive(true);
       }}
       onDragLeave={() => setDragActive(false)}
-      onDrop={onDrop}
+      onDrop={readOnly ? undefined : onDrop}
       className="rounded border p-2"
       style={{
         borderColor: dragActive
@@ -123,27 +140,39 @@ export default function AttachmentsList({ itemId }: { itemId: string }) {
           <Paperclip className="h-3.5 w-3.5" />
           Attachments
         </span>
-        <button
-          type="button"
-          onClick={() => fileInput.current?.click()}
-          disabled={upload.isPending}
-          className="flex items-center gap-1 rounded px-2 py-0.5 text-xs hover:opacity-70 disabled:opacity-50"
-          style={{ color: "var(--color-accent)" }}
-        >
-          {upload.isPending ? (
-            <Loader2 className="h-3 w-3 animate-spin" />
-          ) : (
-            <Upload className="h-3 w-3" />
-          )}
-          {upload.isPending ? "Uploading…" : "Upload"}
-        </button>
-        <input
-          ref={fileInput}
-          type="file"
-          multiple
-          onChange={pickFiles}
-          className="hidden"
-        />
+        {readOnly ? (
+          <span
+            className="text-xs"
+            style={{ color: "var(--color-text-muted)" }}
+            title="Add or remove files in the space that owns this document"
+          >
+            read-only here
+          </span>
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={() => fileInput.current?.click()}
+              disabled={upload.isPending}
+              className="flex items-center gap-1 rounded px-2 py-0.5 text-xs hover:opacity-70 disabled:opacity-50"
+              style={{ color: "var(--color-accent)" }}
+            >
+              {upload.isPending ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : (
+                <Upload className="h-3 w-3" />
+              )}
+              {upload.isPending ? "Uploading…" : "Upload"}
+            </button>
+            <input
+              ref={fileInput}
+              type="file"
+              multiple
+              onChange={pickFiles}
+              className="hidden"
+            />
+          </>
+        )}
       </div>
 
       {error && (
@@ -239,19 +268,21 @@ export default function AttachmentsList({ itemId }: { itemId: string }) {
                 >
                   <Download className="h-3.5 w-3.5" />
                 </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (window.confirm(`Delete attachment "${a.filename}"?`)) {
-                      remove.mutate(a.id);
-                    }
-                  }}
-                  aria-label="Delete attachment"
-                  className="rounded p-0.5 hover:bg-red-500/10 sm:invisible sm:group-hover:visible"
-                  style={{ color: "var(--color-text-muted)" }}
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
+                {!readOnly && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (window.confirm(`Delete attachment "${a.filename}"?`)) {
+                        remove.mutate(a.id);
+                      }
+                    }}
+                    aria-label="Delete attachment"
+                    className="rounded p-0.5 hover:bg-red-500/10 sm:invisible sm:group-hover:visible"
+                    style={{ color: "var(--color-text-muted)" }}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                )}
               </li>
             );
           })}

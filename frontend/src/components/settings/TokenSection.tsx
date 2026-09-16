@@ -27,22 +27,42 @@ function formatDate(s: string | null): string {
 export default function TokenSection() {
   const qc = useQueryClient();
   const tokens = useQuery({ queryKey: ["tokens"], queryFn: listTokens });
-  const spaces = useQuery({ queryKey: ["spaces"], queryFn: fetchMySpaces });
-  const personalSlug = useMemo(
-    () => spaces.data?.find((s) => s.is_personal)?.slug ?? spaces.data?.[0]?.slug ?? null,
-    [spaces.data],
-  );
-  const collections = useQuery({
-    queryKey: ["collections", personalSlug],
-    queryFn: () => listCollections(personalSlug!),
-    enabled: !!personalSlug,
+  // Inherited spaces included: scoping a token to the shared Standards
+  // space its owner subscribes to is one of the obvious things to want,
+  // and that space never appears in the plain listing.
+  const spaces = useQuery({
+    queryKey: ["spaces", "with-inherited"],
+    queryFn: () => fetchMySpaces({ includeInherited: true }),
   });
 
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [scopes, setScopes] = useState<Set<TokenScope>>(new Set(ALL_SCOPES));
+  const [spaceScoped, setSpaceScoped] = useState(false);
+  const [spaceIds, setSpaceIds] = useState<Set<string>>(new Set());
   const [scoped, setScoped] = useState(false);
   const [collIds, setCollIds] = useState<Set<string>>(new Set());
+
+  // Collections are per-space, so the picker has to follow whichever
+  // space the token is being pointed at. Falls back to the personal one
+  // when the token isn't space-restricted, which is the old behaviour.
+  const collectionSlug = useMemo(() => {
+    const chosen = spaceScoped
+      ? spaces.data?.find((s) => spaceIds.has(s.id))
+      : undefined;
+    return (
+      chosen?.slug ??
+      spaces.data?.find((s) => s.is_personal)?.slug ??
+      spaces.data?.[0]?.slug ??
+      null
+    );
+  }, [spaces.data, spaceScoped, spaceIds]);
+
+  const collections = useQuery({
+    queryKey: ["collections", collectionSlug],
+    queryFn: () => listCollections(collectionSlug!),
+    enabled: !!collectionSlug,
+  });
   const [includeDescendants, setIncludeDescendants] = useState(false);
   const [plaintext, setPlaintext] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -53,6 +73,8 @@ export default function TokenSection() {
       setPlaintext(t.plaintext);
       setName("");
       setScopes(new Set(ALL_SCOPES));
+      setSpaceScoped(false);
+      setSpaceIds(new Set());
       setScoped(false);
       setCollIds(new Set());
       setIncludeDescendants(false);
@@ -75,9 +97,20 @@ export default function TokenSection() {
       setError("Pick at least one scope");
       return;
     }
+    // The API refuses an empty allow-list rather than minting a token
+    // that can reach nothing; say so here instead of round-tripping.
+    if (spaceScoped && spaceIds.size === 0) {
+      setError("Pick at least one space, or untick the restriction");
+      return;
+    }
+    if (scoped && collIds.size === 0) {
+      setError("Pick at least one collection, or untick the restriction");
+      return;
+    }
     create.mutate({
       name: name.trim(),
       scopes: [...scopes],
+      allowed_space_ids: spaceScoped ? [...spaceIds] : null,
       allowed_collection_ids: scoped ? [...collIds] : null,
       include_descendants: scoped && includeDescendants,
     });
@@ -164,7 +197,7 @@ export default function TokenSection() {
               autoFocus
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="zotero-import-script"
+              placeholder="my-import-script"
               className="w-full rounded border px-2 py-1 text-sm"
               style={{
                 backgroundColor: "var(--color-surface)",
@@ -198,6 +231,67 @@ export default function TokenSection() {
                 </label>
               ))}
             </div>
+          </fieldset>
+
+          <fieldset className="mb-2">
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={spaceScoped}
+                onChange={(e) => setSpaceScoped(e.target.checked)}
+              />
+              <span>Restrict to specific spaces</span>
+            </label>
+            {!spaceScoped ? (
+              <p
+                className="mt-1 text-xs"
+                style={{ color: "var(--color-text-muted)" }}
+              >
+                Otherwise the token reaches every space you can — your own,
+                any shared with you, and any those inherit.
+              </p>
+            ) : (
+              <div className="mt-2 flex flex-col gap-1">
+                {spaces.data?.map((s) => (
+                  <label
+                    key={s.id}
+                    className="flex items-center gap-2 text-sm"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={spaceIds.has(s.id)}
+                      onChange={() => {
+                        const next = new Set(spaceIds);
+                        if (next.has(s.id)) next.delete(s.id);
+                        else next.add(s.id);
+                        setSpaceIds(next);
+                      }}
+                    />
+                    <span className="min-w-0 truncate">
+                      {s.name}
+                      <span
+                        className="ml-2 text-xs"
+                        style={{ color: "var(--color-text-muted)" }}
+                      >
+                        {s.is_personal
+                          ? "personal"
+                          : s.is_inherited
+                            ? "inherited · read-only"
+                            : s.role}
+                      </span>
+                    </span>
+                  </label>
+                ))}
+                {spaces.data?.length === 0 && (
+                  <p
+                    className="text-xs"
+                    style={{ color: "var(--color-text-muted)" }}
+                  >
+                    No spaces yet.
+                  </p>
+                )}
+              </div>
+            )}
           </fieldset>
 
           <fieldset className="mb-2">

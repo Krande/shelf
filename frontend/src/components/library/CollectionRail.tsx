@@ -10,6 +10,7 @@ import {
   FolderOpen,
   Inbox,
   LibraryBig,
+  Link2,
   MoreHorizontal,
   Pencil,
   Plus,
@@ -67,10 +68,34 @@ export default function CollectionRail({
     enabled: !!slug,
   });
 
+  // Own collections and inherited ones are built into separate trees and
+  // rendered as separate groups. Merging them would put a borrowed
+  // "Structural" next to your own with nothing to tell them apart, and
+  // the borrowed one can't be renamed, reordered or filed into — a row
+  // that looks identical but behaves differently is worse than two lists.
   const tree = useMemo(
-    () => buildTree(collections.data ?? []),
+    () => buildTree((collections.data ?? []).filter((c) => !c.is_inherited)),
     [collections.data],
   );
+
+  /** Inherited collections, grouped by the space they came from. */
+  const inheritedGroups = useMemo(() => {
+    const borrowed = (collections.data ?? []).filter((c) => c.is_inherited);
+    const bySpace = new Map<string, { name: string; items: Collection[] }>();
+    for (const c of borrowed) {
+      const key = c.space_id;
+      const group = bySpace.get(key) ?? {
+        name: c.space_name || "Inherited",
+        items: [],
+      };
+      group.items.push(c);
+      bySpace.set(key, group);
+    }
+    return [...bySpace.values()].map((g) => ({
+      name: g.name,
+      tree: buildTree(g.items),
+    }));
+  }, [collections.data]);
   const byId = useMemo(() => {
     const m = new Map<string, Collection>();
     for (const c of collections.data ?? []) m.set(c.id, c);
@@ -361,6 +386,50 @@ export default function CollectionRail({
             }}
           />
         ))}
+
+        {inheritedGroups.map((group) => (
+          <div key={group.name} className="mt-3">
+            <div
+              className="flex items-center gap-1 px-1 py-1 text-xs uppercase tracking-wider"
+              style={{ color: "var(--color-text-muted)" }}
+              title={`Inherited from ${group.name} — read-only here`}
+            >
+              <Link2 className="h-3 w-3 shrink-0" />
+              <span className="truncate">{group.name}</span>
+            </div>
+            {group.tree.map((node, idx) => (
+              <CollectionNode
+                key={node.id}
+                node={node}
+                depth={0}
+                siblingIndex={idx}
+                siblingCount={group.tree.length}
+                expanded={expanded}
+                onToggle={toggleExpanded}
+                activeId={
+                  selection.view === "library" &&
+                  selection.collection !== "unfiled"
+                    ? selection.collection
+                    : null
+                }
+                onSelect={(id) => onSelect({ view: "library", collection: id })}
+                // Everything below is a write, and an inherited
+                // collection belongs to another space — the API refuses
+                // all of them, so the row offers none of them.
+                readOnly
+                renamingId={null}
+                onStartRename={() => {}}
+                onCancelRename={() => {}}
+                onCommitRename={() => {}}
+                onEditDescription={() => {}}
+                onMoveInto={() => {}}
+                onMoveBy={() => {}}
+                onDrop={() => {}}
+                onDelete={() => {}}
+              />
+            ))}
+          </div>
+        ))}
       </div>
 
       {descEditTarget && (
@@ -466,6 +535,7 @@ function CollectionNode({
   onMoveBy,
   onDrop,
   onDelete,
+  readOnly = false,
 }: {
   node: TreeNode;
   depth: number;
@@ -488,6 +558,9 @@ function CollectionNode({
     position: "before" | "after" | "into",
   ) => void;
   onDelete: (id: string, name: string) => void;
+  /** Inherited from another space: browsable, but every write the row
+   *  would otherwise offer is refused by the API, so none are shown. */
+  readOnly?: boolean;
 }) {
   const hasChildren = node.children.length > 0;
   const isOpen = expanded.has(node.id);
@@ -525,7 +598,7 @@ function CollectionNode({
   return (
     <div>
       <div
-        draggable={!renaming}
+        draggable={!renaming && !readOnly}
         onDragStart={(e) => {
           e.dataTransfer.setData(
             "application/x-shelf-collection",
@@ -588,7 +661,7 @@ function CollectionNode({
             {node.name}
           </span>
         )}
-        {!renaming && (
+        {!renaming && !readOnly && (
           <NodeMenu
             node={node}
             isFirst={siblingIndex === 0}
@@ -624,6 +697,7 @@ function CollectionNode({
               onMoveBy={onMoveBy}
               onDrop={onDrop}
               onDelete={onDelete}
+              readOnly={readOnly}
             />
           ))}
         </div>

@@ -53,10 +53,12 @@ import {
   setItemCollections,
   type Collection,
 } from "@/api/collections";
+import { fetchPins } from "@/api/standards";
 import { createTag, listTags, setItemTags, type Tag } from "@/api/tags";
 import { downloadItemPdfsZip, uploadAttachment } from "@/api/attachments";
 import { itemTypeLabel, type ItemType } from "@/api/itemFields";
 import { useDebounce } from "@/hooks/useDebounce";
+import { useResizableWidth } from "@/hooks/useResizableWidth";
 import AppShell from "@/components/layout/AppShell";
 import ItemForm, {
   type ItemFormSubmission,
@@ -237,7 +239,10 @@ export default function LibraryPage() {
     setSearchParams(searchParams);
   }
 
-  const spaces = useQuery({ queryKey: ["spaces"], queryFn: fetchMySpaces });
+  const spaces = useQuery({
+    queryKey: ["spaces"],
+    queryFn: () => fetchMySpaces(),
+  });
   const personal = useMemo<Space | null>(
     () => spaces.data?.find((s) => s.is_personal) ?? spaces.data?.[0] ?? null,
     [spaces.data],
@@ -357,6 +362,27 @@ export default function LibraryPage() {
     [filterTags, searchParams, setSearchParams],
   );
 
+  // Standards this space has pinned an edition of. Only used to decide
+  // whether the "show all revisions" control is worth rendering — a
+  // space with no pins has nothing hidden, so the toggle would be noise.
+  const pins = useQuery({
+    queryKey: ["pins", slug],
+    queryFn: () => fetchPins(slug!),
+    enabled: !!slug,
+  });
+  const pinnedCount = pins.data?.length ?? 0;
+
+  // Whether to show every edition of a standard this space has pinned
+  // one of. Off by default, matching the server: a project library
+  // should answer "which edition do we build to", not list five. Lives
+  // in the URL so the widened view survives a reload and can be linked.
+  const showAllRevisions = searchParams.get("revisions") === "all";
+  const toggleAllRevisions = useCallback(() => {
+    if (showAllRevisions) searchParams.delete("revisions");
+    else searchParams.set("revisions", "all");
+    setSearchParams(searchParams);
+  }, [showAllRevisions, searchParams, setSearchParams]);
+
   // Page size is the server's default; small enough that the first
   // chunk feels instant on mobile, large enough that scroll-to-load
   // doesn't fire constantly. The server caps at 200.
@@ -372,6 +398,7 @@ export default function LibraryPage() {
       filterTags,
       collectionParam,
       searchScope,
+      showAllRevisions,
     ],
     queryFn: ({ pageParam }) =>
       listItems(slug!, {
@@ -384,6 +411,7 @@ export default function LibraryPage() {
         direction,
         collection: collectionParam ?? undefined,
         scope: searchScope,
+        revisions: showAllRevisions ? "all" : "pinned",
       }),
     initialPageParam: 0,
     getNextPageParam: (lastPage, allPages) => {
@@ -461,6 +489,21 @@ export default function LibraryPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
 
+  // Width of the desktop detail pane. Null until someone drags it, so
+  // the existing responsive width stays the default.
+  const detailWidth = useResizableWidth("shelf.detailPanelWidth");
+
+  // Spaces including the ones this space inherits, purely to answer
+  // "may I edit this item?" — the answer depends on the caller's role in
+  // the space the item actually *lives* in, which for an inherited item
+  // isn't the one being browsed. Kept as its own query rather than
+  // widening ["spaces"], because that one feeds the space switcher and
+  // an inherited space isn't somewhere you switch to.
+  const spacesWithInherited = useQuery({
+    queryKey: ["spaces", "with-inherited"],
+    queryFn: () => fetchMySpaces({ includeInherited: true }),
+  });
+
   // Deep-link: ?item=<id> selects that item and opens its detail
   // panel even if the item is outside the current page of list
   // results (e.g. arriving from the landing-page search dropdown).
@@ -491,6 +534,23 @@ export default function LibraryPage() {
     (deepLinkedItem.data && deepLinkedItem.data.id === selectedId
       ? deepLinkedItem.data
       : null);
+
+  // The space the selected item actually lives in, which for an
+  // inherited item is not the one being browsed. Whether its metadata
+  // and files can be changed follows from the caller's role *there* —
+  // the same rule the API applies — so someone who owns the Standards
+  // space edits its documents from anywhere they can see them, and a
+  // subscriber who can only read gets a consistently read-only panel.
+  const selectedItemSpace = useMemo(
+    () =>
+      selected
+        ? (spacesWithInherited.data ?? []).find(
+            (s) => s.id === selected.space_id,
+          )
+        : undefined,
+    [selected, spacesWithInherited.data],
+  );
+  const canEditSelected = canEdit(selectedItemSpace);
 
   // Track which items have their full-text hit list expanded. Cleared
   // whenever the search query changes so old expansions don't leak
@@ -891,6 +951,9 @@ export default function LibraryPage() {
               collections={collections.data ?? []}
               tagNames={selected ? tagNamesById(selected.tag_ids) : []}
               spaceSlug={slug}
+              spaceIsOwned={activeSpace?.is_owner ?? false}
+              canWrite={canEditSelected}
+              homeSpaceName={selectedItemSpace?.name ?? null}
               onEdit={() => setFormMode("edit")}
               onDelete={onDeleteSelected}
               onRestore={view === "trash" ? onRestoreSelected : undefined}
@@ -901,6 +964,7 @@ export default function LibraryPage() {
               onCollectionClick={(id) =>
                 setSelection({ view: "library", collection: id })
               }
+              onSelectItem={setSelectedId}
             />
           </div>
         </div>
@@ -1156,6 +1220,31 @@ export default function LibraryPage() {
             >
               Shared with you as a viewer — you can read and export this
               space, but not change it.
+            </div>
+          )}
+
+          {pinnedCount > 0 && (
+            <div
+              className="flex flex-wrap items-center gap-2 border-b px-4 py-1.5 text-xs"
+              style={{
+                borderColor: "var(--color-border)",
+                color: "var(--color-text-muted)",
+              }}
+            >
+              <span>
+                {showAllRevisions
+                  ? `Showing every edition of ${pinnedCount} pinned standard${pinnedCount === 1 ? "" : "s"}.`
+                  : `${pinnedCount} standard${pinnedCount === 1 ? "" : "s"} pinned to one edition; the others are hidden.`}
+              </span>
+              <button
+                onClick={toggleAllRevisions}
+                className="rounded border px-2 py-0.5 text-xs hover:opacity-80"
+                style={{ borderColor: "var(--color-border)" }}
+              >
+                {showAllRevisions
+                  ? "Show pinned only"
+                  : "Show all revisions"}
+              </button>
             </div>
           )}
 
@@ -1517,11 +1606,36 @@ export default function LibraryPage() {
               )}
             </div>
 
+            {/* Drag handle for the detail pane. Sits in the flex row
+                rather than inside the pane so it doesn't scroll away
+                with the content, and is a `separator` so keyboard users
+                get it too. */}
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Resize the detail panel"
+              tabIndex={0}
+              onPointerDown={detailWidth.onPointerDown}
+              onKeyDown={detailWidth.onKeyDown}
+              onDoubleClick={detailWidth.reset}
+              title="Drag to resize · double-click to reset"
+              className="hidden w-1 shrink-0 cursor-col-resize md:block"
+              style={{
+                backgroundColor: detailWidth.dragging
+                  ? "var(--color-accent)"
+                  : "var(--color-border)",
+              }}
+            />
+
             <aside
               className="hidden w-[360px] shrink-0 border-l md:block lg:w-[420px]"
               style={{
                 borderColor: "var(--color-border)",
                 backgroundColor: "var(--color-surface)",
+                // Unset until dragged, so the responsive default stands.
+                ...(detailWidth.width !== null
+                  ? { width: detailWidth.width }
+                  : {}),
               }}
             >
               <ItemDetail
@@ -1529,6 +1643,9 @@ export default function LibraryPage() {
                 collections={collections.data ?? []}
                 tagNames={selected ? tagNamesById(selected.tag_ids) : []}
                 spaceSlug={slug}
+                spaceIsOwned={activeSpace?.is_owner ?? false}
+                canWrite={canEditSelected}
+                homeSpaceName={selectedItemSpace?.name ?? null}
                 onEdit={() => setFormMode("edit")}
                 onDelete={onDeleteSelected}
                 onRestore={view === "trash" ? onRestoreSelected : undefined}
@@ -1539,6 +1656,7 @@ export default function LibraryPage() {
                 onCollectionClick={(id) =>
                   setSelection({ view: "library", collection: id })
                 }
+                onSelectItem={setSelectedId}
               />
             </aside>
           </div>

@@ -1,11 +1,12 @@
 import uuid
 from enum import StrEnum
 
-from sqlalchemy import ForeignKey, Index, Integer, String
+from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import UUIDPK, Base, Timestamps
+from .notes import VISIBILITY_SPACE
 
 
 class AnnotationKind(StrEnum):
@@ -44,7 +45,19 @@ class Annotation(UUIDPK, Timestamps, Base):
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
+    # Same two values and the same rule as Note.visibility: `space` is
+    # everyone who can read the item's space, `private` is the author
+    # alone. Highlights on a shared standard are markup on someone else's
+    # document, so the API defaults them to private when the PDF is only
+    # reachable through an inheritance link.
+    visibility: Mapped[str] = mapped_column(
+        String, nullable=False, default=VISIBILITY_SPACE, server_default=VISIBILITY_SPACE
+    )
 
     __table_args__ = (
+        CheckConstraint(
+            "visibility IN ('private', 'space')", name="ck_annotations_visibility"
+        ),
         Index("ix_annotations_attachment_page", "attachment_id", "page_number"),
+        Index("ix_annotations_created_by_visibility", "created_by", "visibility"),
     )

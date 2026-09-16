@@ -147,8 +147,10 @@ SHELF_ADMIN_EMAILS=["you@example.com"]
 # start the app without them on purpose.
 SHELF_PREFLIGHT_ENABLED=true
 
-# Empty disables job publishing; the API still records the queued state on
-# the row, so nothing is lost when no worker is running.
+# NATS JetStream, for the background workers. Empty disables job publishing;
+# the API still records the queued state on the row, so nothing is lost when
+# no worker is running — the PDF just never gets its text until something
+# re-queues it. `pixi run up` sets this for you.
 SHELF_NATS_URL=nats://nats:4222
 ```
 
@@ -231,9 +233,10 @@ Behind a reverse proxy, uvicorn needs `--proxy-headers --forwarded-allow-ips='*'
 ## Roles and accounts
 
 Two *instance* roles, `user` and `admin`. Everyone is a `user`; admins
-additionally get an Admin tab in Settings, which lists everyone on the instance
-and hands out roles. Admin is a cookie-session thing — no API token scope grants
-it, so a leaked script token can't reach those routes.
+additionally get an Admin tab in Settings, which lists everyone on the instance,
+hands out roles, and can add an account from an email address before its owner
+has ever signed in (see "Sharing a space"). Admin is a cookie-session thing — no
+API token scope grants it, so a leaked script token can't reach those routes.
 
 Being an admin does **not** grant access to anyone's spaces. Handing out roles
 and reading everybody's library are different powers, and keeping them apart
@@ -318,10 +321,30 @@ shared spaces** from Settings → Spaces — the creator owns it and picks who e
 is in it. Creation is admin-gated because spaces are cheap to make and awkward
 to clean up; making a space still grants nothing over spaces other people own.
 
+**Rename** in the same panel changes a space's name and slug. The owner can do
+that to their own space, and an instance admin can do it to any *shared* space —
+a deliberate, narrow exception to "admins get nothing here", because a label is
+not a way in. An admin who renames a space still can't list a single item in it,
+see its members, or add to it. Nobody renames somebody else's personal shelf,
+and a personal space's slug is fixed either way: `is_personal` is derived from
+the `u-` prefix, so moving it would quietly reclassify the space.
+
+Changing a slug changes the space's URL and there's no redirect from the old
+one, so links already shared will 404. Nothing stored points at a slug — API
+tokens carry scope labels and collection ids — so no access breaks.
+
 Manage members under Settings → Spaces. You pick people from a dropdown of
-everyone with an account; someone has to have signed in at least once before
-they can be added. Removing someone revokes their access but leaves the content
-they created — it belongs to the space, not to them.
+everyone with an account. Removing someone revokes their access but leaves the
+content they created — it belongs to the space, not to them.
+
+People appear in that dropdown when they first sign in — nothing is synced from
+the identity provider ahead of that, so assigning someone the app in Entra (or
+Authentik, or anywhere else) doesn't create a shelf account until they actually
+log in. To add someone to a space before then, **admins can pre-provision an
+account by email** from Settings → Admin. It creates the user row and their
+personal space with no identity attached; their first sign-in links onto that
+row by email rather than making a second account. Use the same address the
+provider sends, or they'll get that second account.
 
 That dropdown is backed by `GET /api/users`, which **any signed-in user can
 read**: it lists every account's display name and email address. Everyone owns
@@ -335,9 +358,207 @@ bucket policy or lifecycle rule can address one space's objects without going
 through the database. Existing objects keep their original keys and are not
 rewritten; keys are stored per row, so both layouts coexist.
 
+## Inheriting a space
+
+A space can subscribe to another and read its items without holding a copy.
+The shape it's for: one shared **Standards** space holds one copy of each
+standard, and every project space — and every person who wants them in their own
+library — subscribes to it. Corrections happen once and reach everyone.
+
+Two sides have to agree, and the two panels live under Settings → Spaces →
+**Inheritance**:
+
+- The space **being read** opts in: its owner ticks *Let other spaces inherit
+  this one*. That's the consent, because everyone who can read a subscribing
+  space will be able to read this one's items.
+- The space **doing the reading** subscribes: its owner picks from the list of
+  spaces that have opted in.
+
+Inherited items are read-only wherever they're borrowed — the API refuses the
+writes, not just the UI — and are marked as inherited in the detail panel. Three
+properties keep the grant honest:
+
+- **It grants read and nothing else.** An editor on a project space is still a
+  viewer on the standards it inherits, and is not a member of that space.
+- **It does not chain.** A inherits B, B inherits C — A does not see C. One hop
+  is what the model promises, so an owner can answer "who can see my items" from
+  one table.
+- **The owner keeps control.** *Inherited by* lists every subscriber with a
+  Revoke button. Turning the flag back off stops new subscriptions and leaves
+  existing ones alone — access silently evaporating across every project is a
+  worse surprise than a stale subscription.
+
+Personal spaces can subscribe to a shared space but can't be subscribed *to*.
+
+### Notes and highlights on someone else's document
+
+Once one PDF is read by the whole company, "everyone who can read this document"
+is the wrong audience for a working note. So notes and highlights carry a
+visibility:
+
+| | Who sees it |
+|---|---|
+| `private` | the author, and nobody else — not even the owner of the space the document lives in |
+| `space` | everyone who can read the space that owns the **item** |
+
+On an inherited document a new note or highlight starts **private**. Share it and
+it reaches the space that owns the document — the other subscribers to Standards,
+not your own shelf where nobody is. Only the author can share one or take it
+back; an owner can't publish your notes for you, and can't retract them either.
+
+Writing a note needs only read access — annotating a document you can only read
+is the whole point. In a space you're actually a member of, notes keep the
+behaviour they always had and start shared with that space.
+
+## Engineering standards
+
+Standards get republished, and which edition applies is a decision a project
+makes deliberately. Two things the plain item model can't express:
+
+**Revisions know about each other.** Pick the *Engineering Standard* item type,
+fill in the issuing body, designation and edition, then file it under a standard
+from the item's detail panel. Editions matched on body + designation (ignoring
+case) share one history, so the detail panel gets a dropdown of every edition
+you can open and a badge saying whether this is the current one.
+
+"Latest" means the newest edition *you can read*, not the newest row in the
+database. When the instance holds something newer that you can't reach, the panel
+says so instead of presenting a stale edition as current. An edition with no
+issue date sorts last and is never latest — "Rev. 5" and "2020" can't be compared
+to each other, so only dates are trusted.
+
+**A space pins the edition it uses.** A project space inheriting Standards can
+pin "we build to the 2018 edition"; its library then lists that one and hides the
+other four. *Show all revisions* in the library toolbar reveals them, and the
+Standards space itself always stays the complete record. Pinning takes owner, not
+editor — it changes what everyone else in the space sees by default. Pins survive
+dropping and re-adding a subscription.
+
+## Copying an item to another space
+
+**Copy to another space** in the item detail panel makes a real copy: a new item,
+new attachment rows, new objects in the bucket. Metadata, files, extracted page
+text and tags come across; tags are matched by name into the target space's own
+tag table. Collections don't — folders are the target's own structure. Neither do
+notes and highlights: they belong to whoever wrote them, under the visibility
+they chose, and republishing them into a space those people may not be in is a
+disclosure rather than a copy.
+
+If the other space only needs to *read* the document, inherit instead. One copy
+of the bytes, one place to fix a mistake, and everyone sees the fix.
+
+## API tokens
+
+Mint them under Settings → API tokens. The plaintext is shown exactly once and
+there is no other path to it. A token carries coarse scopes — `upload`,
+`search`, `download` — and acts as the user who minted it, so by default it
+reaches every space that user can: their own, any shared with them, and any
+those inherit.
+
+Two optional allow-lists narrow it further:
+
+- **Spaces** — the coarse cut, and usually the one you want. A token for an
+  import script that should only touch one project, or a read-only token that
+  should see the shared Standards space and nothing of your own.
+- **Collections** — finer, within a space, optionally including everything
+  nested below the ones you pick (resolved at request time, so subcollections
+  added later are covered).
+
+Neither can widen access. Both are intersected with what the user can read on
+every request, so a token outlives neither a revoked membership nor a dropped
+subscription — and a space allow-list is stored as ids, not slugs, so renaming
+a space doesn't quietly break it.
+
+Admin is deliberately unreachable by token: no scope grants it, so a leaked
+script token can't reach the admin routes.
+
+### The `shelf` CLI
+
+[`cli/`](cli/README.md) is a command-line client for the REST API, installable
+on its own:
+
+```sh
+pixi global install shelf-cli \
+  --git https://github.com/Krande/shelf.git --subdirectory cli --tag v0.4.0
+```
+
+It does two things worth having: sets metadata fields without curl, and pushes
+**document profiles** — metadata kept in JSON files, somewhere other than this
+repo — into an instance whenever one is ready.
+
+```sh
+shelf items set <id> --set designation="NX-ACME 1234" --set numberOfPages=74
+shelf profiles push ./profiles/ --dry-run
+```
+
+Pushing twice updates rather than duplicates, matching on the document's own
+identity where it has one and on its file's SHA-256 where it doesn't — see the
+CLI README for why it's that way round.
+
+### What a token can do
+
+`/api/v1/*` covers a whole import without touching the SPA:
+
+| | |
+|---|---|
+| `POST /api/v1/items` | create an item with its metadata |
+| `PATCH /api/v1/items/{id}` | set type and metadata fields |
+| `GET /api/v1/items/{id}` | read one back |
+| `PUT /api/v1/items/{id}/revision` | file it as one edition of a standard |
+| `POST /api/v1/upload`, `/uploads/register`, `/uploads/{id}/complete` | attach files |
+| `GET /api/v1/search`, `/collections` | find things |
+
+`data` is the same opaque JSON the SPA writes, so whatever that item type's
+form would capture goes straight in:
+
+```bash
+curl -X POST https://shelf.example.com/api/v1/items \
+  -H "Authorization: Bearer $SHELF_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"item_type": "standard", "space_slug": "standards", "data": {
+        "title": "Guidance on the design of widgets — Part 2: Plated widgets",
+        "standardBody": "NX Standards",
+        "designation": "NX-ACME 1234",
+        "edition": "2015+A2:2020+NA:2020",
+        "nationalAnnex": "NA:2020 (Ruritania)",
+        "amendments": "AC:2017, A1:2018, A2:2020",
+        "issuedOn": "2020-10-01"
+      }}'
+```
+
+`PATCH` replaces `data` wholesale, matching the SPA's own PATCH. Pass
+`"merge": true` to set individual keys and leave the rest standing — the mode a
+script enriching existing records wants — where a key set to `null` is removed.
+
+Filing a revision uses the same family lookup the SPA does, matched
+case-insensitively on issuing body + designation, so editions loaded by an
+importer and editions filed by hand land in one revision history.
+
 ## Background workers
 
 Jobs go to NATS JetStream and are consumed by `python -m shelf.worker`, running from the same image as the API. Job state also lives on the database row, so a worker being down delays work rather than losing it.
+
+`pixi run up` starts NATS and a worker alongside the API and the SPA, so a local
+stack processes uploads end-to-end: upload a PDF, and its text is extracted and
+searchable a few seconds later. Which consumers run depends on what the machine
+has —
+
+| Consumer | Does | Needs |
+|---|---|---|
+| `extract` | body text + per-page text, quality assessment | pypdf (always available) |
+| `outline` | heading detection, generated table of contents | PyMuPDF (always available) |
+| `ocr` | Tesseract pass over scanned PDFs | `tesseract` + `gs` on PATH |
+
+`ocr` is skipped with a note when those binaries are missing, which is the
+normal case on Windows and macOS — pixi only installs them on linux-64. Override
+with `pixi run up --consumers extract,ocr,outline`, or run without a worker at
+all via `pixi run up --no-worker`.
+
+Anything uploaded while no queue was running has a row but no message, so
+nothing ever told the worker about it. `pixi run up` re-publishes those on every
+start (idempotent — WorkQueue retention drops the duplicate once acked), and
+`pixi run backfill-extract` does the same by hand. A PDF stuck at
+`extraction_status = 'pending'` with no worker running is exactly this case.
 
 - **CPU tier** — text extraction, PDF quality scoring, Tesseract OCR, outline generation (a PyMuPDF font heuristic). Runs anywhere.
 - **GPU tier** — olmOCR for documents the CPU tier scores as poor. Built separately from `Dockerfile.gpu` (`pixi run gpu-image-build`) because it pulls a multi-GB Torch/CUDA stack.

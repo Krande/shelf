@@ -2,22 +2,31 @@
 
 This is the curl-friendly side of Shelf: every endpoint takes
 `Authorization: Bearer shelf_<token>` and respects the token's scopes
-+ optional `allowed_collection_ids`. The cookie-authenticated /api/*
-surface used by the SPA stays as-is.
+plus its optional `allowed_space_ids` / `allowed_collection_ids`. The
+cookie-authenticated /api/* surface used by the SPA stays as-is.
+
+A token acts as the user who minted it and reaches the same spaces they
+do — owned, shared, and inherited — so an importer can read a subscribed
+Standards space without anyone re-sharing anything to it.
+
+Enough of the surface to run an import end-to-end without touching the
+SPA: create an item with its metadata, attach a file, set the metadata
+again once you've parsed it, and file it under a standard.
 
 Why a separate prefix instead of mixing auth modes on the same paths:
 the SPA depends on cookies and would silently fail closed on a Bearer
 client; making the namespaces explicit keeps each path honest.
 """
 
+import hashlib
 import uuid
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import RedirectResponse
 from obstore import put_async
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import cast, delete, or_, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,15 +35,25 @@ from sqlalchemy.types import String
 from ..auth.spaces import (
     SPACE_ROLE_EDITOR,
     SPACE_ROLE_VIEWER,
-    readable_space_ids,
+    readable_item_space_ids,
     require_space_role,
     writable_space_ids,
 )
 from ..auth.tokens import TokenAuth, require_scope
 from ..db import get_session
-from ..models import ApiToken, Attachment, Collection, Item, ItemCollection, Space
+from ..models import (
+    ApiToken,
+    Attachment,
+    Collection,
+    Item,
+    ItemCollection,
+    Space,
+    StandardFamily,
+    StandardRevision,
+)
 from ..services import extraction, storage
 from ..services.storage import attachment_storage_key
+from .standards import LinkRevisionRequest, item_revisions, upsert_revision
 
 router = APIRouter(tags=["v1"], prefix="/api/v1")
 
@@ -64,6 +83,9 @@ class AttachmentSummary(BaseModel):
     content_type: str
     size_bytes: int | None
     uploaded_at: datetime | None = None
+    # Null until something computes it — see the column comment. Clients
+    # matching on it should treat null as "unknown", not "different".
+    sha256: str | None = None
 
 
 # ── helpers ───────────────────────────────────────────────────────────────
@@ -76,8 +98,9 @@ async def _resolve_owned_item(
     minimum: str = SPACE_ROLE_VIEWER,
 ) -> Item:
     """A token acts as the user who minted it, so it reaches exactly the
-    spaces that user can — their own plus any they're a member of. The
-    token's own scopes and collection allow-list narrow it further."""
+    spaces that user can — their own, any they're a member of, and any
+    those subscribe to. The token's own scopes and its space /
+    collection allow-lists narrow it further."""
     item = await db.get(Item, item_id)
     if item is None or item.deleted_at is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
@@ -85,7 +108,52 @@ async def _resolve_owned_item(
     await require_space_role(
         db, space, auth.user.id, minimum, label="Item not found"
     )
+    _enforce_space_scope(auth, item.space_id)
     return item
+
+
+def _enforce_space_scope(auth: TokenAuth, space_id: uuid.UUID) -> None:
+    """404 if the token carries a space allow-list this space isn't on.
+
+    404 rather than 403, matching how a space with no role is treated
+    everywhere else: as far as this token is concerned the space does
+    not exist, and saying "it exists but you're not scoped to it" tells
+    the holder of a deliberately-narrowed token something the narrowing
+    was meant to withhold.
+    """
+    allowed = auth.token.allowed_space_ids
+    if allowed is not None and str(space_id) not in allowed:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+
+
+async def _token_space_ids(
+    db: AsyncSession, auth: TokenAuth, *, writable: bool
+) -> list[uuid.UUID]:
+    """Every space this token may touch, as concrete ids.
+
+    Two filters, in this order and never the other way round: what the
+    *user* can reach, then what the *token* was narrowed to. The
+    allow-list can only ever subtract — a token whose space was later
+    unshared, or whose subscription was dropped, loses it on the next
+    request rather than keeping a grant the user no longer has.
+
+    `writable=True` excludes viewer memberships and inherited spaces
+    both, since neither can be written to.
+    """
+    base = (
+        writable_space_ids(auth.user.id)
+        if writable
+        else readable_item_space_ids(auth.user.id)
+    )
+    reachable = (
+        await db.execute(select(Space.id).where(Space.id.in_(base)))
+    ).scalars().all()
+
+    allowed = auth.token.allowed_space_ids
+    if allowed is None:
+        return list(reachable)
+    permitted = {uuid.UUID(s) for s in allowed}
+    return [sid for sid in reachable if sid in permitted]
 
 
 async def _effective_allowed_collection_ids(
@@ -196,12 +264,12 @@ async def _resolve_or_create_item(
         await _enforce_collection_scope(db, auth, item)
         return item, None
 
+    writable = await _token_space_ids(db, auth, writable=True)
     if space_slug is not None:
         space = (
             await db.execute(
                 select(Space).where(
-                    Space.slug == space_slug,
-                    Space.id.in_(writable_space_ids(auth.user.id)),
+                    Space.slug == space_slug, Space.id.in_(writable)
                 )
             )
         ).scalar_one_or_none()
@@ -211,14 +279,15 @@ async def _resolve_or_create_item(
         space = (
             await db.execute(
                 select(Space)
-                .where(Space.id.in_(writable_space_ids(auth.user.id)))
+                .where(Space.id.in_(writable))
                 .order_by(Space.created_at)
             )
         ).scalars().first()
         if space is None:
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
-                "User has no space yet — sign in to the SPA once to bootstrap one",
+                "This token can't write to any space — check its space "
+                "allow-list, or sign in to the SPA once to bootstrap one",
             )
 
     item = Item(
@@ -328,15 +397,12 @@ async def list_collections(
     auth: Annotated[TokenAuth, Depends(require_scope("search"))],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> list[dict[str, object]]:
-    """Returns every collection across spaces the user owns, narrowed
-    to the token's effective allow-list (with descendants) when the
-    token is collection-scoped. Each row carries a `path` so callers
-    can look up by human-readable location instead of UUID."""
-    spaces = (
-        await db.execute(
-            select(Space.id).where(Space.id.in_(readable_space_ids(auth.user.id)))
-        )
-    ).scalars().all()
+    """Returns every collection across the spaces the token may read —
+    owned, shared, and inherited — narrowed to the token's effective
+    allow-lists (with descendants) when it is space- or
+    collection-scoped. Each row carries a `path` so callers can look up
+    by human-readable location instead of UUID."""
+    spaces = await _token_space_ids(db, auth, writable=False)
     if not spaces:
         return []
 
@@ -395,6 +461,7 @@ async def create_collection(
                 status.HTTP_404_NOT_FOUND, "Parent collection not found"
             )
         space = await db.get(Space, parent.space_id)
+        _enforce_space_scope(auth, parent.space_id)
         await require_space_role(
             db,
             space,
@@ -512,6 +579,7 @@ async def delete_collection(
     await require_space_role(
         db, space, auth.user.id, SPACE_ROLE_EDITOR, label="Collection not found"
     )
+    _enforce_space_scope(auth, coll.space_id)
     allowed = await _effective_allowed_collection_ids(db, auth.token)
     if allowed is not None and coll.id not in allowed:
         raise HTTPException(
@@ -654,6 +722,11 @@ async def upload(
         filename=file.filename or "upload",
         content_type=file.content_type or "application/octet-stream",
         size_bytes=len(body),
+        # Free here, and authoritative: this route is the one where the
+        # bytes actually pass through the API, so nothing is being taken
+        # on trust. The presigned routes have to accept a client-supplied
+        # value or wait for the worker.
+        sha256=hashlib.sha256(body).hexdigest(),
         # Inline upload: the bytes are already in the bucket, mark
         # ready in the same transaction.
         uploaded_at=_utcnow(),
@@ -691,6 +764,12 @@ class UploadRegisterPayload(BaseModel):
     title: str | None = None
     space_slug: str | None = None
     collection_id: list[uuid.UUID] | None = None
+    # Optional, and taken on trust — on this route the bytes go straight
+    # from the client to the bucket, so the API has nothing to check it
+    # against. Good enough for "have I pushed this file already", not
+    # evidence of integrity. Leave it out and the extract worker fills it
+    # in from the bytes it downloads, which is the authoritative value.
+    sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
 
 
 class UploadRegisterResponse(BaseModel):
@@ -738,6 +817,7 @@ async def uploads_register(
         filename=payload.filename,
         content_type=payload.content_type,
         size_bytes=payload.size_bytes,
+        sha256=payload.sha256.lower() if payload.sha256 else None,
         uploaded_at=None,
         created_by=auth.user.id,
     )
@@ -799,6 +879,7 @@ async def uploads_complete(
     await require_space_role(
         db, space, auth.user.id, SPACE_ROLE_EDITOR, label="Attachment not found"
     )
+    _enforce_space_scope(auth, item.space_id)
     await _enforce_collection_scope(db, auth, item)
 
     if verify:
@@ -823,6 +904,479 @@ async def uploads_complete(
     return att
 
 
+# ── items ─────────────────────────────────────────────────────────────────
+#
+# Until now a token could put *files* into shelf but not describe them:
+# the upload path minted a `document` item carrying nothing but a title,
+# and there was no way to set the rest. That makes an importer a
+# two-tool job — POST the PDF here, then go and type the metadata into
+# the SPA — which rather defeats the point of having a token.
+
+
+class TokenSpace(BaseModel):
+    id: uuid.UUID
+    slug: str
+    name: str
+    # Whether this token may create and change content here. False for a
+    # viewer membership and for anything reached by inheritance.
+    writable: bool
+
+
+class AttachmentMatch(BaseModel):
+    attachment_id: uuid.UUID
+    filename: str
+    item_id: uuid.UUID
+    space_id: uuid.UUID
+
+
+class AttachmentResolveResponse(BaseModel):
+    attachments: list[AttachmentMatch]
+
+
+class StandardMatch(BaseModel):
+    item_id: uuid.UUID
+    space_id: uuid.UUID
+    label: str
+
+
+class StandardResolveResponse(BaseModel):
+    """Possibly empty — an edition the caller can't see isn't an error.
+
+    A list rather than one row because the same edition legitimately
+    exists in more than one space: copying puts it there on purpose, and
+    a token that can read both should be told about both rather than
+    handed whichever the database returned first.
+    """
+
+    items: list[StandardMatch]
+
+
+class StandardRevisionSummary(BaseModel):
+    """What a token gets back after filing an item under a standard."""
+
+    item_id: uuid.UUID
+    family_id: uuid.UUID
+    body: str
+    designation: str
+    label: str
+
+
+class ItemCreatePayload(BaseModel):
+    """A new item and its metadata.
+
+    `data` is the same opaque JSON blob the SPA writes, so whatever the
+    item type's form would have captured goes here — for an engineering
+    standard that's `standardBody`, `designation`, `edition`,
+    `nationalAnnex` and the rest. Nothing validates the keys; the field
+    list in the SPA is a convention, not a schema.
+    """
+
+    item_type: str = "document"
+    data: dict[str, Any] = {}
+    space_slug: str | None = None
+    collection_id: list[uuid.UUID] | None = None
+
+
+class ItemUpdatePayload(BaseModel):
+    """A partial update. Omitted fields are left alone.
+
+    `data` **replaces** the whole blob by default, matching the SPA's
+    own PATCH — pass `merge: true` to set individual keys instead and
+    leave the rest of the metadata standing, which is usually what a
+    script enriching existing records wants. A merged key whose value is
+    null is removed.
+    """
+
+    item_type: str | None = None
+    data: dict[str, Any] | None = None
+    merge: bool = False
+
+
+@router.post(
+    "/items",
+    response_model=ItemSummary,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create an item with its metadata",
+)
+async def create_item(
+    payload: ItemCreatePayload,
+    auth: Annotated[TokenAuth, Depends(require_scope("upload"))],
+    db: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, object]:
+    """Create an item in a space this token can write to.
+
+    Lands in `space_slug` when given, otherwise the oldest writable
+    space — the same rule the upload path uses, so a token that always
+    means one space can be given a space allow-list of one and then
+    never name it again.
+    """
+    writable = await _token_space_ids(db, auth, writable=True)
+    if payload.space_slug is not None:
+        space = (
+            await db.execute(
+                select(Space).where(
+                    Space.slug == payload.space_slug, Space.id.in_(writable)
+                )
+            )
+        ).scalar_one_or_none()
+        if space is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Space not found")
+    else:
+        space = (
+            await db.execute(
+                select(Space)
+                .where(Space.id.in_(writable))
+                .order_by(Space.created_at)
+            )
+        ).scalars().first()
+        if space is None:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "This token can't write to any space — check its space "
+                "allow-list",
+            )
+
+    item = Item(
+        space_id=space.id,
+        item_type=payload.item_type,
+        data=payload.data,
+        created_by=auth.user.id,
+    )
+    db.add(item)
+    await db.flush()
+
+    if payload.collection_id:
+        await _link_collections(db, auth, item, payload.collection_id)
+
+    await db.commit()
+    await db.refresh(item)
+    return await _item_summary(db, auth, item)
+
+
+@router.patch(
+    "/items/{item_id}",
+    response_model=ItemSummary,
+    summary="Set an item's type and metadata fields",
+)
+async def update_item(
+    item_id: uuid.UUID,
+    payload: ItemUpdatePayload,
+    auth: Annotated[TokenAuth, Depends(require_scope("upload"))],
+    db: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, object]:
+    """Update an item this token can write to."""
+    item = await _resolve_owned_item(db, auth, item_id, SPACE_ROLE_EDITOR)
+    await _enforce_collection_scope(db, auth, item)
+
+    if payload.item_type is not None:
+        item.item_type = payload.item_type
+
+    if payload.data is not None:
+        if payload.merge:
+            # dict(...) then reassign rather than mutating in place:
+            # SQLAlchemy doesn't track mutation of a plain JSONB dict, so
+            # an in-place update would be silently dropped on flush.
+            merged = dict(item.data) if isinstance(item.data, dict) else {}
+            for key, value in payload.data.items():
+                if value is None:
+                    merged.pop(key, None)
+                else:
+                    merged[key] = value
+            item.data = merged
+        else:
+            item.data = payload.data
+
+    await db.commit()
+    await db.refresh(item)
+    return await _item_summary(db, auth, item)
+
+
+@router.get(
+    "/items/{item_id}",
+    response_model=ItemSummary,
+    summary="Fetch one item with its metadata",
+)
+async def get_item(
+    item_id: uuid.UUID,
+    auth: Annotated[TokenAuth, Depends(require_scope("search"))],
+    db: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, object]:
+    item = await _resolve_owned_item(db, auth, item_id)
+    await _enforce_collection_scope(db, auth, item)
+    return await _item_summary(db, auth, item)
+
+
+async def _item_summary(
+    db: AsyncSession, auth: TokenAuth, item: Item
+) -> dict[str, object]:
+    """One item as ItemSummary, with collection_ids filtered to what the
+    token may see — the same treatment /search gives its rows."""
+    collection_ids = (
+        await db.execute(
+            select(ItemCollection.collection_id).where(
+                ItemCollection.item_id == item.id
+            )
+        )
+    ).scalars().all()
+    allowed = await _effective_allowed_collection_ids(db, auth.token)
+    if allowed is not None:
+        collection_ids = [c for c in collection_ids if c in allowed]
+    return {
+        "id": item.id,
+        "space_id": item.space_id,
+        "item_type": item.item_type,
+        "data": item.data,
+        "created_at": item.created_at,
+        "updated_at": item.updated_at,
+        "collection_ids": list(collection_ids),
+    }
+
+
+@router.put(
+    "/items/{item_id}/revision",
+    response_model=StandardRevisionSummary,
+    summary="File an item as one edition of an engineering standard",
+)
+async def set_item_revision(
+    item_id: uuid.UUID,
+    payload: LinkRevisionRequest,
+    auth: Annotated[TokenAuth, Depends(require_scope("upload"))],
+    db: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, object]:
+    """Link this item to a standard so its editions know about each other.
+
+    Idempotent, and the family is found-or-created from (body,
+    designation) matched case-insensitively — so an importer loading a
+    directory of standards lands every edition of one of them in a
+    single revision history without having to look anything up first.
+    """
+    item = await _resolve_owned_item(db, auth, item_id, SPACE_ROLE_EDITOR)
+    await _enforce_collection_scope(db, auth, item)
+    family = await upsert_revision(db, item, payload)
+    await db.commit()
+    return {
+        "item_id": item.id,
+        "family_id": family.id,
+        "body": family.body,
+        "designation": family.designation,
+        "label": payload.label.strip(),
+    }
+
+
+@router.get(
+    "/spaces",
+    response_model=list[TokenSpace],
+    summary="Spaces this token can reach",
+)
+async def list_spaces(
+    auth: Annotated[TokenAuth, Depends(require_scope("search"))],
+    db: Annotated[AsyncSession, Depends(get_session)],
+) -> list[dict[str, object]]:
+    """What this token can actually see, and where it can write.
+
+    The question anyone holding a token asks first, and there was no way
+    to answer it: the collection listing is empty on an instance that
+    uses no collections, which made "what can I reach" look like
+    "nothing". `writable` reflects the same rule uploads use, so a token
+    can be checked without trial and error.
+    """
+    readable = await _token_space_ids(db, auth, writable=False)
+    writable = set(await _token_space_ids(db, auth, writable=True))
+    if not readable:
+        return []
+    rows = (
+        await db.execute(
+            select(Space).where(Space.id.in_(readable)).order_by(Space.name)
+        )
+    ).scalars().all()
+    return [
+        {
+            "id": s.id,
+            "slug": s.slug,
+            "name": s.name,
+            "writable": s.id in writable,
+        }
+        for s in rows
+    ]
+
+
+@router.get(
+    "/items/{item_id}/revisions",
+    summary="Every edition of this item's standard",
+)
+async def item_revisions_v1(
+    item_id: uuid.UUID,
+    auth: Annotated[TokenAuth, Depends(require_scope("search"))],
+    db: Annotated[AsyncSession, Depends(get_session)],
+) -> Any:
+    """The token-facing twin of the SPA's revision list.
+
+    Needed for capturing a document profile: reading back what an item is
+    an edition of is half of the round trip, and the cookie route 401s a
+    bearer token. Delegates to the same handler so the two can't drift.
+    """
+    item = await _resolve_owned_item(db, auth, item_id)
+    await _enforce_collection_scope(db, auth, item)
+    return await item_revisions(item_id, auth.user, db, space=None)
+
+
+@router.get(
+    "/attachments/resolve",
+    response_model=AttachmentResolveResponse,
+    summary="Find items carrying a file with this SHA-256",
+)
+async def resolve_attachment(
+    auth: Annotated[TokenAuth, Depends(require_scope("search"))],
+    db: Annotated[AsyncSession, Depends(get_session)],
+    sha256: Annotated[str, Query(pattern=r"^[0-9a-fA-F]{64}$")],
+    space: Annotated[str | None, Query()] = None,
+) -> dict[str, object]:
+    """Content identity, for when a document has no business identity.
+
+    A standard can be named by (body, designation, edition) and found
+    that way across instances. A report or a drawing can't — and then the
+    bytes are the only thing two instances can agree on. Pushing the same
+    file you already hold gives the same hash on both ends, which is
+    exactly the link a profile importer needs to update rather than
+    duplicate.
+
+    Scoped to what the token can read, so this answers "do *I* already
+    have this file", never "does anyone".
+    """
+    reachable = await _token_space_ids(db, auth, writable=False)
+    if space is not None:
+        target = (
+            await db.execute(
+                select(Space.id).where(
+                    Space.slug == space, Space.id.in_(reachable)
+                )
+            )
+        ).scalar_one_or_none()
+        if target is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Space not found")
+        reachable = [target]
+
+    rows = (
+        await db.execute(
+            select(
+                Attachment.id,
+                Attachment.filename,
+                Item.id,
+                Item.space_id,
+            )
+            .join(Item, Item.id == Attachment.item_id)
+            .where(
+                Attachment.sha256 == sha256.lower(),
+                Item.deleted_at.is_(None),
+                Item.space_id.in_(reachable),
+            )
+            .order_by(Attachment.created_at)
+        )
+    ).all()
+
+    return {
+        "attachments": [
+            {
+                "attachment_id": att_id,
+                "filename": filename,
+                "item_id": item_id,
+                "space_id": space_id,
+            }
+            for att_id, filename, item_id, space_id in rows
+        ]
+    }
+
+
+@router.get(
+    "/standards/resolve",
+    response_model=StandardResolveResponse,
+    summary="Find the item that is one named edition of a standard",
+)
+async def resolve_standard(
+    auth: Annotated[TokenAuth, Depends(require_scope("search"))],
+    db: Annotated[AsyncSession, Depends(get_session)],
+    body: Annotated[str, Query(min_length=1, max_length=120)],
+    designation: Annotated[str, Query(min_length=1, max_length=200)],
+    label: Annotated[str, Query(min_length=1, max_length=120)],
+    space: Annotated[str | None, Query()] = None,
+) -> dict[str, object]:
+    """Look an edition up by its own identity rather than by id.
+
+    This is what makes a document profile portable. An importer authoring
+    metadata against one instance and pushing it to another can't use
+    item ids — they differ per instance — and it can't use the file's
+    hash either, since publishers stamp per-download watermarks that
+    change the bytes without changing the document. `(body, designation,
+    label)` is the identity that survives both.
+
+    Matching is case-insensitive on body and designation, the same as
+    when a revision is filed. Returns an empty `items` list rather than
+    404 so a caller can tell "no such edition here" from "no such route".
+    """
+    reachable = await _token_space_ids(db, auth, writable=False)
+    if space is not None:
+        target = (
+            await db.execute(
+                select(Space.id).where(
+                    Space.slug == space, Space.id.in_(reachable)
+                )
+            )
+        ).scalar_one_or_none()
+        if target is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Space not found")
+        reachable = [target]
+
+    rows = (
+        await db.execute(
+            select(Item.id, Item.space_id, StandardRevision.label)
+            .join(StandardRevision, StandardRevision.item_id == Item.id)
+            .join(
+                StandardFamily,
+                StandardFamily.id == StandardRevision.family_id,
+            )
+            .where(
+                StandardFamily.body == body.strip(),
+                StandardFamily.designation == designation.strip(),
+                StandardRevision.label == label.strip(),
+                Item.deleted_at.is_(None),
+                Item.space_id.in_(reachable),
+            )
+            .order_by(Item.created_at)
+        )
+    ).all()
+
+    return {
+        "items": [
+            {"item_id": item_id, "space_id": space_id, "label": row_label}
+            for item_id, space_id, row_label in rows
+        ]
+    }
+
+
+async def _link_collections(
+    db: AsyncSession,
+    auth: TokenAuth,
+    item: Item,
+    collection_ids: list[uuid.UUID],
+) -> None:
+    """Attach an item to collections, refusing any the token can't use
+    or that live in a different space than the item."""
+    allowed = await _effective_allowed_collection_ids(db, auth.token)
+    for cid in collection_ids:
+        coll = await db.get(Collection, cid)
+        if coll is None or coll.space_id != item.space_id:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"Collection {cid} is not in this item's space",
+            )
+        if allowed is not None and cid not in allowed:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                f"Token is not scoped to collection {cid}",
+            )
+        db.add(ItemCollection(item_id=item.id, collection_id=cid))
+
+
 # ── search ────────────────────────────────────────────────────────────────
 
 
@@ -836,16 +1390,16 @@ async def search(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[dict[str, object]]:
-    """Item search restricted to spaces the user owns and, when the
-    token is collection-scoped, to items belonging to at least one of
-    the allowed collections."""
-    # Find spaces owned by the user; v1 search is read-only and never
-    # touches trash.
-    spaces = (
-        await db.execute(
-            select(Space.id).where(Space.id.in_(readable_space_ids(auth.user.id)))
-        )
-    ).scalars().all()
+    """Item search across every space the token may read.
+
+    That means the user's own spaces, the ones they're a member of, and
+    the ones those subscribe to — the same set the SPA sees, because a
+    token acting as a user that can't find what the user can find is a
+    confusing thing to debug. Narrowed further when the token carries a
+    space or collection allow-list.
+    """
+    # Read-only, and never touches trash.
+    spaces = await _token_space_ids(db, auth, writable=False)
     if not spaces:
         return []
 
@@ -955,6 +1509,7 @@ async def download(
     await require_space_role(
         db, space, auth.user.id, SPACE_ROLE_VIEWER, label="Attachment not found"
     )
+    _enforce_space_scope(auth, item.space_id)
 
     await _enforce_collection_scope(db, auth, item)
 

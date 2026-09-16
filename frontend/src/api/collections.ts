@@ -9,6 +9,15 @@ export interface Collection {
   position: number;
   created_at: string;
   updated_at: string;
+  /**
+   * Belongs to a space this one inherits. Read-only here: browsable and
+   * filterable, but not renameable, reorderable, or a place to file
+   * things. Rendered as its own group rather than mixed in with the
+   * space's own folders.
+   */
+  is_inherited?: boolean;
+  /** Which space it came from. Only set when `is_inherited`. */
+  space_name?: string | null;
 }
 
 export function listCollections(slug: string): Promise<Collection[]> {

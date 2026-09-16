@@ -1,4 +1,4 @@
-import { FolderClosed, Pencil, RotateCcw, Trash2, X } from "lucide-react";
+import { FolderClosed, Link2, Pencil, RotateCcw, Trash2, X } from "lucide-react";
 import {
   TEXTAREA_FIELDS,
   fieldsForType,
@@ -9,8 +9,10 @@ import type { Item } from "@/api/items";
 import type { Collection } from "@/api/collections";
 import AttachmentsList from "./AttachmentsList";
 import CollectionAddPopover from "./CollectionAddPopover";
+import CopyToSpaceMenu from "./CopyToSpaceMenu";
 import ExportMenu from "./ExportMenu";
 import NotesSection from "./NotesSection";
+import StandardRevisions from "./StandardRevisions";
 import TagChips from "./TagChips";
 
 function formatCreator(c: {
@@ -37,11 +39,15 @@ export default function ItemDetail({
   collections = [],
   tagNames = [],
   spaceSlug = null,
+  spaceIsOwned = false,
+  canWrite = true,
+  homeSpaceName = null,
   onEdit,
   onDelete,
   onClose,
   onTagClick,
   onCollectionClick,
+  onSelectItem,
   onRestore,
   onPermanentDelete,
 }: {
@@ -53,11 +59,27 @@ export default function ItemDetail({
   /** Slug of the active space — needed for cache invalidation in the
    *  inline collection-add popover. */
   spaceSlug?: string | null;
+  /** Whether the caller owns the active space. Gates pinning a standard
+   *  revision, which is an owner-level decision. */
+  spaceIsOwned?: boolean;
+  /**
+   * Whether the caller may change this item — decided by their role in
+   * the space it *lives* in, not the one being browsed. An inherited
+   * document is editable by someone who has rights where it lives and
+   * read-only for everyone else, which is exactly what the API enforces.
+   */
+  canWrite?: boolean;
+  /** Name of the space the item lives in, when that isn't the space
+   *  being browsed. Used to say where to go to change it. */
+  homeSpaceName?: string | null;
   onEdit: () => void;
   onDelete: () => void;
   onClose?: () => void;
   onTagClick?: (tag: string) => void;
   onCollectionClick?: (id: string) => void;
+  /** Select another item in the parent's detail panel — used by the
+   *  revision dropdown to walk between editions of a standard. */
+  onSelectItem?: (itemId: string) => void;
   /** When set, the action bar swaps Edit/Delete for Restore + Permanent Delete. */
   onRestore?: () => void;
   onPermanentDelete?: () => void;
@@ -76,6 +98,12 @@ export default function ItemDetail({
   const creators = item.data.creators ?? [];
   const tags = tagNames;
   const trashed = item.deleted_at !== null;
+  // Reached this listing through an inheritance link: readable here,
+  // living elsewhere. On its own that says nothing about whether it can
+  // be *changed* — `canWrite` answers that, from the caller's role in
+  // the space it lives in. The two are independent: an owner of the
+  // source space edits it from here, a subscriber cannot.
+  const inherited = item.is_inherited === true;
   const itemCollections = item.collection_ids
     .map((id) => collections.find((c) => c.id === id))
     .filter((c): c is Collection => c !== undefined);
@@ -98,7 +126,7 @@ export default function ItemDetail({
           </h2>
         </div>
         <div className="flex items-center gap-1">
-          {!trashed && (
+          {!trashed && canWrite && (
             <CollectionAddPopover
               itemId={item.id}
               itemCollectionIds={item.collection_ids}
@@ -107,7 +135,8 @@ export default function ItemDetail({
             />
           )}
           {!trashed && <ExportMenu itemId={item.id} />}
-          {trashed && onRestore ? (
+          {!trashed && <CopyToSpaceMenu item={item} spaceSlug={spaceSlug} />}
+          {!canWrite ? null : trashed && onRestore ? (
             <button
               onClick={onRestore}
               className="flex items-center gap-1 rounded px-2 py-1 text-xs hover:opacity-80"
@@ -126,7 +155,7 @@ export default function ItemDetail({
               Edit
             </button>
           )}
-          {trashed && onPermanentDelete ? (
+          {!canWrite ? null : trashed && onPermanentDelete ? (
             <button
               onClick={onPermanentDelete}
               aria-label="Delete permanently"
@@ -158,6 +187,46 @@ export default function ItemDetail({
       </div>
 
       <div className="flex-1 overflow-auto p-4">
+        {inherited && (
+          <p
+            className="mb-3 flex items-start gap-2 rounded border px-3 py-2 text-xs"
+            style={{
+              borderColor: "var(--color-border)",
+              color: "var(--color-text-muted)",
+            }}
+          >
+            <Link2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>
+              {canWrite ? (
+                <>
+                  Lives in {homeSpaceName ?? "another space"} and is shared into
+                  this one. You can edit it because you have rights there —
+                  changes show up everywhere it's shared.
+                </>
+              ) : (
+                <>
+                  Shared from {homeSpaceName ?? "another space"}, so it's
+                  read-only here.
+                </>
+              )}{" "}
+              Notes and highlights you add start private to you — share one to
+              reach everyone who can read the space that owns it.
+            </span>
+          </p>
+        )}
+
+        {!trashed && (
+          <div className="mb-4">
+            <StandardRevisions
+              item={item}
+              spaceSlug={spaceSlug}
+              canEdit={canWrite}
+              canPin={spaceIsOwned}
+              onSelectItem={onSelectItem}
+            />
+          </div>
+        )}
+
         <dl className="grid grid-cols-[120px_1fr] gap-x-3 gap-y-2 text-sm">
           {fields.map((field) => {
             const value = item.data[field];
@@ -310,7 +379,7 @@ export default function ItemDetail({
 
         {!trashed && (
           <div className="mt-4">
-            <AttachmentsList itemId={item.id} />
+            <AttachmentsList itemId={item.id} readOnly={!canWrite} />
           </div>
         )}
 

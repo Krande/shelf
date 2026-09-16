@@ -12,6 +12,7 @@ from ..auth.session import SessionClaims
 from ..auth.spaces import (
     SPACE_ROLE_OWNER,
     SPACE_ROLE_VIEWER,
+    readable_item_space_ids,
     readable_space_ids,
     writable_space_ids,
 )
@@ -53,6 +54,9 @@ class SpaceResponse(BaseModel):
     # The caller's role in this space: viewer, editor or owner.
     role: str
     is_owner: bool
+    # Only ever true in an `?include_inherited=true` listing: a space
+    # reached through a subscription rather than held directly.
+    is_inherited: bool = False
 
 
 @router.get("/api/me", response_model=MeResponse)
@@ -106,14 +110,28 @@ async def me(
 async def my_spaces(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
+    include_inherited: Annotated[bool, Query()] = False,
 ) -> list[SpaceResponse]:
     """Spaces the caller can see: their own, plus any they've been added
     to. Each carries the caller's role, so the SPA can hide controls it
-    knows the API would refuse."""
+    knows the API would refuse.
+
+    `include_inherited=true` also returns the spaces those subscribe to,
+    flagged with `is_inherited`. Off by default and deliberately so: the
+    space switcher is a list of places you can *work*, and an inherited
+    space isn't one — its items already show up inside the space that
+    subscribes to it. What wants the wider list is anything naming a
+    space rather than moving to it, like scoping an API token.
+    """
+    visible = (
+        readable_item_space_ids(user.id)
+        if include_inherited
+        else readable_space_ids(user.id)
+    )
     spaces = (
         await db.execute(
             select(Space)
-            .where(Space.id.in_(readable_space_ids(user.id)))
+            .where(Space.id.in_(visible))
             .order_by(Space.created_at)
         )
     ).scalars().all()
@@ -130,6 +148,18 @@ async def my_spaces(
         ).all()
     }
 
+    # Held directly — owned or a membership row. Anything in `spaces`
+    # that isn't here arrived through a subscription, which is only
+    # possible when include_inherited widened the query above.
+    held = {
+        sid
+        for sid in (
+            await db.execute(
+                select(Space.id).where(Space.id.in_(readable_space_ids(user.id)))
+            )
+        ).scalars().all()
+    }
+
     return [
         SpaceResponse(
             id=str(s.id),
@@ -142,6 +172,7 @@ async def my_spaces(
                 else member_roles.get(s.id, SPACE_ROLE_VIEWER)
             ),
             is_owner=s.owner_id == user.id,
+            is_inherited=s.id not in held,
         )
         for s in spaces
     ]

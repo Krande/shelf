@@ -92,6 +92,140 @@ describe("listing", () => {
   });
 });
 
+describe("renaming", () => {
+  // Located by slug, not name: two of the fixtures are both called
+  // "Team shelf", which is realistic and would make a name lookup
+  // ambiguous.
+  async function rowFor(slug: string) {
+    const line = await screen.findByText(new RegExp(`^${slug} · `));
+    return line.closest("li")!;
+  }
+
+  async function openRename(user = makeMe(), slug = "u-abc") {
+    renderWithProviders(<SpacesSection user={user} />);
+    const row = await rowFor(slug);
+    await userEvent.click(within(row).getByRole("button", { name: /rename/i }));
+    return row;
+  }
+
+  it("is offered on a space the caller owns", async () => {
+    renderWithProviders(<SpacesSection user={makeMe()} />);
+    await screen.findByText("My shelf");
+    expect(screen.getAllByRole("button", { name: /rename/i })).toHaveLength(1);
+  });
+
+  it("is not offered to an editor who doesn't own the space", async () => {
+    renderWithProviders(<SpacesSection user={makeMe()} />);
+    const row = await rowFor("proj");
+    expect(within(row).queryByRole("button", { name: /rename/i })).toBeNull();
+  });
+
+  it("is offered to an instance admin on a shared space they don't own", async () => {
+    // A label change, not a way in — the API enforces the same split.
+    renderWithProviders(<SpacesSection user={ADMIN} />);
+    const row = await rowFor("team");
+    expect(
+      within(row).getByRole("button", { name: /rename/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("is not offered to an admin on someone else's personal space", async () => {
+    stub([
+      {
+        ...OWNED,
+        id: "s9",
+        slug: "u-xyz",
+        name: "Their shelf",
+        is_owner: false,
+        role: "viewer",
+      },
+    ]);
+    renderWithProviders(<SpacesSection user={ADMIN} />);
+    await rowFor("u-xyz");
+    expect(screen.queryByRole("button", { name: /rename/i })).toBeNull();
+  });
+
+  it("PATCHes only the fields that changed", async () => {
+    const fetchFn = stub();
+    await openRename();
+
+    const nameInput = screen.getByRole("textbox", { name: /name for My shelf/i });
+    await userEvent.clear(nameInput);
+    await userEvent.type(nameInput, "Ada's library");
+    await userEvent.click(screen.getByRole("button", { name: /^save$/i }));
+
+    await waitFor(() => {
+      const call = fetchFn.mock.calls.find(
+        ([url, init]) =>
+          String(url).includes("/api/spaces/u-abc") &&
+          (init as RequestInit)?.method === "PATCH",
+      );
+      expect(call).toBeDefined();
+      // Slug untouched, and personal anyway — only the name is sent.
+      expect(JSON.parse((call![1] as RequestInit).body as string)).toEqual({
+        name: "Ada's library",
+      });
+    });
+  });
+
+  it("locks the slug on a personal space", async () => {
+    await openRename();
+    expect(screen.getByRole("textbox", { name: /slug for My shelf/i })).toBeDisabled();
+    expect(
+      screen.getByText(/a personal space's slug is fixed/i),
+    ).toBeInTheDocument();
+  });
+
+  it("warns before changing a shared space's slug", async () => {
+    await openRename(ADMIN, "team");
+    const slugInput = screen.getByRole("textbox", { name: /slug for Team shelf/i });
+    await userEvent.clear(slugInput);
+    await userEvent.type(slugInput, "team-library");
+    expect(
+      screen.getByText(/links people already have will stop working/i),
+    ).toBeInTheDocument();
+  });
+
+  it("sends a changed slug alongside the name", async () => {
+    const fetchFn = stub();
+    await openRename(ADMIN, "team");
+
+    const slugInput = screen.getByRole("textbox", { name: /slug for Team shelf/i });
+    await userEvent.clear(slugInput);
+    await userEvent.type(slugInput, "team-library");
+    await userEvent.click(screen.getByRole("button", { name: /^save$/i }));
+
+    await waitFor(() => {
+      const call = fetchFn.mock.calls.find(
+        ([url, init]) =>
+          String(url).includes("/api/spaces/team") &&
+          (init as RequestInit)?.method === "PATCH",
+      );
+      expect(call).toBeDefined();
+      expect(JSON.parse((call![1] as RequestInit).body as string)).toEqual({
+        slug: "team-library",
+      });
+    });
+  });
+
+  it("explains a slug clash in plain language", async () => {
+    mockFetch({
+      "/api/me/spaces": { body: [OWNED, SHARED_VIEWER, SHARED_EDITOR] },
+      "/api/users": { body: DIRECTORY },
+      "/api/spaces/team": { status: 409 },
+    });
+    await openRename(ADMIN, "team");
+    const slugInput = screen.getByRole("textbox", { name: /slug for Team shelf/i });
+    await userEvent.clear(slugInput);
+    await userEvent.type(slugInput, "proj");
+    await userEvent.click(screen.getByRole("button", { name: /^save$/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /another space already has that slug/i,
+    );
+  });
+});
+
 describe("members", () => {
   async function openSharing() {
     renderWithProviders(<SpacesSection user={makeMe()} />);
