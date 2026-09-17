@@ -30,9 +30,20 @@ export function createUser(input: CreateUserInput): Promise<AdminUser> {
   });
 }
 
-export function updateUserRole(userId: string, role: Role): Promise<AdminUser> {
+export interface UpdateUserInput {
+  role?: Role;
+  display_name?: string;
+}
+
+/** Partial update — send only what changed. The display name is the one
+ * part of an account that's editable, and only by an admin; a later OIDC
+ * sign-in won't overwrite it, so a correction here sticks. */
+export function updateUser(
+  userId: string,
+  input: UpdateUserInput,
+): Promise<AdminUser> {
   return apiFetch<AdminUser>(`/api/admin/users/${userId}`, {
     method: "PATCH",
-    body: JSON.stringify({ role }),
+    body: JSON.stringify(input),
   });
 }

@@ -13,8 +13,8 @@ import {
   KeyRound,
   Library,
   Palette,
-  ShieldCheck,
   UserRound,
+  Users,
 } from "lucide-react";
 import AppShell from "@/components/layout/AppShell";
 import AccountSection from "@/components/settings/AccountSection";
@@ -33,7 +33,10 @@ const TABS = [
   { id: "appearance", label: "Appearance", Icon: Palette, adminOnly: false },
   { id: "documents", label: "Documents", Icon: FileText, adminOnly: false },
   { id: "tokens", label: "API tokens", Icon: KeyRound, adminOnly: false },
-  { id: "admin", label: "Admin", Icon: ShieldCheck, adminOnly: true },
+  // Labelled for what it holds, like every other tab, rather than for
+  // the role it takes to see it — that's what `adminOnly` is for. The
+  // route segment stays "admin" so existing links keep working.
+  { id: "admin", label: "Users", Icon: Users, adminOnly: true },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];

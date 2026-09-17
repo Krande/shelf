@@ -61,15 +61,15 @@ describe("tab visibility", () => {
     }
   });
 
-  it("hides Admin from non-admins", () => {
+  it("hides Users from non-admins", () => {
     renderSettings("/settings/account");
-    expect(screen.queryByRole("link", { name: "Admin" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Users" })).not.toBeInTheDocument();
   });
 
-  it("shows Admin to admins", () => {
+  it("shows Users to admins", () => {
     signedInAs({ role: "admin", is_admin: true });
     renderSettings("/settings/account");
-    expect(screen.getByRole("link", { name: "Admin" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Users" })).toBeInTheDocument();
   });
 
   it("renders nothing while auth is still loading", () => {
@@ -114,7 +114,11 @@ describe("tab content", () => {
   it("renders the admin tab for an admin", () => {
     signedInAs({ role: "admin", is_admin: true });
     renderSettings("/settings/admin");
-    expect(screen.getByText("Users")).toBeInTheDocument();
+    // By role, not text: the tab and the section it opens are both
+    // called "Users" now, so a bare getByText matches two elements.
+    expect(
+      screen.getByRole("heading", { name: "Users" }),
+    ).toBeInTheDocument();
   });
 
   it("shows only the active tab's content", () => {
@@ -133,7 +137,9 @@ describe("fallbacks", () => {
   it("redirects a non-admin away from the admin tab", () => {
     renderSettings("/settings/admin");
     expect(screen.getByText("Signed in as")).toBeInTheDocument();
-    expect(screen.queryByText("Users")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Users" }),
+    ).not.toBeInTheDocument();
   });
 });
 

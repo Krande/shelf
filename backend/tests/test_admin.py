@@ -140,6 +140,135 @@ async def test_invalid_role_rejected(
     assert resp.status_code == 422
 
 
+async def test_admin_renames_a_user(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "admin_emails", ["admin@example.com"])
+    admin_id = await login(client, "admin@example.com")
+    b_id = await login(client, "b@example.com", link=True)
+    await client.post("/auth/switch", json={"user_id": admin_id})
+
+    resp = await client.patch(
+        f"/api/admin/users/{b_id}", json={"display_name": "  Grace Hopper  "}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["display_name"] == "Grace Hopper"
+
+    listed = {u["id"]: u for u in (await client.get("/api/admin/users")).json()}
+    assert listed[b_id]["display_name"] == "Grace Hopper"
+
+
+async def test_rename_leaves_the_role_alone(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A name-only PATCH is a partial update, not a replace — the admin
+    table sends one field at a time."""
+    monkeypatch.setattr(settings, "admin_emails", ["admin@example.com"])
+    admin_id = await login(client, "admin@example.com")
+
+    resp = await client.patch(
+        f"/api/admin/users/{admin_id}", json={"display_name": "Renamed"}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["role"] == "admin"
+    assert (await get_me(client))["is_admin"] is True
+
+
+async def test_rename_and_role_in_one_patch(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "admin_emails", ["admin@example.com"])
+    admin_id = await login(client, "admin@example.com")
+    b_id = await login(client, "b@example.com", link=True)
+    await client.post("/auth/switch", json={"user_id": admin_id})
+
+    resp = await client.patch(
+        f"/api/admin/users/{b_id}",
+        json={"display_name": "Grace", "role": "admin"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["display_name"] == "Grace"
+    assert body["role"] == "admin"
+
+
+async def test_rename_rejects_a_blank_name(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """display_name is NOT NULL and every screen shows it, so there's no
+    such thing as clearing one."""
+    monkeypatch.setattr(settings, "admin_emails", ["admin@example.com"])
+    admin_id = await login(client, "admin@example.com")
+
+    resp = await client.patch(
+        f"/api/admin/users/{admin_id}", json={"display_name": "   "}
+    )
+    assert resp.status_code == 400
+    assert (await get_me(client))["display_name"] == "admin"
+
+
+async def test_rename_rejects_an_overlong_name(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "admin_emails", ["admin@example.com"])
+    admin_id = await login(client, "admin@example.com")
+    resp = await client.patch(
+        f"/api/admin/users/{admin_id}", json={"display_name": "x" * 201}
+    )
+    assert resp.status_code == 422
+
+
+async def test_empty_patch_is_rejected(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both fields are optional, so a body with neither would otherwise be
+    a silent no-op — and a misspelled field name would look like success."""
+    monkeypatch.setattr(settings, "admin_emails", ["admin@example.com"])
+    admin_id = await login(client, "admin@example.com")
+    resp = await client.patch(f"/api/admin/users/{admin_id}", json={})
+    assert resp.status_code == 400
+
+
+async def test_a_rename_alongside_a_refused_demotion_is_not_saved(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 409 aborts the whole PATCH, not just the role half."""
+    monkeypatch.setattr(settings, "admin_emails", ["admin@example.com"])
+    admin_id = await login(client, "admin@example.com")
+
+    resp = await client.patch(
+        f"/api/admin/users/{admin_id}",
+        json={"display_name": "Renamed", "role": "user"},
+    )
+    assert resp.status_code == 409
+    me = await get_me(client)
+    assert me["is_admin"] is True
+    assert me["display_name"] == "admin"
+
+
+async def test_rename_refused_to_non_admins(client: AsyncClient) -> None:
+    user_id = await login(client, "a@example.com")
+    resp = await client.patch(
+        f"/api/admin/users/{user_id}", json={"display_name": "Nice Try"}
+    )
+    assert resp.status_code == 403
+
+
+async def test_rename_survives_a_later_login(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing syncs names back from the provider, so a correction here
+    isn't undone the next time that person signs in."""
+    monkeypatch.setattr(settings, "admin_emails", ["admin@example.com"])
+    admin_id = await login(client, "admin@example.com")
+    b_id = await login(client, "b@example.com", link=True)
+    await client.post("/auth/switch", json={"user_id": admin_id})
+    await client.patch(f"/api/admin/users/{b_id}", json={"display_name": "Grace"})
+
+    await login(client, "b@example.com", link=True, display_name="b")
+    assert (await get_me(client))["display_name"] == "Grace"
+
+
 async def test_patch_unknown_user(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

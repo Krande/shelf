@@ -1,10 +1,10 @@
 import { type FormEvent, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Loader2, Plus } from "lucide-react";
+import { Check, Loader2, Pencil, Plus, X } from "lucide-react";
 import {
   createUser,
   fetchAdminUsers,
-  updateUserRole,
+  updateUser,
   type AdminUser,
 } from "@/api/admin";
 import { ApiError } from "@/api/client";
@@ -21,7 +21,7 @@ export default function AdminSection({ user: me }: { user: Me }) {
 
   const setRole = useMutation({
     mutationFn: ({ id, role }: { id: string; role: Role }) =>
-      updateUserRole(id, role),
+      updateUser(id, { role }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["admin", "users"] });
       // The caller may have just changed their own role — /api/me decides
@@ -42,8 +42,8 @@ export default function AdminSection({ user: me }: { user: Me }) {
       <p className="mb-3 text-xs" style={{ color: "var(--color-text-muted)" }}>
         Everyone with an account on this instance. People appear here on their
         own the first time they sign in — add one by email to get them into the
-        member picker before that. Admins can change roles; the last remaining
-        admin cannot be demoted.
+        member picker before that. Admins can rename anyone and change roles;
+        the last remaining admin cannot be demoted.
       </p>
 
       {users.isLoading && (
@@ -89,17 +89,7 @@ export default function AdminSection({ user: me }: { user: Me }) {
                     style={{ borderColor: "var(--color-border)" }}
                   >
                     <td className="px-3 py-2">
-                      <span className="block">
-                        {u.display_name}
-                        {u.id === me.id && (
-                          <span
-                            className="ml-2 text-xs"
-                            style={{ color: "var(--color-text-muted)" }}
-                          >
-                            you
-                          </span>
-                        )}
-                      </span>
+                      <NameCell user={u} isMe={u.id === me.id} />
                       <span
                         className="block break-all text-xs"
                         style={{ color: "var(--color-text-muted)" }}
@@ -157,6 +147,123 @@ export default function AdminSection({ user: me }: { user: Me }) {
 
       <NewUserForm />
     </section>
+  );
+}
+
+/**
+ * A user's display name, with an admin's pencil to correct it.
+ *
+ * Nothing keeps the name in step with the identity provider — the OIDC
+ * callback reads the name claim only when creating the row — so a typo
+ * stays a typo until someone fixes it here.
+ */
+function NameCell({ user, isMe }: { user: AdminUser; isMe: boolean }) {
+  const qc = useQueryClient();
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(user.display_name);
+
+  const rename = useMutation({
+    mutationFn: () => updateUser(user.id, { display_name: name.trim() }),
+    onSuccess: () => {
+      setEditing(false);
+      qc.invalidateQueries({ queryKey: ["admin", "users"] });
+      // The member picker and every byline read the same name, and the
+      // header shows the caller's own.
+      qc.invalidateQueries({ queryKey: ["directory"] });
+      if (isMe) qc.invalidateQueries({ queryKey: ["me"] });
+    },
+  });
+
+  function onSubmit(e: FormEvent) {
+    e.preventDefault();
+    const trimmed = name.trim();
+    if (!trimmed || rename.isPending) return;
+    // Nothing changed — close rather than spend a round trip saying so.
+    if (trimmed === user.display_name) {
+      setEditing(false);
+      return;
+    }
+    rename.mutate();
+  }
+
+  function cancel() {
+    setName(user.display_name);
+    rename.reset();
+    setEditing(false);
+  }
+
+  if (!editing) {
+    return (
+      <span className="flex items-center gap-1">
+        <span>{user.display_name}</span>
+        {isMe && (
+          <span
+            className="text-xs"
+            style={{ color: "var(--color-text-muted)" }}
+          >
+            you
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={() => setEditing(true)}
+          aria-label={`Rename ${user.email}`}
+          title="Rename"
+          className="rounded p-0.5 hover:opacity-70"
+          style={{ color: "var(--color-text-muted)" }}
+        >
+          <Pencil className="h-3 w-3" />
+        </button>
+      </span>
+    );
+  }
+
+  return (
+    <form onSubmit={onSubmit} className="flex items-center gap-1">
+      <input
+        required
+        autoFocus
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") cancel();
+        }}
+        maxLength={200}
+        aria-label={`Display name for ${user.email}`}
+        className="min-w-0 flex-1 rounded border px-2 py-0.5 text-sm"
+        style={{
+          borderColor: "var(--color-border)",
+          backgroundColor: "var(--color-surface)",
+        }}
+      />
+      <button
+        type="submit"
+        disabled={rename.isPending}
+        aria-label={`Save name for ${user.email}`}
+        className="rounded border p-1 hover:opacity-80 disabled:opacity-50"
+        style={{ borderColor: "var(--color-border)" }}
+      >
+        {rename.isPending ? (
+          <Loader2 className="h-3 w-3 animate-spin" />
+        ) : (
+          <Check className="h-3 w-3" />
+        )}
+      </button>
+      <button
+        type="button"
+        onClick={cancel}
+        aria-label={`Cancel renaming ${user.email}`}
+        className="rounded border p-1 hover:opacity-80"
+        style={{ borderColor: "var(--color-border)" }}
+      >
+        <X className="h-3 w-3" />
+      </button>
+      {rename.error && (
+        <span className="text-xs text-red-600" role="alert">
+          Could not rename: {rename.error.message}
+        </span>
+      )}
+    </form>
   );
 }
 
