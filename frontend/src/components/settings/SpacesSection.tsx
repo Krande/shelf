@@ -208,7 +208,10 @@ function SpaceRow({
       className="rounded border px-3 py-2"
       style={{ borderColor: "var(--color-border)" }}
     >
-      <div className="flex items-center gap-2">
+      {/* Wraps rather than overflowing: the panel buttons are shrink-0,
+          so on a narrow viewport they used to push the row past its
+          container instead of moving to a second line. */}
+      <div className="flex flex-wrap items-center gap-2">
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm">
             {space.name}
@@ -389,12 +392,16 @@ function PanelButton({
     <button
       onClick={onClick}
       aria-expanded={active}
+      aria-label={label}
+      title={label}
       className="flex shrink-0 items-center gap-1 rounded border px-2 py-1 text-xs hover:opacity-80"
       style={{ borderColor: "var(--color-border)" }}
     >
       <Chevron className="h-3.5 w-3.5" />
       <Icon className="h-3.5 w-3.5" />
-      {label}
+      {/* Icon-only below sm; three labelled buttons don't fit a phone
+          alongside the space name. aria-label carries the name. */}
+      <span className="hidden sm:inline">{label}</span>
     </button>
   );
 }

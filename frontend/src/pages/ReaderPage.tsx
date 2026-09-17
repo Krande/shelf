@@ -50,6 +50,7 @@ import {
 import { PREF_READER_FIT, PREF_READER_MODE, usePref } from "@/auth/prefs";
 import { useDebounce } from "@/hooks/useDebounce";
 import { usePinchZoom } from "@/hooks/usePinchZoom";
+import { pageLinks, type PageLink } from "@/lib/pdfLinks";
 import OutlinePanel from "@/components/library/OutlinePanel";
 import ProcessingMenu from "@/components/reader/ProcessingMenu";
 import VersionPicker from "@/components/reader/VersionPicker";
@@ -463,11 +464,18 @@ export default function ReaderPage() {
       ) {
         e.preventDefault();
         goNext();
+      } else if (e.key === "Backspace") {
+        // Counterpart to Enter in the library. Same history pop the
+        // toolbar's Back does, so the selection comes back with it.
+        // preventDefault so a browser that still maps Backspace to
+        // history navigation doesn't do it twice.
+        e.preventDefault();
+        nav(-1);
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [goPrev, goNext]);
+  }, [goPrev, goNext, nav]);
 
   // Block document-level pinch-zoom while the reader is mounted.
   useEffect(() => {
@@ -573,6 +581,29 @@ export default function ReaderPage() {
       qc.invalidateQueries({ queryKey: ["annotations", params.attachmentId] });
     },
   });
+
+  // Links are clickable only while Ctrl/Cmd is held. Written to the DOM
+  // rather than state so a keypress doesn't re-render every visible
+  // page. Cleared on blur: tab away mid-Ctrl and the keyup lands in
+  // another window.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const set = (on: boolean) => {
+      el.dataset.followLinks = on ? "true" : "false";
+    };
+    const onKey = (e: KeyboardEvent) => set(e.ctrlKey || e.metaKey);
+    const clear = () => set(false);
+    set(false);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("keyup", onKey);
+    window.addEventListener("blur", clear);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keyup", onKey);
+      window.removeEventListener("blur", clear);
+    };
+  }, []);
 
   // Generic "scroll the reader to page N" — used by every panel
   // that wants to navigate (annotations, outline, fulltext).
@@ -1050,6 +1081,7 @@ export default function ReaderPage() {
               debugText={debugText}
               pinchScaleRef={pinchScaleRef}
               onCreateHighlight={onCreateHighlight}
+              onFollowLink={goToPage}
             />
           </div>
         )}
@@ -1076,6 +1108,7 @@ export default function ReaderPage() {
             debugText={debugText}
             pinchScaleRef={pinchScaleRef}
             onCreateHighlight={onCreateHighlight}
+            onFollowLink={goToPage}
             onVisiblePageChange={setPage}
           />
         )}
@@ -1336,6 +1369,7 @@ const ContinuousList = forwardRef<
       rects: Rect[],
       text: string,
     ) => void;
+    onFollowLink: (page: number) => void;
     onVisiblePageChange: (page: number) => void;
   }
 >(function ContinuousList(
@@ -1355,6 +1389,7 @@ const ContinuousList = forwardRef<
     debugText,
     pinchScaleRef,
     onCreateHighlight,
+    onFollowLink,
     onVisiblePageChange,
   },
   ref,
@@ -1457,6 +1492,7 @@ const ContinuousList = forwardRef<
               debugText={debugText}
               pinchScaleRef={pinchScaleRef}
               onCreateHighlight={onCreateHighlight}
+              onFollowLink={onFollowLink}
             />
           </div>
         );
@@ -1478,6 +1514,7 @@ function PageCanvas({
   debugText,
   pinchScaleRef,
   onCreateHighlight,
+  onFollowLink,
 }: {
   doc: PDFDocumentProxy;
   pageNumber: number;
@@ -1499,6 +1536,8 @@ function PageCanvas({
     rects: Rect[],
     text: string,
   ) => void;
+  /** Follow an internal link — scroll the reader to that page. */
+  onFollowLink: (page: number) => void;
 }) {
   const wrapperRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -1517,6 +1556,26 @@ function PageCanvas({
     pdfRects: Rect[];
     text: string;
   } | null>(null);
+
+  // The PDF's own hyperlinks on this page. Independent of the canvas
+  // render effect because it doesn't depend on scale — the rects come
+  // back in PDF user-space and the overlay scales them itself, so a
+  // zoom change re-lays-out the same links instead of re-reading them.
+  const [links, setLinks] = useState<PageLink[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const pdfPage = await doc.getPage(pageNumber);
+      if (cancelled) return;
+      const found = await pageLinks(doc, pdfPage);
+      if (!cancelled) setLinks(found);
+    })().catch(() => {
+      // A page whose annotations won't parse just has no links.
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [doc, pageNumber]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -1805,6 +1864,14 @@ function PageCanvas({
           debugText ? " shelf-debug-text" : ""
         }`}
       />
+      {native && cssH != null && links.length > 0 && (
+        <LinkOverlay
+          links={links}
+          renderScale={renderScale}
+          pageHeight={native.height}
+          onFollowLink={onFollowLink}
+        />
+      )}
       {native && cssH != null && annotations.length > 0 && (
         <AnnotationOverlay
           annotations={annotations}
@@ -1825,6 +1892,68 @@ function PageCanvas({
           }
         />
       )}
+    </div>
+  );
+}
+
+/**
+ * The PDF's own hyperlinks, drawn over the page.
+ *
+ * Inert until Ctrl (or Cmd) is held — see `.shelf-links` in index.css
+ * for why. External links open in a new tab; internal ones scroll the
+ * reader.
+ */
+function LinkOverlay({
+  links,
+  renderScale,
+  pageHeight,
+  onFollowLink,
+}: {
+  links: PageLink[];
+  renderScale: number;
+  /** Native (scale=1) page height in PDF user-space; needed to flip
+   *  the y-axis from PDF (origin bottom-left) to CSS (origin top). */
+  pageHeight: number;
+  onFollowLink: (page: number) => void;
+}) {
+  return (
+    <div className="shelf-links">
+      {links.map(({ rect: [x, y, w, h], page, url, label }, idx) => {
+        const style = {
+          left: `${x * renderScale}px`,
+          top: `${(pageHeight - y - h) * renderScale}px`,
+          width: `${w * renderScale}px`,
+          height: `${h * renderScale}px`,
+        };
+        const title = `Ctrl+click to open — ${label}`;
+        if (url) {
+          return (
+            <a
+              key={idx}
+              className="shelf-link"
+              style={style}
+              href={url}
+              target="_blank"
+              // noreferrer as well as noopener: an outbound link in an
+              // uploaded PDF shouldn't learn which instance opened it.
+              rel="noopener noreferrer"
+              title={title}
+              aria-label={title}
+            />
+          );
+        }
+        return (
+          <button
+            key={idx}
+            type="button"
+            className="shelf-link"
+            style={style}
+            title={title}
+            aria-label={title}
+            onClick={() => onFollowLink(page!)}
+          />
+        );
+      })}
     </div>
   );
 }

@@ -29,10 +29,16 @@ marker = "<!-- SHELF_PR_BOT -->"
 default_label = "release-auto"
 
 [release]
-# The backend package version — the one `/api` reports as `version`.
-version_toml = ["backend/pyproject.toml:project.version"]
+# The backend package version — the one `/api` reports as `version` — and the
+# CLI's, which rides the same number on purpose: it lives in this repo so it is
+# versioned with the API it talks to, and `pixi global install shelf-cli --tag
+# v<x>` only picks the right client if the two agree.
+version_toml = [
+    "backend/pyproject.toml:project.version",
+    "cli/pyproject.toml:project.version",
+]
 
-# The two other places the same number is written, kept in lockstep.
+# The other places the same number is written, kept in lockstep.
 #
 # NOTE the quotes around "version" in the package.json entry: the pattern
 # semantic-release builds is `<variable>\s*[:=]\s*"<semver>"`, so a bare token
@@ -45,5 +51,6 @@ version_toml = ["backend/pyproject.toml:project.version"]
 # listing it would rewrite the whole dependency tree to the project version.
 version_variables = [
     "backend/src/shelf/__init__.py:__version__",
+    "cli/src/shelf_cli/__init__.py:__version__",
     'frontend/package.json:"version"',
 ]

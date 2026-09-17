@@ -280,3 +280,147 @@ describe("changing a role", () => {
     );
   });
 });
+
+describe("renaming a user", () => {
+  async function openRename(email: string) {
+    renderWithProviders(<AdminSection user={ME} />);
+    await screen.findByText("Grace");
+    await userEvent.click(
+      screen.getByRole("button", { name: new RegExp(`rename ${email}`, "i") }),
+    );
+  }
+
+  it("PATCHes only the display name", async () => {
+    const fetchFn = mockFetch({
+      "/api/admin/users": { body: USERS },
+      [`/api/admin/users/${USERS[1].id}`]: {
+        body: { ...USERS[1], display_name: "Grace Hopper" },
+      },
+    });
+    await openRename("b@example.com");
+
+    const input = screen.getByRole("textbox", {
+      name: /display name for b@example\.com/i,
+    });
+    await userEvent.clear(input);
+    await userEvent.type(input, "  Grace Hopper  ");
+    await userEvent.click(
+      screen.getByRole("button", { name: /save name for b@example\.com/i }),
+    );
+
+    await waitFor(() => {
+      const call = fetchFn.mock.calls.find(
+        ([url, init]) =>
+          String(url).includes(USERS[1].id) &&
+          (init as RequestInit)?.method === "PATCH",
+      );
+      expect(call).toBeDefined();
+      expect(JSON.parse((call![1] as RequestInit).body as string)).toEqual({
+        display_name: "Grace Hopper",
+      });
+    });
+  });
+
+  it("seeds the field with the current name", async () => {
+    await openRename("b@example.com");
+    expect(
+      screen.getByRole("textbox", { name: /display name for b@example\.com/i }),
+    ).toHaveValue("Grace");
+  });
+
+  it("leaves the other rows alone", async () => {
+    await openRename("b@example.com");
+    expect(
+      screen.queryByRole("textbox", {
+        name: /display name for a@example\.com/i,
+      }),
+    ).toBeNull();
+  });
+
+  it("closes without a request when the name is unchanged", async () => {
+    const fetchFn = mockFetch({ "/api/admin/users": { body: USERS } });
+    await openRename("b@example.com");
+    await userEvent.click(
+      screen.getByRole("button", { name: /save name for b@example\.com/i }),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("textbox", {
+          name: /display name for b@example\.com/i,
+        }),
+      ).toBeNull();
+    });
+    expect(
+      fetchFn.mock.calls.some(
+        ([, init]) => (init as RequestInit)?.method === "PATCH",
+      ),
+    ).toBe(false);
+  });
+
+  it("discards the edit on cancel", async () => {
+    await openRename("b@example.com");
+    const input = screen.getByRole("textbox", {
+      name: /display name for b@example\.com/i,
+    });
+    await userEvent.clear(input);
+    await userEvent.type(input, "Typo");
+    await userEvent.click(
+      screen.getByRole("button", { name: /cancel renaming b@example\.com/i }),
+    );
+
+    expect(await screen.findByText("Grace")).toBeInTheDocument();
+    expect(screen.queryByText("Typo")).toBeNull();
+  });
+
+  it("closes the editor once the rename lands", async () => {
+    mockFetch({
+      "/api/admin/users": { body: USERS },
+      [`/api/admin/users/${USERS[1].id}`]: {
+        body: { ...USERS[1], display_name: "Grace Hopper" },
+      },
+    });
+    await openRename("b@example.com");
+
+    const input = screen.getByRole("textbox", {
+      name: /display name for b@example\.com/i,
+    });
+    await userEvent.clear(input);
+    await userEvent.type(input, "Grace Hopper");
+    await userEvent.click(
+      screen.getByRole("button", { name: /save name for b@example\.com/i }),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("textbox", {
+          name: /display name for b@example\.com/i,
+        }),
+      ).toBeNull();
+    });
+  });
+
+  it("reports a failed rename and keeps the editor open", async () => {
+    mockFetch({
+      "/api/admin/users": { body: USERS },
+      [`/api/admin/users/${USERS[1].id}`]: { status: 500 },
+    });
+    await openRename("b@example.com");
+
+    const input = screen.getByRole("textbox", {
+      name: /display name for b@example\.com/i,
+    });
+    await userEvent.clear(input);
+    await userEvent.type(input, "Grace Hopper");
+    await userEvent.click(
+      screen.getByRole("button", { name: /save name for b@example\.com/i }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /could not rename/i,
+    );
+    expect(
+      screen.getByRole("textbox", { name: /display name for b@example\.com/i }),
+    ).toBeInTheDocument();
+  });
+});

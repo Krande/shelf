@@ -1,7 +1,8 @@
 """Instance administration.
 
-Listing accounts, changing their instance role, and pre-provisioning one
-from an email address before its owner has ever signed in.
+Listing accounts, changing their instance role or display name, and
+pre-provisioning one from an email address before its owner has ever
+signed in.
 
 The first routes in shelf that aren't scoped to spaces the caller owns.
 Everything here is gated on `require_admin`, which is cookie-session only
@@ -44,16 +45,26 @@ class CreateUserRequest(BaseModel):
     # typing a real name here is worth the field.
     display_name: str | None = Field(default=None, max_length=200)
     # Spelled out rather than `= ROLE_USER` so the default types as the
-    # Literal; same reasoning as UpdateRoleRequest below.
+    # Literal; same reasoning as UpdateUserRequest below.
     role: Literal["admin", "user"] = "user"
 
 
-class UpdateRoleRequest(BaseModel):
+class UpdateUserRequest(BaseModel):
+    """A partial update: send the fields you want changed, omit the rest.
+
+    Both optional so the two edits are independent — neither has to
+    resend the other's current value and risk clobbering it.
+    """
+
     # Literal rather than a plain str validated in the handler: FastAPI
     # rejects anything else with a 422 that names the valid values, and
     # the constraint shows up in the OpenAPI schema. Kept in step with
     # models.ROLES and the ck_users_role CHECK.
-    role: Literal["admin", "user"]
+    role: Literal["admin", "user"] | None = None
+    # No `| None` meaning "clear it": display_name is NOT NULL and every
+    # path that mints a user fills it, so there's nothing to clear to.
+    # An omitted field leaves it alone; an empty string is a 400.
+    display_name: str | None = Field(default=None, max_length=200)
 
 
 def _to_response(user: User) -> AdminUserResponse:
@@ -152,38 +163,60 @@ async def create_user(
 
 
 @router.patch("/api/admin/users/{user_id}", response_model=AdminUserResponse)
-async def update_user_role(
+async def update_user(
     user_id: uuid.UUID,
-    payload: UpdateRoleRequest,
+    payload: UpdateUserRequest,
     admin: Annotated[User, Depends(require_admin)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> AdminUserResponse:
+    """Change a user's role, their display name, or both.
+
+    Nothing writes the name back to the identity provider, and a later
+    sign-in won't overwrite it — `upsert_user_from_claims` reads the name
+    claim only when creating the row — so a correction here sticks.
+
+    Does *not* rename their personal space: that is theirs to rename, and
+    retitling someone's library is more than fixing a spelling.
+    """
+    if payload.role is None and payload.display_name is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "Nothing to update"
+        )
+
     user = (
         await db.execute(select(User).where(User.id == user_id))
     ).scalar_one_or_none()
     if user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
 
-    if user.role == payload.role:
-        return _to_response(user)
-
-    # Demoting the last admin would leave the instance with no way back in
-    # short of SHELF_ADMIN_EMAILS + a restart, or `pixi run grant-admin`.
-    # Cheap to check, and the mistake is easy to make with two admins on
-    # screen and one of them yourself.
-    if user.role == ROLE_ADMIN and payload.role != ROLE_ADMIN:
-        admin_count = (
-            await db.execute(
-                select(func.count()).select_from(User).where(User.role == ROLE_ADMIN)
-            )
-        ).scalar_one()
-        if admin_count <= 1:
+    if payload.display_name is not None:
+        display_name = payload.display_name.strip()
+        if not display_name:
             raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                "Cannot demote the last remaining admin",
+                status.HTTP_400_BAD_REQUEST, "A display name cannot be empty"
             )
+        user.display_name = display_name
 
-    user.role = payload.role
+    if payload.role is not None and user.role != payload.role:
+        # Demoting the last admin would leave the instance with no way back
+        # in short of SHELF_ADMIN_EMAILS + a restart, or `pixi run
+        # grant-admin`. Cheap to check, and the mistake is easy to make with
+        # two admins on screen and one of them yourself.
+        if user.role == ROLE_ADMIN and payload.role != ROLE_ADMIN:
+            admin_count = (
+                await db.execute(
+                    select(func.count())
+                    .select_from(User)
+                    .where(User.role == ROLE_ADMIN)
+                )
+            ).scalar_one()
+            if admin_count <= 1:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    "Cannot demote the last remaining admin",
+                )
+        user.role = payload.role
+
     await db.commit()
     await db.refresh(user)
     return _to_response(user)
