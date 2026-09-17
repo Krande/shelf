@@ -4,7 +4,7 @@
  * trigger's chrome.
  */
 
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, UserRound } from "lucide-react";
 import AccountSwitcher from "@/components/account/AccountSwitcher";
 import type { Me } from "@/api/me";
 
@@ -19,8 +19,17 @@ export default function AccountMenu({ user }: { user: Me }) {
       triggerClassName="flex items-center gap-1.5 rounded px-2 py-1 text-xs hover:opacity-80"
       trigger={
         <>
+          {/* The name is the widest thing in the header; below sm it
+              costs more than it says, so the icon stands in for it. The
+              trigger keeps its title={email}, so the identity is still
+              one hover (or one tap of the menu) away. */}
+          <UserRound
+            className="h-4 w-4 sm:hidden"
+            style={{ color: "var(--color-text-muted)" }}
+            aria-label={user.display_name}
+          />
           <span
-            className="max-w-[16ch] truncate"
+            className="hidden max-w-[16ch] truncate sm:inline"
             style={{ color: "var(--color-text-muted)" }}
           >
             {user.display_name}
