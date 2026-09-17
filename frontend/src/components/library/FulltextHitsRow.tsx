@@ -11,15 +11,21 @@ import { fetchFulltextHits } from "@/api/items";
  * the matching page with the find toolbar pre-populated. The Reader
  * reads `?find=` on mount; the `?page=` param is its existing
  * persistent-position contract.
+ *
+ * `onOpen` selects the item in the list first, so the reader's Back
+ * button lands on the library with this document's detail panel open
+ * rather than on nothing in particular.
  */
 export default function FulltextHitsRow({
   itemId,
   query,
   colSpan,
+  onOpen,
 }: {
   itemId: string;
   query: string;
   colSpan: number;
+  onOpen?: (itemId: string) => void;
 }) {
   const nav = useNavigate();
   const trimmed = query.trim();
@@ -78,6 +84,7 @@ export default function FulltextHitsRow({
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
+                        onOpen?.(itemId);
                         nav(target);
                       }}
                       className="block w-full rounded px-2 py-1 text-left text-sm hover:opacity-80"

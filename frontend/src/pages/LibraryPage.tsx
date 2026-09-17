@@ -12,7 +12,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useSearchParams } from "react-router";
+import { useNavigate, useSearchParams } from "react-router";
 import {
   ArrowDown,
   ArrowLeft,
@@ -55,7 +55,11 @@ import {
 } from "@/api/collections";
 import { fetchPins } from "@/api/standards";
 import { createTag, listTags, setItemTags, type Tag } from "@/api/tags";
-import { downloadItemPdfsZip, uploadAttachment } from "@/api/attachments";
+import {
+  downloadItemPdfsZip,
+  listAttachments,
+  uploadAttachment,
+} from "@/api/attachments";
 import { itemTypeLabel, type ItemType } from "@/api/itemFields";
 import { useDebounce } from "@/hooks/useDebounce";
 import { useResizableWidth } from "@/hooks/useResizableWidth";
@@ -182,6 +186,7 @@ function initialRailOpen(): boolean {
 export default function LibraryPage() {
   const qc = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
+  const nav = useNavigate();
 
   const [railOpen, setRailOpen] = useState<boolean>(initialRailOpen);
   useEffect(() => {
@@ -336,9 +341,12 @@ export default function LibraryPage() {
     else searchParams.delete("view");
     if (s.collection) searchParams.set("collection", s.collection);
     else searchParams.delete("collection");
+    // Dropped in the same write as the view change rather than through
+    // setSelectedId, which would follow up with a second, replacing
+    // navigation and swallow this one's history entry.
+    searchParams.delete("item");
     setSearchParams(searchParams);
     setCheckedIds(new Set());
-    setSelectedId(null);
   }
 
   const addTag = useCallback(
@@ -486,7 +494,22 @@ export default function LibraryPage() {
     return groups;
   }, [flatItems, debouncedQuery, searchScope]);
 
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Which item's detail panel is open. Kept in the URL, not component
+  // state, so it survives a round trip through the reader: Back pops to
+  // this entry with the panel and the filters intact. Same `?item=` the
+  // landing page already deep-links to.
+  const selectedId = searchParams.get("item");
+  const setSelectedId = useCallback(
+    (id: string | null) => {
+      const next = new URLSearchParams(searchParams);
+      if (id) next.set("item", id);
+      else next.delete("item");
+      // Replace, not push: clicking down a list of items shouldn't bury
+      // the screen you arrived from under a dozen history entries.
+      setSearchParams(next, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
 
   // Width of the desktop detail pane. Null until someone drags it, so
@@ -504,22 +527,10 @@ export default function LibraryPage() {
     queryFn: () => fetchMySpaces({ includeInherited: true }),
   });
 
-  // Deep-link: ?item=<id> selects that item and opens its detail
-  // panel even if the item is outside the current page of list
-  // results (e.g. arriving from the landing-page search dropdown).
-  // The query loads the item directly; the URL param is consumed
-  // once and removed so back/forward navigation behaves naturally.
-  useEffect(() => {
-    const itemParam = searchParams.get("item");
-    if (!itemParam) return;
-    setSelectedId(itemParam);
-    searchParams.delete("item");
-    setSearchParams(searchParams, { replace: true });
-    // Intentionally only run when the URL param changes — not on
-    // every searchParams object identity churn.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams.get("item")]);
-
+  // ?item=<id> may name an item outside the current page of list results
+  // — arriving from the landing-page search dropdown, or coming back
+  // from the reader after the list has moved on. Fetch it directly so
+  // the panel can open on it regardless.
   const deepLinkedItem = useQuery({
     queryKey: ["item", selectedId],
     queryFn: () => getItem(selectedId!),
@@ -569,6 +580,46 @@ export default function LibraryPage() {
       return next;
     });
   }, []);
+
+  // The table body, as data. Hoisted out of the JSX because arrow-key
+  // navigation has to walk the rows in the order they're painted, and
+  // two constructions of that order would drift apart.
+  const listEntries = useMemo(
+    () =>
+      groupedItems
+        ? ALL_SEARCH_SCOPES.filter((s) => groupedItems[s].length > 0).flatMap(
+            (s) => [
+              {
+                kind: "header" as const,
+                scope: s,
+                count: groupedItems[s].length,
+              },
+              ...groupedItems[s].flatMap((it) => {
+                const row = { kind: "row" as const, item: it, scope: s };
+                // Only the fulltext bucket gets the expansion. Other
+                // groups already display their match in-band (title /
+                // creators / etc.).
+                if (s === "fulltext" && expandedFulltextIds.has(it.id)) {
+                  return [row, { kind: "hits" as const, itemId: it.id }];
+                }
+                return [row];
+              }),
+            ],
+          )
+        : flatItems.map((it) => ({
+            kind: "row" as const,
+            item: it,
+            scope: null,
+          })),
+    [groupedItems, flatItems, expandedFulltextIds],
+  );
+
+  /** Just the item rows, in painted order — what the arrow keys walk. */
+  const navigableItems = useMemo(
+    () =>
+      listEntries.flatMap((e) => (e.kind === "row" ? [e.item] : [])),
+    [listEntries],
+  );
 
   useEffect(() => {
     if (!items.data) return;
@@ -668,49 +719,176 @@ export default function LibraryPage() {
     },
   });
 
+  // Ctrl/Cmd-click a row, or Enter on it, to open the PDF directly.
+  // Selecting before navigating is what makes Back work: the selection
+  // is in the URL, so the history pop restores the panel. An item with
+  // no PDF just stays selected.
+  const openInReader = useCallback(
+    async (item: Item) => {
+      setSelectedId(item.id);
+      try {
+        const atts = await listAttachments(item.id);
+        const pdf = atts.find((a) => a.content_type === "application/pdf");
+        if (pdf) nav(`/reader/${encodeURIComponent(pdf.id)}`);
+      } catch {
+        // Nothing to add — they're on the detail panel either way.
+      }
+    },
+    [nav, setSelectedId],
+  );
+
+  // Up/Down move the selection, Enter opens the selected PDF. Bound to
+  // the window because rows have no tabindex and never hold focus; the
+  // guards below keep it from stealing keys that belong to a field or a
+  // focused control.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.altKey || e.ctrlKey || e.metaKey) return;
+      // An open item form owns the keyboard — Enter there submits.
+      if (formMode !== "closed") return;
+      const el = e.target as HTMLElement | null;
+      if (
+        el instanceof HTMLInputElement ||
+        el instanceof HTMLTextAreaElement ||
+        el instanceof HTMLSelectElement ||
+        el?.isContentEditable
+      ) {
+        return;
+      }
+      // Enter on a focused button or link is that control's own Enter,
+      // not ours. Arrows over one are still fair game, since a button
+      // does nothing with them.
+      const onControl =
+        el instanceof HTMLButtonElement || el instanceof HTMLAnchorElement;
+
+      if (e.key === "Enter") {
+        if (onControl) return;
+        const item = navigableItems.find((i) => i.id === selectedId);
+        if (!item) return;
+        e.preventDefault();
+        openInReader(item);
+        return;
+      }
+
+      if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+      if (navigableItems.length === 0) return;
+      e.preventDefault();
+      const at = navigableItems.findIndex((i) => i.id === selectedId);
+      let next: number;
+      if (at === -1) {
+        // Nothing selected yet — enter the list from the end the key
+        // points at, rather than always from the top.
+        next = e.key === "ArrowDown" ? 0 : navigableItems.length - 1;
+      } else {
+        // Clamped, not wrapped: running off the bottom of a long list
+        // and landing back at the top loses your place silently.
+        next = Math.min(
+          Math.max(at + (e.key === "ArrowDown" ? 1 : -1), 0),
+          navigableItems.length - 1,
+        );
+      }
+      setSelectedId(navigableItems[next].id);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [navigableItems, selectedId, setSelectedId, openInReader, formMode]);
+
+  // Keep the selected row on screen. "nearest" so a row already in view
+  // isn't yanked to centre on every keypress.
+  const listRef = useRef<HTMLTableSectionElement>(null);
+  useEffect(() => {
+    if (!selectedId) return;
+    listRef.current
+      ?.querySelector(`[data-item-row="${CSS.escape(selectedId)}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [selectedId]);
+
   // One-tap PDF upload: mint a bare "document" item titled from the
   // filename, then attach the file. No metadata form in between — the
-  // profile can be filled in afterwards from the detail panel.
+  // profile can be filled in afterwards from the detail panel. Accepts a
+  // whole selection; each file becomes its own document.
   const pdfInput = useRef<HTMLInputElement>(null);
+  // Which file of how many is in flight, for the button's label. Null
+  // between batches; `useMutation`'s own isPending says nothing about
+  // where in the batch we are.
+  const [pdfProgress, setPdfProgress] = useState<{
+    done: number;
+    total: number;
+  } | null>(null);
+
+  /** Create one document item from one PDF, rolling the item back if the
+   *  upload half fails. */
+  async function uploadOnePdf(file: File) {
+    const title = file.name.replace(/\.pdf$/i, "") || file.name;
+    const item = await createItem(slug!, {
+      item_type: "document",
+      data: { title },
+    });
+    // Drop it into the collection currently in view, mirroring what
+    // "New item" does — but skip the "unfiled" pseudo-collection.
+    if (collectionParam && collectionParam !== "unfiled") {
+      await setItemCollections(item.id, [collectionParam]);
+    }
+    // The item is created before the upload, so a failed upload would
+    // otherwise leave an empty document behind. Roll it back on any
+    // failure, then rethrow so the caller can report it.
+    try {
+      await uploadAttachment(item.id, file);
+    } catch (e) {
+      try {
+        await deleteItem(item.id);
+      } catch {
+        // best-effort — the orphan sweep is the backstop
+      }
+      throw e;
+    }
+    return item;
+  }
 
   const uploadPdf = useMutation({
-    mutationFn: async (file: File) => {
-      const title = file.name.replace(/\.pdf$/i, "") || file.name;
-      const item = await createItem(slug!, {
-        item_type: "document",
-        data: { title },
-      });
-      // Drop it into the collection currently in view, mirroring what
-      // "New item" does — but skip the "unfiled" pseudo-collection.
-      if (collectionParam && collectionParam !== "unfiled") {
-        await setItemCollections(item.id, [collectionParam]);
-      }
-      // The item is created before the upload, so a failed upload would
-      // otherwise leave an empty document behind. Roll it back on any
-      // failure, then rethrow so onError still surfaces the message.
-      try {
-        await uploadAttachment(item.id, file);
-      } catch (e) {
+    mutationFn: async (files: File[]) => {
+      const created: Item[] = [];
+      const failed: string[] = [];
+      setPdfProgress({ done: 0, total: files.length });
+      // Sequential: each file is three round trips plus a PUT to object
+      // storage, and a parallel burst mainly makes "which one failed"
+      // harder to answer.
+      for (const [i, file] of files.entries()) {
         try {
-          await deleteItem(item.id);
-        } catch {
-          // best-effort — the orphan sweep is the backstop
+          created.push(await uploadOnePdf(file));
+        } catch (e) {
+          // One bad file shouldn't strand the rest of the batch — the
+          // others have nothing to do with it. Collect and carry on.
+          failed.push(`${file.name}: ${(e as Error).message}`);
         }
-        throw e;
+        setPdfProgress({ done: i + 1, total: files.length });
       }
-      return item;
+      return { created, failed };
     },
-    onSuccess: (item) => {
+    onSettled: () => setPdfProgress(null),
+    onSuccess: ({ created, failed }) => {
       qc.invalidateQueries({ queryKey: ["items", slug] });
-      setSelectedId(item.id);
+      // Open the last one that landed — for a single file that's the
+      // familiar "upload then look at it".
+      const last = created.at(-1);
+      if (last) setSelectedId(last.id);
+      if (failed.length > 0) {
+        window.alert(
+          `${failed.length} of ${created.length + failed.length} uploads ` +
+            `failed:\n\n` +
+            failed.join("\n"),
+        );
+      }
     },
     onError: (e: Error) => window.alert(`Upload failed: ${e.message}`),
   });
 
   function onPickPdf(e: ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
+    const files = Array.from(e.target.files ?? []);
+    // Cleared before the upload starts so picking the same file again
+    // still fires a change event.
     e.target.value = "";
-    if (file) uploadPdf.mutate(file);
+    if (files.length > 0) uploadPdf.mutate(files);
   }
 
   // Bulk-download the PDFs of every checked document as a single ZIP.
@@ -1173,7 +1351,7 @@ export default function LibraryPage() {
                       borderColor: "var(--color-border)",
                       color: "var(--color-text)",
                     }}
-                    title="Upload a PDF as a new document"
+                    title="Upload one or more PDFs, one new document each"
                   >
                     {uploadPdf.isPending ? (
                       <Loader2 className="h-4 w-4 animate-spin" />
@@ -1181,12 +1359,23 @@ export default function LibraryPage() {
                       <Upload className="h-4 w-4" />
                     )}
                     <span className="hidden sm:inline">
-                      {uploadPdf.isPending ? "Uploading…" : "Upload PDF"}
+                      {uploadPdf.isPending
+                        ? pdfProgress && pdfProgress.total > 1
+                          ? // done counts finished files; the one in
+                            // flight is the next, clamped so the last
+                            // doesn't read "4/3".
+                            `Uploading ${Math.min(
+                              pdfProgress.done + 1,
+                              pdfProgress.total,
+                            )}/${pdfProgress.total}…`
+                          : "Uploading…"
+                        : "Upload PDFs"}
                     </span>
                   </button>
                   <input
                     ref={pdfInput}
                     type="file"
+                    multiple
                     accept="application/pdf,.pdf"
                     onChange={onPickPdf}
                     className="hidden"
@@ -1415,49 +1604,8 @@ export default function LibraryPage() {
                       />
                     </tr>
                   </thead>
-                  <tbody>
-                    {(groupedItems
-                      ? ALL_SEARCH_SCOPES.filter(
-                          (s) => groupedItems[s].length > 0,
-                        ).flatMap((s) =>
-                          [
-                            {
-                              kind: "header" as const,
-                              scope: s,
-                              count: groupedItems[s].length,
-                            },
-                            ...groupedItems[s].flatMap((it) => {
-                              const row = {
-                                kind: "row" as const,
-                                item: it,
-                                scope: s,
-                              };
-                              // Only the fulltext bucket gets the
-                              // expansion. Other groups already
-                              // display their match in-band (title /
-                              // creators / etc.).
-                              if (
-                                s === "fulltext" &&
-                                expandedFulltextIds.has(it.id)
-                              ) {
-                                return [
-                                  row,
-                                  {
-                                    kind: "hits" as const,
-                                    itemId: it.id,
-                                  },
-                                ];
-                              }
-                              return [row];
-                            }),
-                          ],
-                        )
-                      : flatItems.map((it) => ({
-                          kind: "row" as const,
-                          item: it,
-                          scope: null,
-                        }))
-                    ).map((entry) => {
+                  <tbody ref={listRef}>
+                    {listEntries.map((entry) => {
                       if (entry.kind === "header") {
                         return (
                           <tr
@@ -1487,6 +1635,7 @@ export default function LibraryPage() {
                             itemId={entry.itemId}
                             query={debouncedQuery}
                             colSpan={6}
+                            onOpen={setSelectedId}
                           />
                         );
                       }
@@ -1498,7 +1647,11 @@ export default function LibraryPage() {
                       return (
                         <tr
                           key={it.id}
-                          onClick={() => setSelectedId(it.id)}
+                          data-item-row={it.id}
+                          onClick={(e) => {
+                            if (e.ctrlKey || e.metaKey) openInReader(it);
+                            else setSelectedId(it.id);
+                          }}
                           className="cursor-pointer border-b last:border-b-0 hover:opacity-90"
                           style={{
                             borderColor: "var(--color-border)",
@@ -1551,7 +1704,9 @@ export default function LibraryPage() {
                                 // their fulltext-group siblings.
                                 <span className="inline-block w-[18px]" />
                               )}
-                              <span>{itemTitle(it)}</span>
+                              <span title="Ctrl+click to open the PDF">
+                                {itemTitle(it)}
+                              </span>
                             </div>
                           </td>
                           <td
