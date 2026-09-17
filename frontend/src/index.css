@@ -191,6 +191,38 @@ button {
   background-color: rgba(255, 152, 0, 0.75);
 }
 
+/* ── PDF link annotations ───────────────────────────────────────── */
+
+/* A PDF's own hyperlinks: cross-references and outbound URLs.
+ *
+ * Inert until Ctrl (or Cmd) is held — a clickable rectangle over the
+ * text would otherwise swallow the drag that starts a selection. The
+ * layer is pointer-events: none until the scroll container flips one
+ * data attribute, so arming it re-renders nothing. */
+.shelf-links {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  /* Above the text layer, below the user's own marks — a highlight the
+     reader drew should never disappear under a link rectangle. */
+  z-index: 1;
+}
+.shelf-link {
+  position: absolute;
+  border-radius: 2px;
+  pointer-events: none;
+}
+[data-follow-links="true"] .shelf-link {
+  pointer-events: auto;
+  cursor: pointer;
+  background-color: color-mix(in srgb, var(--color-accent) 22%, transparent);
+  outline: 1px solid color-mix(in srgb, var(--color-accent) 55%, transparent);
+}
+[data-follow-links="true"] .shelf-link:hover {
+  background-color: color-mix(in srgb, var(--color-accent) 38%, transparent);
+}
+
+
 /* ── Annotation overlay ─────────────────────────────────────────── */
 
 .shelf-annotations {

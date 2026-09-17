@@ -1,42 +1,12 @@
 import { useEffect, useState } from "react";
 import { ChevronDown, ChevronRight, X } from "lucide-react";
 import type { PDFDocumentProxy } from "pdfjs-dist";
+import { destToPage, type PdfDest } from "@/lib/pdfLinks";
 
 interface OutlineNode {
   title: string;
-  dest: string | unknown[] | null;
+  dest: PdfDest;
   items: OutlineNode[];
-}
-
-/**
- * Resolve a pdfjs outline destination to a 1-based page number.
- *
- * pdfjs `dest` is either a *named* destination (string — needs a
- * second lookup via getDestination) or already an *explicit*
- * destination array. Either way the first element of the explicit
- * array is the page object reference, which getPageIndex turns into
- * a 0-based index. Returns null if anything along the chain is
- * missing or malformed.
- */
-async function destToPage(
-  doc: PDFDocumentProxy,
-  dest: string | unknown[] | null,
-): Promise<number | null> {
-  if (dest == null) return null;
-  let resolved: unknown[] | null = null;
-  if (typeof dest === "string") {
-    const d = await doc.getDestination(dest);
-    resolved = d as unknown[] | null;
-  } else if (Array.isArray(dest)) {
-    resolved = dest;
-  }
-  if (!resolved || resolved.length === 0) return null;
-  try {
-    const idx = await doc.getPageIndex(resolved[0] as never);
-    return idx + 1;
-  } catch {
-    return null;
-  }
 }
 
 export default function OutlinePanel({
