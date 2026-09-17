@@ -2,6 +2,95 @@
 
 
 
+## v0.7.0 (2026-09-17)
+
+### Feature
+
+* feat(reader): follow the hyperlinks inside a PDF
+
+Link annotations are extracted per page and drawn as an overlay. They
+stay pointer-events: none until Ctrl/Cmd is held, so a clickable
+rectangle over the text never swallows the drag that starts a selection.
+Held down, links tint and become clickable: internal destinations scroll
+the reader, external URLs open in a new tab.
+
+Backspace leaves the reader, the counterpart to Enter in the library.
+
+destToPage moves out of OutlinePanel into lib/pdfLinks alongside the new
+extractor -- a link annotation&#39;s dest and an outline node&#39;s dest are the
+same thing -- which also puts the fiddly parts under test: named versus
+explicit destinations, rects given as either pair of opposite corners,
+and links that resolve to nothing followable.
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`e4b2713`](https://github.com/Krande/shelf/commit/e4b2713b1d932a2f58f0510f0098671f9921f4c6))
+
+* feat(library): multi-PDF upload, and open a document from the list
+
+Upload takes a whole selection and each file becomes its own document.
+Uploads run sequentially so a failure names the file it belongs to, and
+one bad file no longer strands the batch: its own item is rolled back
+and the failures are reported together at the end.
+
+Ctrl/Cmd-click a row, or press Enter on it, to open its PDF directly.
+Up/Down move the selection. The rows are walked in the order they are
+painted, so the table body is now built as data rather than inline in
+the JSX -- a second construction of that order would drift from what is
+on screen.
+
+The selected item moves from component state into ?item=, reusing the
+param the landing page already deep-links to. That is what makes Back
+work from the reader: the history pop restores the panel along with the
+collection, search and sort that led there.
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`8c0d6f2`](https://github.com/Krande/shelf/commit/8c0d6f2650c02ffeff8fb5a448b9c160bf967c92))
+
+* feat(admin): edit a user display name
+
+PATCH /api/admin/users/{id} becomes a partial update: role and
+display_name are both optional, so the role select and the name field
+each send only what changed. A blank name is a 400, an empty body is a
+400, and a refused last-admin demotion aborts the rename alongside it.
+
+Nothing syncs names from the identity provider, so a correction sticks.
+
+Renames the settings tab from &#34;Admin&#34; to &#34;Users&#34;: it renders only the
+user list, and every other tab is named for its content rather than the
+role needed to see it. The route segment is unchanged.
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`9d0aadd`](https://github.com/Krande/shelf/commit/9d0aadd194459bf634a5818143b51f9faf5a690e))
+
+### Fix
+
+* fix(release): bump the CLI version with the rest
+
+cli/pyproject.toml and cli/src/shelf_cli/__init__.py were not release
+targets, so the CLI sat at 0.4.0 while the project reached 0.6.0. It
+lives in this repo to stay versioned with the API it talks to, and
+`pixi global install shelf-cli --tag v&lt;x&gt;` only picks the right client
+if the two agree. Adds both to deputy.toml and syncs them to 0.6.0 so
+the next bump starts from the right number.
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`dc382ed`](https://github.com/Krande/shelf/commit/dc382eddeb33d7d1fbe3cc8cf4e199303e497c30))
+
+* fix(ui): keep the header and space rows inside a phone viewport
+
+The account trigger shows the user icon instead of the display name
+below sm -- the name was the widest thing in the header. The trigger
+keeps title={email}, so the identity is still one hover away.
+
+Space rows wrap instead of overflowing, and their panel buttons drop
+their text labels below sm: three shrink-0 buttons alongside the space
+name pushed the row past its container. aria-label carries the name.
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`2fa594e`](https://github.com/Krande/shelf/commit/2fa594eb59e6362636ae3a03b8fc63195c06da26))
+
+### Unknown
+
+* Merge pull request #8 from Krande/feat/admin-names-bulk-upload-reader-nav
+
+feat: display-name editing, multi-PDF upload, and reader navigation ([`4e40f7d`](https://github.com/Krande/shelf/commit/4e40f7d88f603a5840f107f3497daf9cc6b04764))
+
+
 ## v0.6.0 (2026-09-16)
 
 ### Feature
