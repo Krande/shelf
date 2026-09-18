@@ -64,7 +64,7 @@ import {
   useZoomGestures,
 } from "@/hooks/useZoomGestures";
 import { pageLinks, type PageLink } from "@/lib/pdfLinks";
-import { clampPixelMultiplier } from "@/lib/canvasBudget";
+import { CanvasBudget, clampPixelMultiplier } from "@/lib/canvasBudget";
 import { RenderQueue } from "@/lib/renderQueue";
 import OutlinePanel from "@/components/library/OutlinePanel";
 import ProcessingMenu from "@/components/reader/ProcessingMenu";
@@ -823,6 +823,10 @@ export default function ReaderPage() {
   // queue for the document, so the single pdfjs worker is never asked
   // for nine pages at once.
   const renderQueue = useRef(new RenderQueue()).current;
+  // Shared pixel ceiling across every rendered page. Per-page clamping
+  // bounds one canvas; how many are mounted is decided by the viewport,
+  // not by anything about memory.
+  const canvasBudget = useRef(new CanvasBudget()).current;
   // Read by the queue's priority function without re-subscribing it.
   const pageRef = useRef(page);
   pageRef.current = page;
@@ -1219,6 +1223,7 @@ export default function ReaderPage() {
               focusedAnnotationId={focusedAnnotationId}
               debugText={debugText}
               queue={renderQueue}
+              budget={canvasBudget}
               pageRef={pageRef}
               pinchScaleRef={pinchScaleRef}
               lastScrolledTo={lastScrolledTo}
@@ -1248,6 +1253,7 @@ export default function ReaderPage() {
             focusedAnnotationId={focusedAnnotationId}
             debugText={debugText}
             queue={renderQueue}
+            budget={canvasBudget}
             pageRef={pageRef}
             pinchScaleRef={pinchScaleRef}
             lastScrolledTo={lastScrolledTo}
@@ -1507,6 +1513,7 @@ const ContinuousList = forwardRef<
     focusedAnnotationId: string | null;
     debugText: boolean;
     queue: RenderQueue;
+    budget: CanvasBudget;
     pageRef: React.RefObject<number>;
     pinchScaleRef: React.RefObject<number>;
     lastScrolledTo: React.RefObject<string | null>;
@@ -1533,6 +1540,7 @@ const ContinuousList = forwardRef<
     focusedAnnotationId,
     debugText,
     queue,
+    budget,
     pageRef,
     pinchScaleRef,
     lastScrolledTo,
@@ -1664,6 +1672,7 @@ const ContinuousList = forwardRef<
               deferWork={virtualizer.isScrolling}
               onNativeSize={applyNativeSize}
               queue={queue}
+              budget={budget}
               pageRef={pageRef}
               pinchScaleRef={pinchScaleRef}
               lastScrolledTo={lastScrolledTo}
@@ -1689,6 +1698,7 @@ function PageCanvas({
   debugText,
   deferWork = false,
   queue,
+  budget,
   pageRef,
   pinchScaleRef,
   lastScrolledTo,
@@ -1710,6 +1720,8 @@ function PageCanvas({
   deferWork?: boolean;
   /** Serialises rendering across pages. */
   queue: RenderQueue;
+  /** Shared pixel ceiling across every rendered page. */
+  budget: CanvasBudget;
   /** The page in view, for queue priority. */
   pageRef: React.RefObject<number>;
   pinchScaleRef: React.RefObject<number>;
@@ -1834,8 +1846,10 @@ function PageCanvas({
       }
 
       const base = pdfPage.getViewport({ scale: renderScale });
-      const pixelMultiplier = clampPixelMultiplier(
-        dpr,
+      const budgetKey = `page-${pageNumber}`;
+      const pixelMultiplier = budget.allow(
+        budgetKey,
+        clampPixelMultiplier(dpr, base.width, base.height),
         base.width,
         base.height,
       );
@@ -1862,6 +1876,7 @@ function PageCanvas({
         return;
       }
       if (cancelled) return;
+      budget.set(budgetKey, canvas.width * canvas.height);
       setPainted(true);
 
       // pdfjs reads `--total-scale-factor` from the container (or
@@ -1898,6 +1913,7 @@ function PageCanvas({
       // looking at any more.
       textLayerTask?.cancel();
       pdfPage?.cleanup();
+      budget.release(`page-${pageNumber}`);
       // Drop the backing store now rather than waiting for GC, which
       // is slow to reclaim off-heap canvas memory.
       if (canvas.width > 0) {
@@ -1905,7 +1921,7 @@ function PageCanvas({
         canvas.height = 0;
       }
     };
-  }, [doc, pageNumber, renderScale, deferWork, queue, pageRef]);
+  }, [doc, pageNumber, renderScale, deferWork, queue, budget, pageRef]);
 
   // Capture the user's text selection. Listens at the document
   // level for `selectionchange` (debounced ~180ms) so we catch the
