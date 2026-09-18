@@ -164,7 +164,17 @@ export default function ReaderPage() {
     if (!el) return;
     const ro = new ResizeObserver((entries) => {
       const r = entries[0]?.contentRect;
-      if (r) setContainerSize({ width: r.width, height: r.height });
+      if (!r) return;
+      // Rounded: sub-pixel churn would otherwise re-run the scale
+      // calculation, and so every page's render, for a change nobody
+      // can see.
+      const width = Math.round(r.width);
+      const height = Math.round(r.height);
+      setContainerSize((prev) =>
+        prev.width === width && prev.height === height
+          ? prev
+          : { width, height },
+      );
     });
     ro.observe(el);
     return () => ro.disconnect();
@@ -474,7 +484,10 @@ export default function ReaderPage() {
   // here and survived the remount — its cached estimateSize results
   // from the first paint kept totalSize stuck small, capping how
   // far you could scroll.
-  const virtualKey = `${numPages}-${containerSize.width}-${containerSize.height}-${heightsReady}-${fit}`;
+  // Deliberately excludes the container size and the zoom: those
+  // change often and are handled by re-measuring in place. Only the
+  // things that invalidate the virtualizer wholesale remain.
+  const virtualKey = `${numPages}-${heightsReady}`;
 
   // Imperative bridge so the toolbar's prev/next/page-input can
   // command scrolling on the (key'd, possibly remounted) child.
@@ -1188,6 +1201,12 @@ export default function ReaderPage() {
           // two-finger gestures via preventDefault.
           touchAction: selectMode ? "none" : "auto",
           overscrollBehavior: "contain",
+          // Hold the scrollbar's space open. Without it, zooming past
+          // the viewport width brings a scrollbar in, which shrinks the
+          // container, which changes the fit scale, which can push the
+          // content back under the width and take the scrollbar away
+          // again -- a loop the reader sees as flicker.
+          scrollbarGutter: "stable",
         }}
       >
         {loading && (
