@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -32,6 +33,8 @@ import {
   Search,
   Trash2,
   X,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
 import type {
   PDFDocumentProxy,
@@ -54,7 +57,12 @@ import {
 } from "@/api/annotations";
 import { PREF_READER_FIT, PREF_READER_MODE, usePref } from "@/auth/prefs";
 import { useDebounce } from "@/hooks/useDebounce";
-import { usePinchZoom } from "@/hooks/usePinchZoom";
+import {
+  clampZoom,
+  MAX_ZOOM,
+  MIN_ZOOM,
+  useZoomGestures,
+} from "@/hooks/useZoomGestures";
 import { pageLinks, type PageLink } from "@/lib/pdfLinks";
 import { clampPixelMultiplier } from "@/lib/canvasBudget";
 import { RenderQueue } from "@/lib/renderQueue";
@@ -62,21 +70,14 @@ import OutlinePanel from "@/components/library/OutlinePanel";
 import ProcessingMenu from "@/components/reader/ProcessingMenu";
 import VersionPicker from "@/components/reader/VersionPicker";
 
+/** Multiplier per zoom button press; matches pdf.js's own viewer. */
+const ZOOM_STEP = 1.1;
+
 const PAGE_GAP = 16;
 // p-4 padding on the scroll container = 16px each side, 32px total
 // horizontal — pages render to fit the inner content width.
 const SCROLL_PADDING = 32;
 const ESTIMATE_PAGE_HEIGHT = 1100;
-// Cap how much extra pixel detail we ask pdfjs to bake at zoom.
-// Each step squares memory usage per page (e.g. 3× → 9× pixels);
-// 4 keeps a 1 MP base page under ~16 MP which is workable for a
-// few mounted virtual rows. The user sees diminishing returns past
-// the device's effective DPI anyway.
-const MAX_OVERSAMPLE = 2;
-// Wait this long after the last pinch-scale change before kicking
-// off the higher-resolution re-render. Avoids re-rendering during
-// the gesture itself — pdfjs render is CPU-heavy.
-const OVERSAMPLE_SETTLE_MS = 1500;
 
 interface NativeViewport {
   width: number;
@@ -431,6 +432,14 @@ export default function ReaderPage() {
   // ResizeObserver fires) we return 1 as a safe fallback; the
   // virtualizer is remounted on width/height/fit change below so the
   // wrong heights don't get cached.
+  // Zoom multiplies the fit scale rather than transforming what the
+  // fit scale produced. Everything downstream — the page box, the
+  // canvas, the virtualizer's geometry — is built from the product, so
+  // the document's scroll height grows with the zoom and native
+  // scrolling reaches all of a zoomed page. pdf.js's own viewer works
+  // this way, and so does every other viewer that behaves.
+  const [zoom, setZoom] = useState(1);
+
   const pageScaleFor = useCallback(
     (n: number): number => {
       const native = pageNativeRef.current.get(n);
@@ -441,12 +450,12 @@ export default function ReaderPage() {
         const innerH = Math.max(0, containerSize.height - SCROLL_PADDING);
         if (innerH > 0) {
           const heightScale = innerH / native.height;
-          return Math.min(widthScale, heightScale);
+          return Math.min(widthScale, heightScale) * zoom;
         }
       }
-      return widthScale;
+      return widthScale * zoom;
     },
-    [containerSize.width, containerSize.height, fit],
+    [containerSize.width, containerSize.height, fit, zoom],
   );
 
   const estimateSize = useCallback(
@@ -498,14 +507,6 @@ export default function ReaderPage() {
     setCurrentMatch(wrapped);
     const target = matches[wrapped];
     setPage(target.page);
-    // Reset pinch before scrolling. While pinched, the visible
-    // viewport is driven by translateY on the wrapper rather than
-    // scrollTop on the container, so the virtualizer's scrollToIndex
-    // moves a "scroll" position the user can't see — the target
-    // page never enters the mount window and the user lands on
-    // background. Resetting drops translate/scale to identity so
-    // scrollTop and visible viewport agree again.
-    pinch.resetZoom();
     if (mode === "continuous") {
       continuousRef.current?.scrollToPage(target.page);
     }
@@ -560,11 +561,58 @@ export default function ReaderPage() {
   // translate. When state.scale === 1, touchAction falls back to
   // pan-y so native vertical scroll works. Disabled while in
   // select mode so finger drags select text instead of pinching.
-  const pinch = usePinchZoom(scrollRef, { enabled: !selectMode });
-  // Pulled out because `pinch` is a fresh object every gesture frame;
-  // resetZoom is useCallback'd and stable, so callbacks that only need
-  // it keep their identity.
-  const { resetZoom } = pinch;
+  // The element the transient pinch preview is applied to, and which
+  // holds the pages. Only touched during a live gesture.
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  /**
+   * Change zoom while holding a point still.
+   *
+   * Without this a zoom step keeps `scrollTop`, which after the layout
+   * has grown or shrunk points somewhere else entirely — the document
+   * appears to leap. Anchoring on the cursor is what makes zooming into
+   * a figure land on that figure.
+   */
+  const applyZoom = useCallback(
+    (next: number, anchor?: { x: number; y: number }) => {
+      const el = scrollRef.current;
+      if (!el) {
+        setZoom(clampZoom(next));
+        return;
+      }
+      const ax = anchor?.x ?? el.clientWidth / 2;
+      const ay = anchor?.y ?? el.clientHeight / 2;
+      // Where the anchor sits in the content, as a fraction — the one
+      // quantity that survives the layout changing size.
+      const fx = (el.scrollLeft + ax) / Math.max(1, el.scrollWidth);
+      const fy = (el.scrollTop + ay) / Math.max(1, el.scrollHeight);
+      setZoom(clampZoom(next));
+      pendingAnchor.current = { fx, fy, ax, ay };
+    },
+    [],
+  );
+  const pendingAnchor = useRef<{
+    fx: number;
+    fy: number;
+    ax: number;
+    ay: number;
+  } | null>(null);
+
+  // Restore the anchor once the new layout exists.
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    const a = pendingAnchor.current;
+    if (!el || !a) return;
+    pendingAnchor.current = null;
+    el.scrollLeft = a.fx * el.scrollWidth - a.ax;
+    el.scrollTop = a.fy * el.scrollHeight - a.ay;
+  }, [zoom]);
+
+  const { previewRef } = useZoomGestures(scrollRef, contentRef, {
+    zoom,
+    onZoom: applyZoom,
+    enabled: !selectMode,
+  });
   // Mirror pinch.scale into a ref so the find-highlight effect (in
   // PageCanvas) can read the current value without listing
   // pinch.scale as a dependency. We don't want the effect to re-run
@@ -574,10 +622,7 @@ export default function ReaderPage() {
   // textLayer changes) and the divs get placed in *layout*
   // coordinates so the parent transform composes them correctly
   // through any subsequent pinch.
-  const pinchScaleRef = useRef(pinch.scale);
-  useEffect(() => {
-    pinchScaleRef.current = pinch.scale;
-  }, [pinch.scale]);
+  const pinchScaleRef = previewRef;
 
   // Annotations for this PDF.
   const qc = useQueryClient();
@@ -683,25 +728,18 @@ export default function ReaderPage() {
   // that wants to navigate (annotations, outline, fulltext).
   const goToPage = useCallback(
     (n: number) => {
-      // Reset pinch first — when zoomed the visible viewport is
-      // driven by translate, not scrollTop, so scrollToPage won't
-      // bring the target into view.
-      resetZoom();
       setPage(n);
       if (mode === "continuous") {
-        // Defer past the pinch-reset / setPage render flush so the
-        // virtualizer measures with the identity transform in place;
-        // without this, scrollToIndex computed against a pinched
-        // layout would silently land on the wrong scrollTop and the
-        // viewer would stay on whatever page was already visible.
+        // Deferred past the setPage render flush so the virtualizer has
+        // the current geometry. Zoom no longer enters into it: the
+        // layout is the zoom, so scrollToIndex is always in the same
+        // coordinates the user sees.
         setTimeout(() => {
           continuousRef.current?.scrollToPage(n);
         }, 0);
       }
     },
-    // resetZoom is useCallback'd in the hook; `pinch` itself is a new
-    // object every gesture frame.
-    [resetZoom, mode],
+    [mode],
   );
 
   // The annotation to ring, if any. Set by a deep link or by clicking
@@ -777,12 +815,6 @@ export default function ReaderPage() {
     [goToPage, isCoarsePointer],
   );
 
-  // Once the user holds a zoom level still for OVERSAMPLE_SETTLE_MS,
-  // we ask pdfjs to re-render the visible pages at higher pixel
-  // detail (canvas pixel buffer × oversample, CSS box unchanged) so
-  // text and vector strokes turn crisp again. While the user is
-  // actively pinching, pinch.scale changes per frame, the timer
-  // keeps resetting, and pdfjs stays out of the way.
   // Which find match the view last scrolled to. Shared by every page
   // so a remount does not re-scroll to it; see PageCanvas.
   const lastScrolledTo = useRef<string | null>(null);
@@ -794,16 +826,6 @@ export default function ReaderPage() {
   // Read by the queue's priority function without re-subscribing it.
   const pageRef = useRef(page);
   pageRef.current = page;
-
-  const [oversample, setOversample] = useState(1);
-  useEffect(() => {
-    const target = Math.max(1, Math.min(MAX_OVERSAMPLE, pinch.scale));
-    if (Math.abs(target - oversample) < 0.01) return;
-    const t = setTimeout(() => {
-      setOversample(target);
-    }, OVERSAMPLE_SETTLE_MS);
-    return () => clearTimeout(t);
-  }, [pinch.scale, oversample]);
 
   const currentMatchInfo = matches[currentMatch] ?? null;
 
@@ -952,12 +974,43 @@ export default function ReaderPage() {
           )}
         </button>
 
+        <span className="flex items-center gap-0.5">
+          <button
+            onClick={() => applyZoom(zoom / ZOOM_STEP)}
+            disabled={zoom <= MIN_ZOOM + 1e-6}
+            aria-label="Zoom out"
+            title="Zoom out"
+            className="rounded p-1 hover:opacity-80 disabled:opacity-30"
+            style={{ color: "var(--color-text-muted)" }}
+          >
+            <ZoomOut className="h-3.5 w-3.5" />
+          </button>
+          <button
+            onClick={() => setZoom(1)}
+            aria-label="Reset zoom"
+            title="Reset zoom to the fit scale"
+            className="min-w-[3.5rem] rounded px-1 py-1 text-center text-xs tabular-nums hover:opacity-80"
+            style={{ color: "var(--color-text-muted)" }}
+          >
+            {Math.round(zoom * 100)}%
+          </button>
+          <button
+            onClick={() => applyZoom(zoom * ZOOM_STEP)}
+            disabled={zoom >= MAX_ZOOM - 1e-6}
+            aria-label="Zoom in"
+            title="Zoom in"
+            className="rounded p-1 hover:opacity-80 disabled:opacity-30"
+            style={{ color: "var(--color-text-muted)" }}
+          >
+            <ZoomIn className="h-3.5 w-3.5" />
+          </button>
+        </span>
+
         <button
           onClick={() => {
-            // Reset any pinch zoom so the new base scale is what the
-            // user actually sees — otherwise a pinched-in view would
-            // hide the fit change.
-            pinch.resetZoom();
+            // Back to 1:1 so the new fit is what is actually seen; a
+            // zoomed-in view would otherwise hide the change.
+            setZoom(1);
             setFit(fit === "width" ? "page" : "width");
           }}
           aria-label="Toggle fit mode"
@@ -1117,17 +1170,19 @@ export default function ReaderPage() {
       <div className="flex min-h-0 flex-1">
       <div
         ref={scrollRef}
-        // overflow-y only — pinch handles horizontal pan via
-        // translate, no native horizontal scroll. touchAction
-        // toggles inside usePinchZoom (pan-y at scale=1, none when
-        // zoomed).
-        className={`flex-1 overflow-y-auto p-4${
+        // Both axes: with layout zoom a zoomed page is genuinely
+        // wider than the viewport, so the browser can scroll to the
+        // rest of it. The transform model had to pan it by hand.
+        className={`flex-1 overflow-auto p-4${
           (highlightsOpen || outlineOpen) && isCoarsePointer
             ? " hidden sm:block"
             : ""
         }`}
         style={{
-          touchAction: pinch.contentStyle.touchAction,
+          // `none` only while drag-select owns the touches; otherwise
+          // the browser scrolls both ways and the pinch handler takes
+          // two-finger gestures via preventDefault.
+          touchAction: selectMode ? "none" : "auto",
           overscrollBehavior: "contain",
         }}
       >
@@ -1148,19 +1203,11 @@ export default function ReaderPage() {
           </div>
         )}
         {doc && mode === "single" && (
-          <div
-            style={{
-              ...pinch.contentStyle,
-              width: "100%",
-              display: "flex",
-              justifyContent: "center",
-            }}
-          >
+          <div ref={contentRef} style={{ width: "fit-content", margin: "0 auto" }}>
             <PageCanvas
               doc={doc}
               pageNumber={page}
               renderScale={pageScaleFor(page)}
-              oversample={oversample}
               native={pageNativeRef.current.get(page)}
               findQuery={findQuery}
               currentOccurrence={
@@ -1194,8 +1241,7 @@ export default function ReaderPage() {
             estimateSize={estimateSize}
             pageScaleFor={pageScaleFor}
             pageNativeRef={pageNativeRef}
-            pinchStyle={pinch.contentStyle}
-            oversample={oversample}
+            contentRef={contentRef}
             findQuery={findQuery}
             currentMatchInfo={currentMatchInfo}
             annotationsByPage={annotationsByPage}
@@ -1454,8 +1500,7 @@ const ContinuousList = forwardRef<
     estimateSize: (index: number) => number;
     pageScaleFor: (n: number) => number;
     pageNativeRef: React.RefObject<Map<number, NativeViewport>>;
-    pinchStyle: React.CSSProperties;
-    oversample: number;
+    contentRef: React.RefObject<HTMLDivElement | null>;
     findQuery: string;
     currentMatchInfo: { page: number; occurrence: number } | null;
     annotationsByPage: Map<number, Annotation[]>;
@@ -1481,8 +1526,7 @@ const ContinuousList = forwardRef<
     estimateSize,
     pageScaleFor,
     pageNativeRef,
-    pinchStyle,
-    oversample,
+    contentRef,
     findQuery,
     currentMatchInfo,
     annotationsByPage,
@@ -1509,6 +1553,14 @@ const ContinuousList = forwardRef<
   // after the first read of a document, so re-measuring here is cheap;
   // leaving it wrong is not, since every page below it sits at the
   // wrong offset.
+  // Zoom changes every page's height, and the virtualizer caches what
+  // it measured at the old one.
+  useEffect(() => {
+    virtualizer.measure();
+    // pageScaleFor closes over zoom, so estimateSize changing identity
+    // is the signal that the scale moved.
+  }, [virtualizer, estimateSize]);
+
   const applyNativeSize = useCallback(
     (page: number, size: NativeViewport) => {
       pageNativeRef.current.set(page, size);
@@ -1567,9 +1619,13 @@ const ContinuousList = forwardRef<
 
   return (
     <div
+      ref={contentRef}
       style={{
-        ...pinchStyle,
-        width: "100%",
+        // fit-content, not 100%: at a zoom past fit-width the pages are
+        // wider than the viewport, and a 100% box would clip them
+        // instead of giving the container something to scroll to.
+        width: "fit-content",
+        minWidth: "100%",
         position: "relative",
         height: `${virtualizer.getTotalSize()}px`,
       }}
@@ -1595,7 +1651,6 @@ const ContinuousList = forwardRef<
               doc={doc}
               pageNumber={pageNumber}
               renderScale={pageScaleFor(pageNumber)}
-              oversample={oversample}
               native={pageNativeRef.current.get(pageNumber)}
               findQuery={findQuery}
               currentOccurrence={
@@ -1626,7 +1681,6 @@ function PageCanvas({
   doc,
   pageNumber,
   renderScale,
-  oversample,
   native,
   findQuery,
   currentOccurrence,
@@ -1645,11 +1699,6 @@ function PageCanvas({
   doc: PDFDocumentProxy;
   pageNumber: number;
   renderScale: number;
-  /** Pixel-buffer multiplier on top of dpr. CSS box stays at
-   *  renderScale × native; the extra pixels are spent on detail
-   *  visible only when the wrapper is CSS-scaled (pinch zoom).
-   *  Default 1 means "no oversample". */
-  oversample: number;
   native?: NativeViewport;
   findQuery: string;
   currentOccurrence: number | null;
@@ -1786,7 +1835,7 @@ function PageCanvas({
 
       const base = pdfPage.getViewport({ scale: renderScale });
       const pixelMultiplier = clampPixelMultiplier(
-        dpr * oversample,
+        dpr,
         base.width,
         base.height,
       );
@@ -1856,7 +1905,7 @@ function PageCanvas({
         canvas.height = 0;
       }
     };
-  }, [doc, pageNumber, renderScale, oversample, deferWork, queue, pageRef]);
+  }, [doc, pageNumber, renderScale, deferWork, queue, pageRef]);
 
   // Capture the user's text selection. Listens at the document
   // level for `selectionchange` (debounced ~180ms) so we catch the
