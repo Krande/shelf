@@ -56,6 +56,7 @@ import { PREF_READER_FIT, PREF_READER_MODE, usePref } from "@/auth/prefs";
 import { useDebounce } from "@/hooks/useDebounce";
 import { usePinchZoom } from "@/hooks/usePinchZoom";
 import { pageLinks, type PageLink } from "@/lib/pdfLinks";
+import { clampPixelMultiplier } from "@/lib/canvasBudget";
 import OutlinePanel from "@/components/library/OutlinePanel";
 import ProcessingMenu from "@/components/reader/ProcessingMenu";
 import VersionPicker from "@/components/reader/VersionPicker";
@@ -70,7 +71,7 @@ const ESTIMATE_PAGE_HEIGHT = 1100;
 // 4 keeps a 1 MP base page under ~16 MP which is workable for a
 // few mounted virtual rows. The user sees diminishing returns past
 // the device's effective DPI anyway.
-const MAX_OVERSAMPLE = 4;
+const MAX_OVERSAMPLE = 2;
 // Wait this long after the last pinch-scale change before kicking
 // off the higher-resolution re-render. Avoids re-rendering during
 // the gesture itself — pdfjs render is CPU-heavy.
@@ -330,11 +331,20 @@ export default function ReaderPage() {
   }, [doc, findQuery]);
 
   // Sync ?page= so reload + back/forward restore the position.
+  //
+  // Trailing-debounced: `page` follows the scroll, so a drag through a
+  // few hundred pages would otherwise be a few hundred history
+  // mutations in a couple of seconds. Chrome and Firefox both throttle
+  // same-document history writes and start dropping them, and the URL
+  // only has to be right once the scrolling stops.
   useEffect(() => {
-    const url = new URL(window.location.href);
-    if (page > 1) url.searchParams.set("page", String(page));
-    else url.searchParams.delete("page");
-    window.history.replaceState(null, "", url.toString());
+    const t = setTimeout(() => {
+      const url = new URL(window.location.href);
+      if (page > 1) url.searchParams.set("page", String(page));
+      else url.searchParams.delete("page");
+      window.history.replaceState(null, "", url.toString());
+    }, 300);
+    return () => clearTimeout(t);
   }, [page]);
 
   // Scroll the continuous virtualizer to whatever page= the URL is
@@ -518,6 +528,10 @@ export default function ReaderPage() {
   // pan-y so native vertical scroll works. Disabled while in
   // select mode so finger drags select text instead of pinching.
   const pinch = usePinchZoom(scrollRef, { enabled: !selectMode });
+  // Pulled out because `pinch` is a fresh object every gesture frame;
+  // resetZoom is useCallback'd and stable, so callbacks that only need
+  // it keep their identity.
+  const { resetZoom } = pinch;
   // Mirror pinch.scale into a ref so the find-highlight effect (in
   // PageCanvas) can read the current value without listing
   // pinch.scale as a dependency. We don't want the effect to re-run
@@ -577,17 +591,21 @@ export default function ReaderPage() {
     },
   });
 
+  const mutateHighlight = createHighlight.mutate;
   const onCreateHighlight = useCallback(
     (pageNumber: number, rects: Rect[], text: string) => {
       // Drop the OS selection so the floating button doesn't linger
       // and so a re-tap on the same word doesn't show stale state.
       window.getSelection()?.removeAllRanges();
-      createHighlight.mutate({ pageNumber, rects, text });
+      mutateHighlight({ pageNumber, rects, text });
       // Exit mobile select-mode after a successful highlight so the
       // user can scroll/pinch again without an extra tap.
       setSelectMode(false);
     },
-    [createHighlight],
+    // `.mutate` is stable across renders; the mutation object it hangs
+    // off is not, and depending on that rebuilt this callback -- and
+    // re-rendered every mounted page -- on every render of the reader.
+    [mutateHighlight],
   );
 
   const removeAnnotation = useMutation({
@@ -635,7 +653,7 @@ export default function ReaderPage() {
       // Reset pinch first — when zoomed the visible viewport is
       // driven by translate, not scrollTop, so scrollToPage won't
       // bring the target into view.
-      pinch.resetZoom();
+      resetZoom();
       setPage(n);
       if (mode === "continuous") {
         // Defer past the pinch-reset / setPage render flush so the
@@ -648,7 +666,9 @@ export default function ReaderPage() {
         }, 0);
       }
     },
-    [pinch, mode],
+    // resetZoom is useCallback'd in the hook; `pinch` itself is a new
+    // object every gesture frame.
+    [resetZoom, mode],
   );
 
   // The annotation to ring, if any. Set by a deep link or by clicking
@@ -730,6 +750,10 @@ export default function ReaderPage() {
   // text and vector strokes turn crisp again. While the user is
   // actively pinching, pinch.scale changes per frame, the timer
   // keeps resetting, and pdfjs stays out of the way.
+  // Which find match the view last scrolled to. Shared by every page
+  // so a remount does not re-scroll to it; see PageCanvas.
+  const lastScrolledTo = useRef<string | null>(null);
+
   const [oversample, setOversample] = useState(1);
   useEffect(() => {
     const target = Math.max(1, Math.min(MAX_OVERSAMPLE, pinch.scale));
@@ -1107,6 +1131,7 @@ export default function ReaderPage() {
               focusedAnnotationId={focusedAnnotationId}
               debugText={debugText}
               pinchScaleRef={pinchScaleRef}
+              lastScrolledTo={lastScrolledTo}
               onCreateHighlight={onCreateHighlight}
               onFollowLink={goToPage}
             />
@@ -1134,6 +1159,7 @@ export default function ReaderPage() {
             focusedAnnotationId={focusedAnnotationId}
             debugText={debugText}
             pinchScaleRef={pinchScaleRef}
+            lastScrolledTo={lastScrolledTo}
             onCreateHighlight={onCreateHighlight}
             onFollowLink={goToPage}
             onVisiblePageChange={setPage}
@@ -1391,6 +1417,7 @@ const ContinuousList = forwardRef<
     focusedAnnotationId: string | null;
     debugText: boolean;
     pinchScaleRef: React.RefObject<number>;
+    lastScrolledTo: React.RefObject<string | null>;
     onCreateHighlight: (
       pageNumber: number,
       rects: Rect[],
@@ -1415,6 +1442,7 @@ const ContinuousList = forwardRef<
     focusedAnnotationId,
     debugText,
     pinchScaleRef,
+    lastScrolledTo,
     onCreateHighlight,
     onFollowLink,
     onVisiblePageChange,
@@ -1517,7 +1545,9 @@ const ContinuousList = forwardRef<
               annotations={annotationsByPage.get(pageNumber) ?? []}
               focusedAnnotationId={focusedAnnotationId}
               debugText={debugText}
+              deferWork={virtualizer.isScrolling}
               pinchScaleRef={pinchScaleRef}
+              lastScrolledTo={lastScrolledTo}
               onCreateHighlight={onCreateHighlight}
               onFollowLink={onFollowLink}
             />
@@ -1539,7 +1569,9 @@ function PageCanvas({
   annotations,
   focusedAnnotationId,
   debugText,
+  deferWork = false,
   pinchScaleRef,
+  lastScrolledTo,
   onCreateHighlight,
   onFollowLink,
 }: {
@@ -1557,7 +1589,14 @@ function PageCanvas({
   annotations: Annotation[];
   focusedAnnotationId: string | null;
   debugText: boolean;
+  /** The list is moving. Page work waits until it stops, so a drag
+   *  does not queue work for every page it passes. */
+  deferWork?: boolean;
   pinchScaleRef: React.RefObject<number>;
+  /** Which match the reader last scrolled to, shared across pages: a
+   *  virtualized list remounts them constantly, and a per-page ref
+   *  would forget and scroll again on every remount. */
+  lastScrolledTo: React.RefObject<string | null>;
   onCreateHighlight: (
     pageNumber: number,
     rects: Rect[],
@@ -1570,9 +1609,10 @@ function PageCanvas({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const textLayerRef = useRef<HTMLDivElement>(null);
   const [textLayerVersion, setTextLayerVersion] = useState(0);
-  // Which match this page last scrolled to, so a re-render does not
-  // scroll to it again.
-  const lastScrolledTo = useRef<string | null>(null);
+  // An unpainted canvas is a blank box, which in the dark theme reads
+  // as a failure rather than as "not yet". Tracked so the placeholder
+  // can say which page it is and that it is coming.
+  const [painted, setPainted] = useState(false);
 
   const cssW = native ? native.width * renderScale : undefined;
   const cssH = native ? native.height * renderScale : undefined;
@@ -1593,19 +1633,27 @@ function PageCanvas({
   // zoom change re-lays-out the same links instead of re-reading them.
   const [links, setLinks] = useState<PageLink[]>([]);
   useEffect(() => {
+    if (deferWork) return;
     let cancelled = false;
     (async () => {
       const pdfPage = await doc.getPage(pageNumber);
-      if (cancelled) return;
-      const found = await pageLinks(doc, pdfPage);
-      if (!cancelled) setLinks(found);
+      try {
+        if (cancelled) return;
+        const found = await pageLinks(doc, pdfPage);
+        if (!cancelled) setLinks(found);
+      } finally {
+        // Always, including the cancelled path. getPage resolves after
+        // the cleanup has run, so without this every page scrolled past
+        // during a drag keeps its worker-side resources.
+        pdfPage.cleanup();
+      }
     })().catch(() => {
       // A page whose annotations won't parse just has no links.
     });
     return () => {
       cancelled = true;
     };
-  }, [doc, pageNumber]);
+  }, [doc, pageNumber, deferWork]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -1613,10 +1661,12 @@ function PageCanvas({
     const textLayer = textLayerRef.current;
     if (!canvas || !wrapper || !textLayer) return;
     if (renderScale <= 0) return;
+    if (deferWork) return;
 
     let cancelled = false;
     let task: RenderTask | null = null;
     let pdfPage: PDFPageProxy | null = null;
+    let textLayerTask: { cancel: () => void } | null = null;
 
     (async () => {
       pdfPage = await doc.getPage(pageNumber);
@@ -1628,21 +1678,35 @@ function PageCanvas({
       // crisp text". The CSS box stays at renderScale × native, so
       // the wrapper layout (and thus the virtualizer geometry) is
       // unaffected.
-      const pixelMultiplier = dpr * oversample;
+      //
+      // Clamped, because all three multiply: renderScale is the
+      // fit-width scale (~2 on a desktop container), dpr is up to 2,
+      // and oversample up to MAX_OVERSAMPLE. Unclamped that reached
+      // canvases of hundreds of megapixels -- past what a browser will
+      // back, and a canvas it cannot back hands you a valid context
+      // and paints nothing, which is the black page.
+      const base = pdfPage.getViewport({ scale: renderScale });
+      const pixelMultiplier = clampPixelMultiplier(
+        dpr * oversample,
+        base.width,
+        base.height,
+      );
       const viewport = pdfPage.getViewport({
         scale: renderScale * pixelMultiplier,
       });
 
-      const offscreen = document.createElement("canvas");
-      offscreen.width = viewport.width;
-      offscreen.height = viewport.height;
-      const offCtx = offscreen.getContext("2d");
-      if (!offCtx) return;
-      task = pdfPage.render({
-        canvasContext: offCtx,
-        viewport,
-        canvas: offscreen,
-      });
+      // Rendered straight to the visible canvas. The offscreen copy
+      // that used to sit in front of it doubled the allocation for
+      // every page, which during a fast scroll is the difference
+      // between tight and over budget.
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      canvas.style.width = `${viewport.width / pixelMultiplier}px`;
+      canvas.style.height = `${viewport.height / pixelMultiplier}px`;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      setPainted(false);
+      task = pdfPage.render({ canvasContext: ctx, viewport, canvas });
       try {
         await task.promise;
       } catch (e) {
@@ -1650,13 +1714,7 @@ function PageCanvas({
         return;
       }
       if (cancelled) return;
-
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-      canvas.style.width = `${viewport.width / pixelMultiplier}px`;
-      canvas.style.height = `${viewport.height / pixelMultiplier}px`;
-      const ctx = canvas.getContext("2d");
-      ctx?.drawImage(offscreen, 0, 0);
+      setPainted(true);
 
       // pdfjs reads `--total-scale-factor` from the container (or
       // an ancestor) when computing per-span font-size + transforms.
@@ -1674,6 +1732,7 @@ function PageCanvas({
         container: textLayer,
         viewport: cssViewport,
       });
+      textLayerTask = layer;
       try {
         await layer.render();
         if (!cancelled) setTextLayerVersion((v) => v + 1);
@@ -1687,9 +1746,18 @@ function PageCanvas({
     return () => {
       cancelled = true;
       task?.cancel();
+      // Otherwise streamTextContent keeps flowing for a page nobody is
+      // looking at any more.
+      textLayerTask?.cancel();
       pdfPage?.cleanup();
+      // Drop the backing store now rather than waiting for GC, which
+      // is slow to reclaim off-heap canvas memory.
+      if (canvas.width > 0) {
+        canvas.width = 0;
+        canvas.height = 0;
+      }
     };
-  }, [doc, pageNumber, renderScale, oversample]);
+  }, [doc, pageNumber, renderScale, oversample, deferWork]);
 
   // Capture the user's text selection. Listens at the document
   // level for `selectionchange` (debounced ~180ms) so we catch the
@@ -1897,6 +1965,18 @@ function PageCanvas({
       }}
     >
       <canvas ref={canvasRef} className="absolute inset-0" />
+      {!painted && (
+        <div
+          className="absolute inset-0 flex items-center justify-center gap-2 text-xs"
+          style={{
+            backgroundColor: "var(--color-surface)",
+            color: "var(--color-text-muted)",
+          }}
+        >
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          Page {pageNumber}
+        </div>
+      )}
       {/*
         Both pdfjs's `.textLayer` styles (font/transform vars,
         per-span sizing) and our shelf-specific positioning kick in
