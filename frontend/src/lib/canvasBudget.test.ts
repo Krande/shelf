@@ -29,10 +29,19 @@ describe("clampPixelMultiplier", () => {
     expect(4000 * m).toBeLessThanOrEqual(8192);
   });
 
-  it("never drops below 1", () => {
-    // A page already past the caps at its CSS size still has to render;
-    // soft beats blank.
-    expect(clampPixelMultiplier(2, 20000, 20000)).toBe(1);
+  it("goes below 1 rather than over the cap", () => {
+    // Under layout zoom the CSS box is itself scaled, so a page can be
+    // past the caps at its own size. Rendering smaller and letting the
+    // browser upscale is soft; refusing to go below 1 hands back a
+    // canvas the browser will not back, which paints nothing.
+    const m = clampPixelMultiplier(2, 20000, 20000);
+    expect(m).toBeLessThan(1);
+    expect(20000 * m).toBeLessThanOrEqual(8192);
+  });
+
+  it("still never reaches zero", () => {
+    // A zero-sized canvas is the blank page by another route.
+    expect(clampPixelMultiplier(2, 1e9, 1e9)).toBeGreaterThan(0);
   });
 
   it("is defensive about a page with no size yet", () => {
@@ -55,8 +64,11 @@ describe("CanvasBudget", () => {
     const b = new CanvasBudget();
     // One page claiming the whole budget.
     b.set("p1", TOTAL_PIXEL_BUDGET);
-    // The next has nothing to spend, so it renders at its CSS size.
-    expect(b.allow("p2", 4, 2000, 2000)).toBe(1);
+    // The next has nothing to spend, so it renders as small as it is
+    // allowed to — but still renders.
+    const m = b.allow("p2", 4, 2000, 2000);
+    expect(m).toBeLessThan(1);
+    expect(m).toBeGreaterThan(0);
   });
 
   it("does not count a page as competing with itself", () => {
@@ -70,7 +82,7 @@ describe("CanvasBudget", () => {
   it("frees the budget when a page unmounts", () => {
     const b = new CanvasBudget();
     b.set("p1", TOTAL_PIXEL_BUDGET);
-    expect(b.allow("p2", 4, 2000, 2000)).toBe(1);
+    expect(b.allow("p2", 4, 2000, 2000)).toBeLessThan(1);
     b.release("p1");
     expect(b.allow("p2", 4, 2000, 2000)).toBeGreaterThan(1);
   });

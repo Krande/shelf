@@ -322,6 +322,10 @@ export default function ReaderPage() {
     }
     let cancelled = false;
     setFindScanning(true);
+    // Before the first partial publish, or the new list is indexed with
+    // the old query's match and the reader is yanked to whatever that
+    // happens to point at.
+    setCurrentMatch(0);
 
     (async () => {
       const found: Array<{ page: number; occurrence: number }> = [];
@@ -592,6 +596,17 @@ export default function ReaderPage() {
    * Doing it here would run before that and use the old geometry, which
    * is what made zooming out scroll down the document.
    */
+  // Single-page mode has no virtualizer to correct, but it still has to
+  // record the true page size: that height is the origin the
+  // selection-to-PDF conversion flips around, so a stale one stores
+  // highlights at the wrong coordinates everywhere else.
+  const applyNativeSizeSingle = useCallback(
+    (n: number, size: NativeViewport) => {
+      pageNativeRef.current.set(n, size);
+    },
+    [],
+  );
+
   const pendingAnchor = useRef<ScrollAnchor | null>(null);
   const applyZoom = useCallback((next: number) => {
     pendingAnchor.current = continuousRef.current?.captureAnchor() ?? null;
@@ -1176,7 +1191,11 @@ export default function ReaderPage() {
           // `none` only while drag-select owns the touches; otherwise
           // the browser scrolls both ways and the pinch handler takes
           // two-finger gestures via preventDefault.
-          touchAction: selectMode ? "none" : "auto",
+          // `pan-x pan-y` keeps native one-finger scrolling while
+          // reserving multi-finger gestures for the pinch handler;
+          // `auto` let the compositor claim them, which made
+          // preventDefault a no-op and pinch-to-zoom dead.
+          touchAction: selectMode ? "none" : "pan-x pan-y",
           overscrollBehavior: "contain",
           // Hold the scrollbar's space open. Without it, zooming past
           // the viewport width brings a scrollbar in, which shrinks the
@@ -1218,6 +1237,7 @@ export default function ReaderPage() {
               annotations={annotationsByPage.get(page) ?? []}
               focusedAnnotationId={focusedAnnotationId}
               debugText={debugText}
+              onNativeSize={applyNativeSizeSingle}
               queue={renderQueue}
               budget={canvasBudget}
               pageRef={pageRef}
@@ -1690,7 +1710,11 @@ const ContinuousList = forwardRef<
               transform: `translateY(${vi.start}px)`,
               paddingBottom: `${PAGE_GAP}px`,
               display: "flex",
-              justifyContent: "center",
+              // `safe`: centred while it fits, start-aligned when it
+              // does not. Plain centring pushes the inline-start
+              // overflow outside the scrollable region, so at any zoom
+              // past fit the left of every page was unreachable.
+              justifyContent: "safe center",
             }}
           >
             <PageCanvas
@@ -1707,7 +1731,6 @@ const ContinuousList = forwardRef<
               annotations={annotationsByPage.get(pageNumber) ?? []}
               focusedAnnotationId={focusedAnnotationId}
               debugText={debugText}
-              deferWork={virtualizer.isScrolling}
               onNativeSize={applyNativeSize}
               queue={queue}
               budget={budget}
@@ -1734,7 +1757,6 @@ function PageCanvas({
   annotations,
   focusedAnnotationId,
   debugText,
-  deferWork = false,
   queue,
   budget,
   pageRef,
@@ -1753,9 +1775,6 @@ function PageCanvas({
   annotations: Annotation[];
   focusedAnnotationId: string | null;
   debugText: boolean;
-  /** The list is moving. Page work waits until it stops, so a drag
-   *  does not queue work for every page it passes. */
-  deferWork?: boolean;
   /** Serialises rendering across pages. */
   queue: RenderQueue;
   /** Shared pixel ceiling across every rendered page. */
@@ -1812,7 +1831,6 @@ function PageCanvas({
   // zoom change re-lays-out the same links instead of re-reading them.
   const [links, setLinks] = useState<PageLink[]>([]);
   useEffect(() => {
-    if (deferWork) return;
     let cancelled = false;
     (async () => {
       const pdfPage = await doc.getPage(pageNumber);
@@ -1832,7 +1850,7 @@ function PageCanvas({
     return () => {
       cancelled = true;
     };
-  }, [doc, pageNumber, deferWork]);
+  }, [doc, pageNumber]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -1840,7 +1858,6 @@ function PageCanvas({
     const textLayer = textLayerRef.current;
     if (!canvas || !wrapper || !textLayer) return;
     if (renderScale <= 0) return;
-    if (deferWork) return;
 
     let cancelled = false;
     let task: RenderTask | null = null;
@@ -1856,8 +1873,12 @@ function PageCanvas({
       if (cancelled) return;
       const wantKey = `${pageNumber}@${renderScale.toFixed(4)}`;
       if (drawnKey.current === wantKey) return;
-      pdfPage = await doc.getPage(pageNumber);
-      if (cancelled || !pdfPage) return;
+      // getPage resolves after the cleanup has run, so the cleanup's
+      // own pdfPage?.cleanup() sees null. Released here instead.
+      const opened = await doc.getPage(pageNumber);
+      pdfPage = opened;
+      try {
+      if (cancelled) return;
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       // pixelMultiplier puts more detail in the canvas's pixel
       // buffer than its CSS box demands. dpr handles HiDPI;
@@ -1959,9 +1980,21 @@ function PageCanvas({
       textLayerTask = layer;
       try {
         await layer.render();
-        if (!cancelled) setTextLayerVersion((v) => v + 1);
+        if (!cancelled) {
+          // Only now is this page really drawn. Claiming it after the
+          // canvas but before the text layer meant a re-run in between
+          // was skipped by the guard, leaving the page with no text
+          // layer at all -- no selection, no find highlights, and no
+          // sign anything was wrong.
+          drawnKey.current = wantKey;
+          setTextLayerVersion((v) => v + 1);
+        }
       } catch {
         // selection layer is best-effort
+      }
+      } finally {
+        opened.cleanup();
+        pdfPage = null;
       }
       },
     );
@@ -1975,7 +2008,7 @@ function PageCanvas({
       textLayerTask?.cancel();
       pdfPage?.cleanup();
     };
-  }, [doc, pageNumber, renderScale, deferWork, queue, budget, pageRef]);
+  }, [doc, pageNumber, renderScale, native, queue, budget, pageRef]);
 
   // Release the canvas when the page really goes away. Deliberately not
   // in the render effect's cleanup: that runs whenever its inputs
@@ -2207,11 +2240,8 @@ function PageCanvas({
       <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
       {!painted && (
         <div
-          className="absolute inset-0 flex items-center justify-center gap-2 text-xs"
-          style={{
-            backgroundColor: "var(--color-surface)",
-            color: "var(--color-text-muted)",
-          }}
+          className="pointer-events-none absolute inset-0 flex items-center justify-center gap-2 text-xs"
+          style={{ color: "var(--color-text-muted)" }}
         >
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
           Page {pageNumber}

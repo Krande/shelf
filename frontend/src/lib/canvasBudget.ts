@@ -9,6 +9,13 @@
  */
 const MAX_CANVAS_SIDE = 8192;
 const MAX_CANVAS_PIXELS = 20e6;
+/**
+ * Floor on the multiplier. Not 1 — under layout zoom the CSS box is
+ * itself scaled, so a page legitimately renders smaller than its box
+ * and the browser upscales it. But not 0 either: that is a zero-sized
+ * canvas, which is the blank page this whole file exists to prevent.
+ */
+const MIN_MULTIPLIER = 0.1;
 
 export function clampPixelMultiplier(
   wanted: number,
@@ -21,9 +28,14 @@ export function clampPixelMultiplier(
     MAX_CANVAS_SIDE / cssHeight,
   );
   const byArea = Math.sqrt(MAX_CANVAS_PIXELS / (cssWidth * cssHeight));
-  // Never below 1: at the floor the page is rendered at its CSS size,
-  // which is soft on a HiDPI screen but always drawable.
-  return Math.max(1, Math.min(wanted, bySide, byArea));
+  // Deliberately allowed below 1. Under layout zoom the CSS box is
+  // itself native x fit x zoom, so at a high zoom on a wide window the
+  // box alone is past what a browser will back -- a floor of 1 could
+  // only shave the dpr contribution and would hand back a canvas that
+  // paints nothing. Below 1 the canvas is smaller than its box and the
+  // browser upscales: soft, which is what pdf.js's maxCanvasPixels
+  // does, and always visible.
+  return Math.max(MIN_MULTIPLIER, Math.min(wanted, bySide, byArea));
 }
 
 
@@ -69,7 +81,10 @@ export class CanvasBudget {
     const others = this.used - (this.held.get(key) ?? 0);
     const spare = Math.max(0, TOTAL_PIXEL_BUDGET - others);
     const byBudget = Math.sqrt(spare / area);
-    return Math.max(1, Math.min(wanted, byBudget));
+    // Also allowed below 1, for the same reason: the budget cannot be
+    // enforced by a function that can never return less than a full
+    // resolution render.
+    return Math.max(MIN_MULTIPLIER, Math.min(wanted, byBudget));
   }
 
   /** Record what a page ended up holding. */
