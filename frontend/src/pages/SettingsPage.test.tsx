@@ -106,6 +106,15 @@ describe("tab content", () => {
     expect(screen.getByText("Storage cleanup")).toBeInTheDocument();
   });
 
+  it("renders the options tab", () => {
+    renderSettings("/settings/options");
+    expect(
+      screen.getByRole("spinbutton", {
+        name: /expand subcollections below this many documents/i,
+      }),
+    ).toHaveValue(5);
+  });
+
   it("renders the tokens tab", () => {
     renderSettings("/settings/tokens");
     expect(screen.getByTestId("token-section")).toBeInTheDocument();

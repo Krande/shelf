@@ -21,6 +21,7 @@ import {
   ChevronDown,
   ChevronRight,
   Download,
+  FolderClosed,
   Loader2,
   PanelLeftClose,
   PanelLeftOpen,
@@ -32,6 +33,11 @@ import {
   X,
 } from "lucide-react";
 import { canEdit, fetchMySpaces, type Space } from "@/api/spaces";
+import {
+  PREF_SUBCOLLECTION_AUTO_EXPAND_BELOW,
+  usePref,
+} from "@/auth/prefs";
+import { buildSubcollectionGroups } from "@/lib/subcollections";
 import {
   ALL_SEARCH_SCOPES,
   createItem,
@@ -478,12 +484,19 @@ export default function LibraryPage() {
       (collections.data ?? []).some((c) => c.parent_id === openCollection),
     [collections.data, openCollection],
   );
-  const [subOpen, setSubOpen] = useState(false);
-  // Collapsed again whenever the rail selection changes — the previous
-  // folder's expansion says nothing about this one.
+  // Expanded by default when the folder holds little of its own — there
+  // is room to show what is below it, and an empty folder that only
+  // says "no items" while its subcollections hold the documents is the
+  // case this whole section exists for. The override is what a click
+  // sets, and it is dropped when the rail selection changes because the
+  // previous folder's expansion says nothing about this one.
+  const [autoExpandBelow] = usePref(PREF_SUBCOLLECTION_AUTO_EXPAND_BELOW);
+  const [subOpenOverride, setSubOpenOverride] = useState<boolean | null>(null);
   useEffect(() => {
-    setSubOpen(false);
+    setSubOpenOverride(null);
   }, [openCollection]);
+  const subOpen =
+    subOpenOverride ?? (itemsTotal ?? 0) < autoExpandBelow;
 
   const subItemsQuery = useQuery({
     queryKey: ["items", slug, "subcollections", openCollection, status],
@@ -647,7 +660,12 @@ export default function LibraryPage() {
                 count: groupedItems[s].length,
               },
               ...groupedItems[s].flatMap((it) => {
-                const row = { kind: "row" as const, item: it, scope: s };
+                const row = {
+                  kind: "row" as const,
+                  item: it,
+                  scope: s,
+                  rowKey: it.id,
+                };
                 // Only the fulltext bucket gets the expansion. Other
                 // groups already display their match in-band (title /
                 // creators / etc.).
@@ -662,27 +680,60 @@ export default function LibraryPage() {
             kind: "row" as const,
             item: it,
             scope: null,
+            rowKey: it.id,
           })),
     [groupedItems, flatItems, expandedFulltextIds],
   );
 
-  // The subcollection section, appended below the folder's own rows.
-  // Its rows are ordinary rows, so selection, ctrl+click and the arrow
-  // keys reach them without knowing they came from somewhere else.
+  // The subcollection tree, as the rail draws it. Built in lib so the
+  // pruning rules are testable without a rendered page.
+  const subGroups = useMemo(
+    () =>
+      openCollection
+        ? buildSubcollectionGroups(
+            openCollection,
+            collections.data ?? [],
+            subItems,
+          )
+        : [],
+    [collections.data, subItems, openCollection],
+  );
+
+  // The section, appended below the folder's own rows. Its rows are
+  // ordinary rows, so selection, ctrl+click and the arrow keys reach
+  // them without knowing they came from somewhere else.
   const listEntries = useMemo(() => {
     if (!hasSubcollections || subTotal === 0) return ownEntries;
     return [
       ...ownEntries,
       { kind: "subheader" as const, count: subTotal, loaded: subItems.length },
       ...(subOpen
-        ? subItems.map((it) => ({
-            kind: "row" as const,
-            item: it,
-            scope: null,
-          }))
+        ? subGroups.flatMap((g) => [
+            {
+              kind: "subgroup" as const,
+              collection: g.collection,
+              depth: g.depth,
+              count: g.items.length,
+            },
+            ...g.items.map((it) => ({
+              kind: "row" as const,
+              item: it,
+              scope: null,
+              // The same document can sit under two subcollections, so
+              // the item id alone is not unique within this listing.
+              rowKey: `${g.collection.id}:${it.id}`,
+            })),
+          ])
         : []),
     ];
-  }, [ownEntries, hasSubcollections, subTotal, subItems, subOpen]);
+  }, [
+    ownEntries,
+    hasSubcollections,
+    subTotal,
+    subItems.length,
+    subGroups,
+    subOpen,
+  ]);
 
   /** Just the item rows, in painted order — what the arrow keys walk. */
   const navigableItems = useMemo(
@@ -1741,7 +1792,7 @@ export default function LibraryPage() {
                             <td colSpan={6} className="px-0 py-0">
                               <button
                                 type="button"
-                                onClick={() => setSubOpen((v) => !v)}
+                                onClick={() => setSubOpenOverride(!subOpen)}
                                 aria-expanded={subOpen}
                                 className="flex w-full items-center gap-1.5 border-t px-3 py-2 text-left text-xs uppercase tracking-widest hover:opacity-80"
                                 style={{
@@ -1762,6 +1813,26 @@ export default function LibraryPage() {
                                   </span>
                                 )}
                               </button>
+                            </td>
+                          </tr>
+                        );
+                      }
+                      if (entry.kind === "subgroup") {
+                        return (
+                          <tr key={`group-${entry.collection.id}`}>
+                            <td
+                              colSpan={6}
+                              className="px-3 py-1.5 text-xs"
+                              style={{
+                                color: "var(--color-text-muted)",
+                                paddingLeft: `${entry.depth * 16 + 28}px`,
+                              }}
+                            >
+                              <span className="inline-flex items-center gap-1.5">
+                                <FolderClosed className="h-3.5 w-3.5" />
+                                {entry.collection.name}
+                                {entry.count > 0 && ` (${entry.count})`}
+                              </span>
                             </td>
                           </tr>
                         );
@@ -1806,7 +1877,7 @@ export default function LibraryPage() {
                       const isExpanded = expandedFulltextIds.has(it.id);
                       return (
                         <tr
-                          key={it.id}
+                          key={entry.rowKey ?? it.id}
                           data-item-row={it.id}
                           draggable
                           onDragStart={(e) => {

@@ -13,6 +13,7 @@ import {
   KeyRound,
   Library,
   Palette,
+  SlidersHorizontal,
   UserRound,
   Users,
 } from "lucide-react";
@@ -20,6 +21,7 @@ import AppShell from "@/components/layout/AppShell";
 import AccountSection from "@/components/settings/AccountSection";
 import AdminSection from "@/components/settings/AdminSection";
 import AppearanceSection from "@/components/settings/AppearanceSection";
+import OptionsSection from "@/components/settings/OptionsSection";
 import ExtractionSection from "@/components/settings/ExtractionSection";
 import ProcessingSection from "@/components/settings/ProcessingSection";
 import SpacesSection from "@/components/settings/SpacesSection";
@@ -31,6 +33,12 @@ const TABS = [
   { id: "account", label: "Account", Icon: UserRound, adminOnly: false },
   { id: "spaces", label: "Spaces", Icon: Library, adminOnly: false },
   { id: "appearance", label: "Appearance", Icon: Palette, adminOnly: false },
+  {
+    id: "options",
+    label: "Options",
+    Icon: SlidersHorizontal,
+    adminOnly: false,
+  },
   { id: "documents", label: "Documents", Icon: FileText, adminOnly: false },
   { id: "tokens", label: "API tokens", Icon: KeyRound, adminOnly: false },
   // Labelled for what it holds, like every other tab, rather than for
@@ -103,6 +111,7 @@ export default function SettingsPage() {
         {active.id === "account" && <AccountSection user={me} />}
         {active.id === "spaces" && <SpacesSection user={me} />}
         {active.id === "appearance" && <AppearanceSection />}
+        {active.id === "options" && <OptionsSection />}
         {active.id === "documents" && (
           <>
             <ExtractionSection />
