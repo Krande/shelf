@@ -59,7 +59,16 @@ import {
   type NativeViewport,
 } from "@/components/reader/types";
 import { PageThumbnails } from "@/lib/pageThumbnails";
-import OutlinePanel from "@/components/library/OutlinePanel";
+import { ReaderSidebar } from "@/components/reader/ReaderSidebar";
+import type { LayerGroup } from "@/components/reader/LayersPanel";
+
+/**
+ * pdfjs's optional-content config, taken from the method that returns
+ * it — the class itself is not exported from the package root.
+ */
+type OcConfig = Awaited<
+  ReturnType<PDFDocumentProxy["getOptionalContentConfig"]>
+>;
 
 /**
  * CSS pixels per PDF point at pdf.js's scale 1, which is what its
@@ -1010,6 +1019,57 @@ export default function ReaderPage() {
     [goToPage, isCoarsePointer],
   );
 
+  /**
+   * The PDF's layers, and the config the renderer draws them by.
+   *
+   * The config object is pdfjs's own and is mutated in place by
+   * setVisibility, so it cannot be React state — nothing about it
+   * changes identity. `layerVersion` is what tells the pages to draw
+   * again, and it is part of each page's drawn-key so a toggle
+   * invalidates what is already on screen.
+   */
+  const ocConfigRef = useRef<OcConfig | null>(null);
+  const [layers, setLayers] = useState<LayerGroup[] | undefined>(undefined);
+  const [layerVersion, setLayerVersion] = useState(0);
+
+  useEffect(() => {
+    if (!doc) return;
+    let cancelled = false;
+    doc
+      .getOptionalContentConfig()
+      .then((config) => {
+        if (cancelled) return;
+        ocConfigRef.current = config;
+        // The config is iterable over [id, group]; there is no
+        // getGroups(), and getOrder() is about display order rather
+        // than membership.
+        setLayers(
+          [...config].map(([id, group]) => ({
+            id: String(id),
+            name:
+              (group as { name?: string }).name?.trim() || "Unnamed layer",
+            visible: (group as { visible?: boolean }).visible !== false,
+          })),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setLayers([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [doc]);
+
+  const toggleLayer = useCallback((id: string, visible: boolean) => {
+    const config = ocConfigRef.current;
+    if (!config) return;
+    config.setVisibility(id, visible);
+    setLayers((prev) =>
+      prev?.map((l) => (l.id === id ? { ...l, visible } : l)),
+    );
+    setLayerVersion((v) => v + 1);
+  }, []);
+
   // Which find match the view last scrolled to. Shared by every page
   // so a remount does not re-scroll to it; see PageCanvas.
   const lastScrolledTo = useRef<string | null>(null);
@@ -1161,11 +1221,17 @@ export default function ReaderPage() {
       <div className="flex min-h-0 flex-1">
         {/* Before the scroll area, so the drawer opens on the side the
             document is read from rather than against the far edge. */}
-        {outlineOpen && doc && (
-          <OutlinePanel
+        {outlineOpen && (
+          <ReaderSidebar
             doc={doc}
+            numPages={numPages}
+            currentPage={page}
             onJumpTo={jumpFromOutline}
             onClose={() => setOutlineOpen(false)}
+            queue={renderQueue}
+            thumbnails={thumbnails}
+            layers={layers}
+            onToggleLayer={toggleLayer}
           />
         )}
       <div
@@ -1243,6 +1309,8 @@ export default function ReaderPage() {
                 queue={renderQueue}
                 budget={canvasBudget}
                 thumbnails={thumbnails}
+                ocConfigRef={ocConfigRef}
+                layerVersion={layerVersion}
                 tool={tool}
                 onCreateNote={createNote}
                 pageRef={pageRef}
@@ -1278,6 +1346,8 @@ export default function ReaderPage() {
             queue={renderQueue}
             budget={canvasBudget}
             thumbnails={thumbnails}
+            ocConfigRef={ocConfigRef}
+            layerVersion={layerVersion}
             tool={tool}
             onCreateNote={createNote}
             pageRef={pageRef}

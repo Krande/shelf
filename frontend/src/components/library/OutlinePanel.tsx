@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ChevronDown, ChevronRight, X } from "lucide-react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import { destToPage, type PdfDest } from "@/lib/pdfLinks";
 
@@ -9,15 +9,19 @@ interface OutlineNode {
   items: OutlineNode[];
 }
 
+/**
+ * Loads a PDF's outline and renders it.
+ *
+ * The drawer around it lives in the reader's sidebar, which shows this
+ * alongside pages, attachments and layers.
+ */
 export default function OutlinePanel({
   doc,
   onJumpTo,
-  onClose,
 }: {
   doc: PDFDocumentProxy | null;
   /** Called with a 1-based page number when the user picks an entry. */
   onJumpTo: (page: number) => void;
-  onClose: () => void;
 }) {
   const [outline, setOutline] = useState<OutlineNode[] | null | undefined>(
     undefined,
@@ -41,53 +45,46 @@ export default function OutlinePanel({
   }, [doc]);
 
   return (
-    <aside
-      className="flex w-full flex-col border-l sm:w-72"
-      style={{
-        borderColor: "var(--color-border)",
-        backgroundColor: "var(--color-surface)",
-      }}
+    <OutlineBody outline={outline} doc={doc} onJumpTo={onJumpTo} />
+  );
+}
+
+/**
+ * Just the tree, without the drawer around it.
+ *
+ * The reader's sidebar supplies its own frame — a header with tabs and
+ * a resize handle — so the content has to be usable on its own.
+ */
+export function OutlineBody({
+  outline,
+  doc,
+  onJumpTo,
+}: {
+  outline: OutlineNode[] | null | undefined;
+  doc: PDFDocumentProxy | null;
+  onJumpTo: (page: number) => void;
+}) {
+  if (outline === undefined) {
+    return <OutlineNote>Loading…</OutlineNote>;
+  }
+  if (outline === null || outline.length === 0) {
+    return <OutlineNote>This PDF has no embedded outline.</OutlineNote>;
+  }
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto py-1">
+      <OutlineList nodes={outline} doc={doc!} onJumpTo={onJumpTo} depth={0} />
+    </div>
+  );
+}
+
+function OutlineNote({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      className="px-3 py-6 text-center text-xs"
+      style={{ color: "var(--color-text-muted)" }}
     >
-      <div
-        className="flex items-center justify-between border-b px-3 py-2"
-        style={{ borderColor: "var(--color-border)" }}
-      >
-        <span
-          className="text-xs font-medium"
-          style={{ color: "var(--color-text)" }}
-        >
-          Outline
-        </span>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Close outline"
-          className="rounded p-1 hover:opacity-70"
-          style={{ color: "var(--color-text-muted)" }}
-        >
-          <X className="h-3.5 w-3.5" />
-        </button>
-      </div>
-      {outline === undefined ? (
-        <div
-          className="px-3 py-6 text-center text-xs"
-          style={{ color: "var(--color-text-muted)" }}
-        >
-          Loading…
-        </div>
-      ) : outline === null || outline.length === 0 ? (
-        <div
-          className="px-3 py-6 text-center text-xs"
-          style={{ color: "var(--color-text-muted)" }}
-        >
-          This PDF has no embedded outline.
-        </div>
-      ) : (
-        <div className="min-h-0 flex-1 overflow-y-auto py-1">
-          <OutlineList nodes={outline} doc={doc!} onJumpTo={onJumpTo} depth={0} />
-        </div>
-      )}
-    </aside>
+      {children}
+    </div>
   );
 }
 

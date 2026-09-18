@@ -25,12 +25,22 @@ export function useResizableWidth(
   storageKey: string,
   {
     min = 280,
+    // Which side of the pane the handle is on. A pane to the handle's
+    // right grows as you drag left; one to its left grows as you drag
+    // right. Defaults to the first, which is what the library's detail
+    // pane has always been.
+    edge = "start",
     // A fraction of the viewport rather than a fixed number: the point
     // of dragging this out is usually to read a long abstract on a wide
     // screen, and a 640px cap would make that pointless at 2560px.
     maxFraction = 0.6,
     step = 24,
-  }: { min?: number; maxFraction?: number; step?: number } = {},
+  }: {
+    min?: number;
+    maxFraction?: number;
+    step?: number;
+    edge?: "start" | "end";
+  } = {},
 ): ResizableWidth {
   const [width, setWidth] = useState<number | null>(() => read(storageKey));
   const [dragging, setDragging] = useState(false);
@@ -65,9 +75,10 @@ export function useResizableWidth(
     (e: React.PointerEvent) => {
       e.preventDefault();
       const handle = e.currentTarget as HTMLElement;
-      // The pane sits to the *right* of the handle, so dragging left
-      // (decreasing clientX) makes it wider.
       const startX = e.clientX;
+      // +1 when the pane is to the handle's left, so dragging right
+      // widens it; -1 when it is to the right.
+      const sense = edge === "end" ? 1 : -1;
       const startWidth =
         latest.current ??
         handle.parentElement?.getBoundingClientRect().width ??
@@ -77,7 +88,7 @@ export function useResizableWidth(
       handle.setPointerCapture(e.pointerId);
 
       const move = (ev: PointerEvent) => {
-        commit(clamp(startWidth + (startX - ev.clientX)));
+        commit(clamp(startWidth + sense * (ev.clientX - startX)));
       };
       const up = (ev: PointerEvent) => {
         setDragging(false);
@@ -91,7 +102,7 @@ export function useResizableWidth(
       handle.addEventListener("pointerup", up);
       handle.addEventListener("pointercancel", up);
     },
-    [clamp, commit, min],
+    [clamp, commit, min, edge],
   );
 
   const onKeyDown = useCallback(
@@ -101,18 +112,19 @@ export function useResizableWidth(
         (e.currentTarget as HTMLElement).parentElement?.getBoundingClientRect()
           .width ??
         min;
+      const sense = edge === "end" ? 1 : -1;
       if (e.key === "ArrowLeft") {
         e.preventDefault();
-        commit(clamp(current + step));
+        commit(clamp(current - sense * step));
       } else if (e.key === "ArrowRight") {
         e.preventDefault();
-        commit(clamp(current - step));
+        commit(clamp(current + sense * step));
       } else if (e.key === "Home") {
         e.preventDefault();
         commit(null);
       }
     },
-    [clamp, commit, min, step],
+    [clamp, commit, min, step, edge],
   );
 
   // A width saved on a wide monitor can exceed the cap on a laptop.

@@ -27,6 +27,7 @@ import {
   SPREAD_GAP,
   type ContinuousListHandle,
   type NativeViewport,
+  type OcConfig,
   type ScrollAnchor,
 } from "./types";
 
@@ -49,6 +50,8 @@ export const ContinuousList = forwardRef<
     queue: RenderQueue;
     budget: CanvasBudget;
     thumbnails: PageThumbnails;
+    ocConfigRef: React.RefObject<OcConfig | null>;
+    layerVersion: number;
     tool: "highlight" | "text" | null;
     onCreateNote: (pageNumber: number, x: number, y: number) => void;
     pageRef: React.RefObject<number>;
@@ -80,6 +83,8 @@ export const ContinuousList = forwardRef<
     queue,
     budget,
     thumbnails,
+    ocConfigRef,
+    layerVersion,
     tool,
     onCreateNote,
     pageRef,
@@ -288,6 +293,8 @@ export const ContinuousList = forwardRef<
                 queue={queue}
                 budget={budget}
                 thumbnails={thumbnails}
+                ocConfigRef={ocConfigRef}
+                layerVersion={layerVersion}
                 tool={tool}
                 onCreateNote={onCreateNote}
                 pageRef={pageRef}

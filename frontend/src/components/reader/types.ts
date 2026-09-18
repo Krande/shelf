@@ -5,6 +5,17 @@
  * edited — without opening the page that renders it.
  */
 
+import type { PDFDocumentProxy } from "pdfjs-dist";
+
+/**
+ * pdfjs's optional-content config — which of a PDF's layers are drawn.
+ * Taken from the method that returns it, since the class is not
+ * exported from the package root.
+ */
+export type OcConfig = Awaited<
+  ReturnType<PDFDocumentProxy["getOptionalContentConfig"]>
+>;
+
 /** A page's size at scale 1, in PDF user-space points. */
 export interface NativeViewport {
   width: number;

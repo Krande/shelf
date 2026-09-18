@@ -15,7 +15,7 @@ import { pageLinks, type PageLink } from "@/lib/pdfLinks";
 import { CanvasBudget, clampPixelMultiplier } from "@/lib/canvasBudget";
 import { RenderQueue } from "@/lib/renderQueue";
 import { PageThumbnails } from "@/lib/pageThumbnails";
-import type { NativeViewport } from "./types";
+import type { NativeViewport, OcConfig } from "./types";
 
 export function PageCanvas({
   doc,
@@ -30,6 +30,8 @@ export function PageCanvas({
   queue,
   budget,
   thumbnails,
+  ocConfigRef,
+  layerVersion,
   tool,
   onCreateNote,
   pageRef,
@@ -54,6 +56,10 @@ export function PageCanvas({
   budget: CanvasBudget;
   /** Small bitmaps of pages already seen, to fill a page instantly. */
   thumbnails: PageThumbnails;
+  /** Which of the PDF's layers are drawn. Mutated in place by pdfjs, so
+   *  `layerVersion` is what says it changed. */
+  ocConfigRef: React.RefObject<OcConfig | null>;
+  layerVersion: number;
   /** The tool in hand, or null while reading. */
   tool: "highlight" | "text" | null;
   /** Leave a note at a point on a page, in PDF user-space. */
@@ -165,7 +171,7 @@ export function PageCanvas({
       () => Math.abs(pageNumber - pageRef.current),
       async () => {
       if (cancelled) return;
-      const wantKey = `${pageNumber}@${renderScale.toFixed(4)}`;
+      const wantKey = `${pageNumber}@${renderScale.toFixed(4)}@${layerVersion}`;
       if (drawnKey.current === wantKey) return;
       // getPage resolves after the cleanup has run, so the cleanup's
       // own pdfPage?.cleanup() sees null. Released here instead.
@@ -231,6 +237,16 @@ export function PageCanvas({
         canvasContext: offCtx,
         viewport,
         canvas: offscreen,
+        // Which layers are drawn. Omitted, pdfjs uses the document's
+        // own defaults, so a page rendered before a toggle would keep
+        // showing what was turned off.
+        ...(ocConfigRef.current
+          ? {
+              optionalContentConfigPromise: Promise.resolve(
+                ocConfigRef.current,
+              ),
+            }
+          : {}),
       });
 
       // Nothing on this page yet: show it building rather than holding
@@ -333,7 +349,18 @@ export function PageCanvas({
       textLayerTask?.cancel();
       pdfPage?.cleanup();
     };
-  }, [doc, pageNumber, renderScale, native, queue, budget, thumbnails, pageRef]);
+  }, [
+    doc,
+    pageNumber,
+    renderScale,
+    native,
+    layerVersion,
+    ocConfigRef,
+    queue,
+    budget,
+    thumbnails,
+    pageRef,
+  ]);
 
   // Release the canvas when the page really goes away. Deliberately not
   // in the render effect's cleanup: that runs whenever its inputs
