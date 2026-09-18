@@ -22,10 +22,8 @@ import {
   ChevronRight,
   Eye,
   EyeOff,
-  FileText,
   Highlighter,
   Link2,
-  List,
   ListTree,
   Loader2,
   Maximize,
@@ -59,7 +57,10 @@ import {
   PREF_READER_FIT,
   PREF_READER_MODE,
   PREF_READER_SPREAD,
+  readScrollMode,
+  SCROLL_MODE_LABELS,
   usePref,
+  type ScrollMode,
 } from "@/auth/prefs";
 import { useDebounce } from "@/hooks/useDebounce";
 import {
@@ -133,7 +134,12 @@ export default function ReaderPage() {
   );
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [mode, setMode] = usePref(PREF_READER_MODE);
+  const [storedMode, setStoredMode] = usePref(PREF_READER_MODE);
+  const scrollMode = readScrollMode(storedMode);
+  const setMode = setStoredMode;
+  // Page mode shows one band at a time; the rest scroll a list of them.
+  const paged = scrollMode === "page";
+  const horizontal = scrollMode === "horizontal";
   const [fit, setFit] = usePref(PREF_READER_FIT);
   // Diagnostic — colour the text-layer spans so we can see where
   // pdfjs places them vs the rendered glyphs.
@@ -427,7 +433,7 @@ export default function ReaderPage() {
   // reader would throw you back to the page the deep link named.
   const handledPageNav = useRef<string | null>(null);
   useEffect(() => {
-    if (mode !== "continuous") return;
+    if (paged) return;
     if (!heightsReady || numPages === 0) return;
     const raw = searchParams.get("page");
     const target = Number(raw || 0);
@@ -445,7 +451,7 @@ export default function ReaderPage() {
       continuousRef.current?.scrollToPage(target);
     }, 50);
     return () => clearTimeout(t);
-  }, [mode, heightsReady, numPages, searchParams, location.key]);
+  }, [paged, heightsReady, numPages, searchParams, location.key]);
 
   // Per-page base render scale. Default is fit-to-width (renders the
   // page to fill the container's inner width); "page" mode clamps
@@ -467,6 +473,7 @@ export default function ReaderPage() {
 
   // How the document is laid out: a row per page, or facing pairs.
   const rows = useMemo(() => pageRows(numPages, spread), [numPages, spread]);
+
 
   /**
    * The scale a row renders at.
@@ -499,23 +506,62 @@ export default function ReaderPage() {
     [containerSize.width, containerSize.height, fit, zoom],
   );
 
-  // Single-page mode draws one page, so it asks about a row of one
-  // rather than carrying a second scale function.
-  const pageScaleFor = useCallback(
-    (n: number): number => rowScaleFor([n]),
-    [rowScaleFor],
-  );
+  // Rows grouped into the bands the list scrolls through. One row per
+  // band everywhere except wrapped, which fits as many across as the
+  // width allows.
+  const bands = useMemo(() => {
+    if (scrollMode !== "wrapped") return rows.map((r) => [r]);
+    const out: number[][][] = [];
+    let line: number[][] = [];
+    let used = 0;
+    const room = Math.max(1, containerSize.width - SCROLL_PADDING);
+    for (const row of rows) {
+      const width =
+        row.reduce(
+          (sum, n) => sum + (pageNativeRef.current.get(n)?.width ?? 0),
+          0,
+        ) *
+          rowScaleFor(row) +
+        (row.length - 1) * SPREAD_GAP;
+      if (line.length > 0 && used + width + SPREAD_GAP > room) {
+        out.push(line);
+        line = [];
+        used = 0;
+      }
+      line.push(row);
+      used += width + SPREAD_GAP;
+    }
+    if (line.length > 0) out.push(line);
+    return out;
+  }, [rows, scrollMode, containerSize.width, rowScaleFor]);
 
   const estimateSize = useCallback(
     (index: number) => {
-      const pages = rows[index];
-      if (!pages) return ESTIMATE_PAGE_HEIGHT + PAGE_GAP;
-      const natives = pages.map((n) => pageNativeRef.current.get(n));
-      if (natives.some((n) => !n)) return ESTIMATE_PAGE_HEIGHT + PAGE_GAP;
-      const tallest = Math.max(...natives.map((n) => n!.height));
-      return tallest * rowScaleFor(pages) + PAGE_GAP;
+      const band = bands[index];
+      if (!band || band.length === 0) return ESTIMATE_PAGE_HEIGHT + PAGE_GAP;
+      if (horizontal) {
+        // Along the scroll axis a band measures its width.
+        const row = band[0];
+        const natives = row.map((n) => pageNativeRef.current.get(n));
+        if (natives.some((n) => !n)) return ESTIMATE_PAGE_HEIGHT + PAGE_GAP;
+        const total = natives.reduce((sum, n) => sum + n!.width, 0);
+        return (
+          total * rowScaleFor(row) + (row.length - 1) * SPREAD_GAP + PAGE_GAP
+        );
+      }
+      const tallest = Math.max(
+        ...band.map((row) =>
+          Math.max(
+            ...row.map(
+              (n) =>
+                (pageNativeRef.current.get(n)?.height ?? 0) * rowScaleFor(row),
+            ),
+          ),
+        ),
+      );
+      return (tallest || ESTIMATE_PAGE_HEIGHT) + PAGE_GAP;
     },
-    [rows, rowScaleFor],
+    [bands, horizontal, rowScaleFor],
   );
 
   // useVirtualizer is moved into ContinuousList (a child component
@@ -537,23 +583,23 @@ export default function ReaderPage() {
   const goPrev = useCallback(() => {
     setPage((p) => {
       const n = Math.max(1, p - 1);
-      if (mode === "continuous") {
+      if (!paged) {
         continuousRef.current?.scrollToPage(n);
       }
       return n;
     });
-  }, [mode]);
+  }, [paged]);
 
   const goNext = useCallback(() => {
     setPage((p) => {
       if (!numPages) return p;
       const n = Math.min(numPages, p + 1);
-      if (mode === "continuous") {
+      if (!paged) {
         continuousRef.current?.scrollToPage(n);
       }
       return n;
     });
-  }, [numPages, mode]);
+  }, [numPages, paged]);
 
   function jumpToMatch(idx: number): void {
     if (matches.length === 0) return;
@@ -561,7 +607,7 @@ export default function ReaderPage() {
     setCurrentMatch(wrapped);
     const target = matches[wrapped];
     setPage(target.page);
-    if (mode === "continuous") {
+    if (!paged) {
       continuousRef.current?.scrollToPage(target.page);
     }
   }
@@ -769,7 +815,7 @@ export default function ReaderPage() {
   const goToPage = useCallback(
     (n: number) => {
       setPage(n);
-      if (mode === "continuous") {
+      if (!paged) {
         // Deferred past the setPage render flush so the virtualizer has
         // the current geometry. Zoom no longer enters into it: the
         // layout is the zoom, so scrollToIndex is always in the same
@@ -779,7 +825,7 @@ export default function ReaderPage() {
         }, 0);
       }
     },
-    [mode],
+    [paged],
   );
 
   // The annotation to ring, if any. Set by a deep link or by clicking
@@ -999,31 +1045,22 @@ export default function ReaderPage() {
           )}
         </button>
 
-        <button
-          onClick={() =>
-            setMode(mode === "single" ? "continuous" : "single")
-          }
-          aria-label="Toggle reader mode"
-          title={
-            mode === "single"
-              ? "Switch to continuous (all pages)"
-              : "Switch to single-page"
-          }
-          className="flex items-center gap-1 rounded px-2 py-1 text-xs hover:opacity-80"
+        <select
+          value={scrollMode}
+          onChange={(e) => setMode(e.target.value as ScrollMode)}
+          aria-label="Scroll mode"
+          title="How pages are laid out and scrolled"
+          className="rounded border-0 bg-transparent px-1 py-1 text-xs"
           style={{ color: "var(--color-text-muted)" }}
         >
-          {mode === "single" ? (
-            <>
-              <FileText className="h-3.5 w-3.5" />
-              Single
-            </>
-          ) : (
-            <>
-              <List className="h-3.5 w-3.5" />
-              Continuous
-            </>
-          )}
-        </button>
+          {(
+            ["page", "vertical", "horizontal", "wrapped"] as ScrollMode[]
+          ).map((m) => (
+            <option key={m} value={m}>
+              {SCROLL_MODE_LABELS[m]}
+            </option>
+          ))}
+        </select>
 
         <select
           value={spread}
@@ -1131,7 +1168,7 @@ export default function ReaderPage() {
               if (Number.isNaN(v) || !numPages) return;
               const clamped = Math.max(1, Math.min(numPages, v));
               setPage(clamped);
-              if (mode === "continuous") {
+              if (!paged) {
                 continuousRef.current?.scrollToPage(clamped);
               }
             }}
@@ -1280,35 +1317,47 @@ export default function ReaderPage() {
             Failed to load PDF: {error}
           </div>
         )}
-        {doc && mode === "single" && (
-          <div ref={contentRef} style={{ width: "fit-content", margin: "0 auto" }}>
-            <PageCanvas
-              doc={doc}
-              pageNumber={page}
-              renderScale={pageScaleFor(page)}
-              native={pageNativeRef.current.get(page)}
-              findQuery={findQuery}
-              currentOccurrence={
-                currentMatchInfo && currentMatchInfo.page === page
-                  ? currentMatchInfo.occurrence
-                  : null
-              }
-              annotations={annotationsByPage.get(page) ?? []}
-              focusedAnnotationId={focusedAnnotationId}
-              debugText={debugText}
-              onNativeSize={applyNativeSizeSingle}
-              queue={renderQueue}
-              budget={canvasBudget}
-              thumbnails={thumbnails}
-              pageRef={pageRef}
-              pinchScaleRef={pinchScaleRef}
-              lastScrolledTo={lastScrolledTo}
-              onCreateHighlight={onCreateHighlight}
-              onFollowLink={goToPage}
-            />
+        {doc && paged && (
+          <div
+            ref={contentRef}
+            style={{
+              width: "fit-content",
+              margin: "0 auto",
+              display: "flex",
+              gap: `${SPREAD_GAP}px`,
+              alignItems: "flex-start",
+            }}
+          >
+            {(rows[rowOfPage(rows, page)] ?? [page]).map((n) => (
+              <PageCanvas
+                key={n}
+                doc={doc}
+                pageNumber={n}
+                renderScale={rowScaleFor(rows[rowOfPage(rows, page)] ?? [n])}
+                native={pageNativeRef.current.get(n)}
+                findQuery={findQuery}
+                currentOccurrence={
+                  currentMatchInfo && currentMatchInfo.page === n
+                    ? currentMatchInfo.occurrence
+                    : null
+                }
+                annotations={annotationsByPage.get(n) ?? []}
+                focusedAnnotationId={focusedAnnotationId}
+                debugText={debugText}
+                onNativeSize={applyNativeSizeSingle}
+                queue={renderQueue}
+                budget={canvasBudget}
+                thumbnails={thumbnails}
+                pageRef={pageRef}
+                pinchScaleRef={pinchScaleRef}
+                lastScrolledTo={lastScrolledTo}
+                onCreateHighlight={onCreateHighlight}
+                onFollowLink={goToPage}
+              />
+            ))}
           </div>
         )}
-        {doc && mode === "continuous" && (
+        {doc && !paged && (
           <ContinuousList
             // Keying on virtualKey forces a fresh useVirtualizer
             // call when numPages / containerSize / heightsReady
@@ -1319,7 +1368,8 @@ export default function ReaderPage() {
             doc={doc}
             scrollRef={scrollRef}
             estimateSize={estimateSize}
-            rows={rows}
+            bands={bands}
+            horizontal={horizontal}
             rowScaleFor={rowScaleFor}
             pageNativeRef={pageNativeRef}
             contentRef={contentRef}
@@ -1587,7 +1637,8 @@ const ContinuousList = forwardRef<
     doc: PDFDocumentProxy;
     scrollRef: React.RefObject<HTMLDivElement | null>;
     estimateSize: (index: number) => number;
-    rows: number[][];
+    bands: number[][][];
+    horizontal: boolean;
     rowScaleFor: (pages: number[]) => number;
     pageNativeRef: React.RefObject<Map<number, NativeViewport>>;
     contentRef: React.RefObject<HTMLDivElement | null>;
@@ -1615,7 +1666,8 @@ const ContinuousList = forwardRef<
     doc,
     scrollRef,
     estimateSize,
-    rows,
+    bands,
+    horizontal,
     rowScaleFor,
     pageNativeRef,
     contentRef,
@@ -1637,10 +1689,11 @@ const ContinuousList = forwardRef<
   ref,
 ) {
   const virtualizer = useVirtualizer({
-    count: rows.length,
+    count: bands.length,
     getScrollElement: () => scrollRef.current,
     estimateSize,
     overscan: 3,
+    horizontal,
   });
 
   // A page telling us it is a different size than we assumed. Rare
@@ -1707,10 +1760,13 @@ const ContinuousList = forwardRef<
     ref,
     () => ({
       scrollToPage: (page: number) => {
-        virtualizer.scrollToIndex(rowOfPage(rows, page), { align: "start" });
+        const at = bands.findIndex((band) =>
+          band.some((row) => row.includes(page)),
+        );
+        virtualizer.scrollToIndex(at < 0 ? 0 : at, { align: "start" });
       },
     }),
-    [virtualizer, scrollRef, rows],
+    [virtualizer, scrollRef, bands],
   );
 
   const items = virtualizer.getVirtualItems();
@@ -1726,8 +1782,10 @@ const ContinuousList = forwardRef<
     const el = scrollRef.current;
     if (!el) return;
     const compute = () => {
-      const offset = virtualizer.scrollOffset ?? el.scrollTop;
-      const viewportH = el.clientHeight;
+      const offset =
+        virtualizer.scrollOffset ??
+        (horizontal ? el.scrollLeft : el.scrollTop);
+      const viewportH = horizontal ? el.clientWidth : el.clientHeight;
       // Threshold: a page becomes "current" once its top has scrolled
       // about a third of the viewport past the top edge.
       const line = offset + viewportH * 0.3;
@@ -1749,9 +1807,9 @@ const ContinuousList = forwardRef<
         if (v.start <= line) pick = v.index;
         else break;
       }
-      // The first page of the row, which is the one a reader would
+      // The first page of the band, which is the one a reader would
       // name if asked where they are.
-      const page = rows[pick]?.[0] ?? pick + 1;
+      const page = bands[pick]?.[0]?.[0] ?? pick + 1;
       if (page !== lastReportedRef.current) {
         lastReportedRef.current = page;
         onVisiblePageChange(page);
@@ -1762,7 +1820,7 @@ const ContinuousList = forwardRef<
     // before the URL-jump effect has scrolled to N.
     el.addEventListener("scroll", compute, { passive: true });
     return () => el.removeEventListener("scroll", compute);
-  }, [scrollRef, virtualizer, onVisiblePageChange, rows]);
+  }, [scrollRef, virtualizer, onVisiblePageChange, bands]);
 
   return (
     <div
@@ -1771,15 +1829,14 @@ const ContinuousList = forwardRef<
         // fit-content, not 100%: at a zoom past fit-width the pages are
         // wider than the viewport, and a 100% box would clip them
         // instead of giving the container something to scroll to.
-        width: "fit-content",
-        minWidth: "100%",
+        width: horizontal ? `${virtualizer.getTotalSize()}px` : "fit-content",
+        minWidth: horizontal ? undefined : "100%",
         position: "relative",
-        height: `${virtualizer.getTotalSize()}px`,
+        height: horizontal ? "100%" : `${virtualizer.getTotalSize()}px`,
       }}
     >
       {items.map((vi) => {
-        const pages = rows[vi.index] ?? [];
-        const scale = rowScaleFor(pages);
+        const band = bands[vi.index] ?? [];
         return (
           <div
             key={vi.key}
@@ -1788,9 +1845,13 @@ const ContinuousList = forwardRef<
               position: "absolute",
               top: 0,
               left: 0,
-              width: "100%",
-              transform: `translateY(${vi.start}px)`,
-              paddingBottom: `${PAGE_GAP}px`,
+              width: horizontal ? undefined : "100%",
+              height: horizontal ? "100%" : undefined,
+              transform: horizontal
+                ? `translateX(${vi.start}px)`
+                : `translateY(${vi.start}px)`,
+              paddingBottom: horizontal ? undefined : `${PAGE_GAP}px`,
+              paddingRight: horizontal ? `${PAGE_GAP}px` : undefined,
               display: "flex",
               gap: `${SPREAD_GAP}px`,
               // Top, so the two pages of a spread share a baseline even
@@ -1803,12 +1864,13 @@ const ContinuousList = forwardRef<
               justifyContent: "safe center",
             }}
           >
-            {pages.map((pageNumber) => (
+            {band.flatMap((row) =>
+              row.map((pageNumber) => (
               <PageCanvas
                 key={pageNumber}
                 doc={doc}
                 pageNumber={pageNumber}
-                renderScale={scale}
+                renderScale={rowScaleFor(row)}
                 native={pageNativeRef.current.get(pageNumber)}
                 findQuery={findQuery}
                 currentOccurrence={
@@ -1829,7 +1891,8 @@ const ContinuousList = forwardRef<
                 onCreateHighlight={onCreateHighlight}
                 onFollowLink={onFollowLink}
               />
-            ))}
+              )),
+            )}
           </div>
         );
       })}
