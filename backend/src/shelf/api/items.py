@@ -34,6 +34,7 @@ from ..db import get_session
 from ..models import (
     Attachment,
     AttachmentPage,
+    Collection,
     Item,
     ItemCollection,
     ItemTag,
@@ -422,6 +423,24 @@ async def list_items(
                     status.HTTP_400_BAD_REQUEST,
                     "collection must be a UUID or 'unfiled'",
                 ) from e
+            # The folder has to be one this space can actually see:
+            # its own, or one that came across with an inherited item
+            # (`sources` is exactly that set). Without this check a
+            # collection id from an unrelated space is a valid filter
+            # that matches nothing, so the listing comes back 200 and
+            # empty -- which reads as "this space is empty" rather than
+            # "that filter does not belong here", and is invisible in
+            # the logs.
+            owner_space_id = (
+                await db.execute(
+                    select(Collection.space_id).where(Collection.id == cid)
+                )
+            ).scalar_one_or_none()
+            if owner_space_id is None or owner_space_id not in sources:
+                raise HTTPException(
+                    status.HTTP_404_NOT_FOUND,
+                    "No such collection in this space",
+                )
             stmt = stmt.join(
                 ItemCollection, ItemCollection.item_id == Item.id
             ).where(ItemCollection.collection_id == cid)

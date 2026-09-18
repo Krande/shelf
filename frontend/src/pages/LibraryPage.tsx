@@ -719,6 +719,24 @@ export default function LibraryPage() {
     },
   });
 
+  // Switching space drops the filters that are scoped to the space being
+  // left. A collection id means nothing in another space, and leaving it
+  // in the URL filters the new space's listing by a folder it does not
+  // have -- an empty library that looks like the items are missing. The
+  // selected item id goes for the same reason.
+  const switchSpace = useCallback(
+    (nextSlug: string) => {
+      setActiveSlug(nextSlug);
+      setCheckedIds(new Set());
+      // One write, rather than setSelectedId() plus a second navigation.
+      const next = new URLSearchParams(searchParams);
+      next.delete("collection");
+      next.delete("item");
+      setSearchParams(next, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
+
   // Ctrl/Cmd-click a row, or Enter on it, to open the PDF directly.
   // Selecting before navigating is what makes Back work: the selection
   // is in the URL, so the history pop restores the panel. An item with
@@ -1298,11 +1316,7 @@ export default function LibraryPage() {
               {spaces.data && spaces.data.length > 1 && (
                 <select
                   value={slug ?? ""}
-                  onChange={(e) => {
-                    setActiveSlug(e.target.value);
-                    setSelectedId(null);
-                    setCheckedIds(new Set());
-                  }}
+                  onChange={(e) => switchSpace(e.target.value)}
                   className="rounded border px-2 py-1 text-sm"
                   style={{
                     backgroundColor: "var(--color-surface)",
