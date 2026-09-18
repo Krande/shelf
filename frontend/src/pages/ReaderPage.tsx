@@ -7,7 +7,12 @@ import {
   useRef,
   useState,
 } from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router";
+import {
+  useLocation,
+  useNavigate,
+  useParams,
+  useSearchParams,
+} from "react-router";
 import {
   ArrowLeft,
   Bookmark,
@@ -101,6 +106,7 @@ export default function ReaderPage() {
   const auth = useAuth();
   const params = useParams<{ attachmentId: string }>();
   const [searchParams] = useSearchParams();
+  const location = useLocation();
   const nav = useNavigate();
 
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null);
@@ -341,11 +347,28 @@ export default function ReaderPage() {
   // ?page= writeback effect above (which uses history.replaceState
   // and so doesn't notify react-router). That's how this stays out
   // of a loop with manual scroll-driven page updates.
+  //
+  // Honoured once per navigation, tracked by location key. The effect
+  // also depends on layout state that changes long afterwards --
+  // opening or closing the find bar resizes the scroll container, which
+  // remounts the virtualizer and flips heightsReady -- and react-router
+  // never learns about the ?page= writeback above, since that uses
+  // replaceState. So its copy of the param stays frozen at whatever
+  // brought us here, and without this guard any later relayout would
+  // re-apply it: follow a link to page 40, close the find bar, and the
+  // reader would throw you back to the page the deep link named.
+  const handledPageNav = useRef<string | null>(null);
   useEffect(() => {
     if (mode !== "continuous") return;
     if (!heightsReady || numPages === 0) return;
-    const target = Number(searchParams.get("page") || 0);
+    const raw = searchParams.get("page");
+    const target = Number(raw || 0);
     if (!(target > 1 && target <= numPages)) return;
+    // Keyed on the navigation, not the value, so arriving at the same
+    // page twice from two different search hits still scrolls.
+    const nav = `${location.key}:${raw}`;
+    if (handledPageNav.current === nav) return;
+    handledPageNav.current = nav;
     setPage(target);
     // Defer past the first paint so the keyed ContinuousList has
     // mounted, the virtualizer has measured the container, and the
@@ -354,7 +377,7 @@ export default function ReaderPage() {
       continuousRef.current?.scrollToPage(target);
     }, 50);
     return () => clearTimeout(t);
-  }, [mode, heightsReady, numPages, searchParams]);
+  }, [mode, heightsReady, numPages, searchParams, location.key]);
 
   // Per-page base render scale. Default is fit-to-width (renders the
   // page to fill the container's inner width); "page" mode clamps
