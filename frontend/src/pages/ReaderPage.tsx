@@ -2373,6 +2373,12 @@ function PageCanvas({
         // about to be, so the fill stops being a state of its own.
         backgroundColor: "#ffffff",
         display: "inline-block",
+        // A flex item shrinks by default. Past 100% the page is wider
+        // than its row, so it was being squeezed horizontally while its
+        // explicit height stayed -- the page came out stretched
+        // vertically. It must keep the size its scale gives it and let
+        // the row overflow, which is what the container scrolls to.
+        flexShrink: 0,
         width: cssW != null ? `${cssW}px` : undefined,
         height: cssH != null ? `${cssH}px` : undefined,
       }}
