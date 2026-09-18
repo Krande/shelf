@@ -69,6 +69,10 @@ import {
 import { itemTypeLabel, type ItemType } from "@/api/itemFields";
 import { useDebounce } from "@/hooks/useDebounce";
 import { useResizableWidth } from "@/hooks/useResizableWidth";
+import {
+  useColumnWidths,
+  type ColumnWidths,
+} from "@/hooks/useColumnWidths";
 import AppShell from "@/components/layout/AppShell";
 import ItemForm, {
   type ItemFormSubmission,
@@ -143,18 +147,64 @@ function primaryScopeMatch(
 }
 
 
+/**
+ * The grab strip on a column's right edge.
+ *
+ * Absolutely positioned so it costs the header no layout, and it stops
+ * its own events: every sortable column is a click-to-sort target, and
+ * taking hold of its edge is not a request to re-sort.
+ */
+function ColumnResizer({
+  columnKey,
+  columns,
+}: {
+  columnKey: string;
+  columns: ColumnWidths;
+}) {
+  return (
+    <span
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={`Resize column`}
+      tabIndex={0}
+      onPointerDown={columns.onPointerDown(columnKey)}
+      onKeyDown={columns.onKeyDown(columnKey)}
+      onClick={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => {
+        e.stopPropagation();
+        columns.onKeyDown(columnKey)({
+          key: "Home",
+          preventDefault: () => {},
+          stopPropagation: () => {},
+        } as React.KeyboardEvent);
+      }}
+      className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize select-none"
+      style={{
+        backgroundColor:
+          columns.resizing === columnKey
+            ? "var(--color-accent)"
+            : "transparent",
+      }}
+    />
+  );
+}
+
 function SortHeader({
   label,
   column,
   activeSort,
   direction,
   onClick,
+  columnKey,
+  columns,
 }: {
   label: string;
   column: ItemSort;
   activeSort: ItemSort;
   direction: SortDirection;
   onClick: (col: ItemSort) => void;
+  columnKey: string;
+  columns: ColumnWidths;
 }) {
   const active = activeSort === column;
   const Icon = active
@@ -165,21 +215,36 @@ function SortHeader({
   return (
     <th
       onClick={() => onClick(column)}
-      className="cursor-pointer select-none px-4 py-2 hover:opacity-80"
+      className="relative cursor-pointer select-none px-4 py-2 hover:opacity-80"
+      style={{ width: columns.width(columnKey) }}
     >
-      <span className="inline-flex items-center gap-1">
+      <span className="inline-flex items-center gap-1 truncate">
         {label}
         <Icon
-          className="h-3 w-3"
+          className="h-3 w-3 shrink-0"
           style={{
             color: active ? "var(--color-accent)" : "var(--color-text-muted)",
             opacity: active ? 1 : 0.5,
           }}
         />
       </span>
+      <ColumnResizer columnKey={columnKey} columns={columns} />
     </th>
   );
 }
+
+// Starting widths, near enough to what the auto layout produced that
+// turning the table fixed is not itself a visible change. Title has no
+// entry: it takes whatever is left, so the common case of a wide window
+// spends the extra space on the one column that benefits.
+const COLUMN_KEYS = ["title", "creator", "type", "tags", "updated"] as const;
+const COLUMN_DEFAULTS: Record<string, number> = {
+  title: 420,
+  creator: 200,
+  type: 140,
+  tags: 220,
+  updated: 180,
+};
 
 const RAIL_PREF_KEY = "shelf:rail-open";
 
@@ -580,6 +645,8 @@ export default function LibraryPage() {
   // Width of the desktop detail pane. Null until someone drags it, so
   // the existing responsive width stays the default.
   const detailWidth = useResizableWidth("shelf.detailPanelWidth");
+  // Column widths, dragged from the header and remembered per browser.
+  const columns = useColumnWidths("shelf.libraryColumns", COLUMN_DEFAULTS);
 
   // Spaces including the ones this space inherits, purely to answer
   // "may I edit this item?" — the answer depends on the caller's role in
@@ -1737,7 +1804,10 @@ export default function LibraryPage() {
                 </p>
               )}
               {listEntries.length > 0 && (
-                <table className="w-full text-sm">
+                <table
+                  className="w-full table-fixed text-sm"
+                  style={{ minWidth: columns.total([...COLUMN_KEYS]) + 32 }}
+                >
                   <thead
                     className="sticky top-0 border-b text-left text-xs uppercase tracking-wider"
                     style={{
@@ -1765,22 +1835,40 @@ export default function LibraryPage() {
                         activeSort={sort}
                         direction={direction}
                         onClick={applySort}
+                        columnKey="title"
+                        columns={columns}
                       />
-                      <th className="px-4 py-2">Creator</th>
+                      <th
+                        className="relative px-4 py-2"
+                        style={{ width: columns.width("creator") }}
+                      >
+                        Creator
+                        <ColumnResizer columnKey="creator" columns={columns} />
+                      </th>
                       <SortHeader
                         label="Type"
                         column="type"
                         activeSort={sort}
                         direction={direction}
                         onClick={applySort}
+                        columnKey="type"
+                        columns={columns}
                       />
-                      <th className="px-4 py-2">Tags</th>
+                      <th
+                        className="relative px-4 py-2"
+                        style={{ width: columns.width("tags") }}
+                      >
+                        Tags
+                        <ColumnResizer columnKey="tags" columns={columns} />
+                      </th>
                       <SortHeader
                         label={view === "trash" ? "Trashed" : "Updated"}
                         column="updated"
                         activeSort={sort}
                         direction={direction}
                         onClick={applySort}
+                        columnKey="updated"
+                        columns={columns}
                       />
                     </tr>
                   </thead>
