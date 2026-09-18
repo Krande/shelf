@@ -2,6 +2,15 @@
 
 
 
+## v0.9.0 (2026-09-18)
+
+### Feature
+
+* feat(perf): make the PDF reader usable on long documents, and adopt pdf.js&#39;s viewer controls (#10)
+
+Co-authored-by: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`6b06607`](https://github.com/Krande/shelf/commit/6b0660766e9154e871d1b0700349a7e94b5d2cdd))
+
+
 ## v0.8.0 (2026-09-18)
 
 ### Feature
