@@ -19,7 +19,10 @@ What comes across, and why:
     tags          yes, matched by name into the target space's own tag
                   table, since tags are space-scoped
     collections   no — folders are the target space's own structure, and
-                  the source's tree means nothing there
+                  the source's tree means nothing there. The caller may
+                  name one collection *in the target* to file the copy
+                  under, which is a choice about where it lands rather
+                  than a translation of where it came from.
     notes         no
     annotations   no
 
@@ -47,7 +50,9 @@ from ..db import get_session
 from ..models import (
     Attachment,
     AttachmentPage,
+    Collection,
     Item,
+    ItemCollection,
     ItemTag,
     Space,
     StandardRevision,
@@ -61,6 +66,10 @@ router = APIRouter(tags=["items"])
 
 class CopyItemRequest(BaseModel):
     target_slug: str
+    # A collection in the *target* space to file the copy under. Optional
+    # — omitted leaves it unfiled, which is where a copy landed before
+    # this existed.
+    target_collection_id: uuid.UUID | None = None
     # Off means metadata only — useful for seeding a record in a space
     # that will get its own file, and for a quick copy of something with
     # a 300 MB PDF hanging off it.
@@ -72,6 +81,9 @@ class CopyItemResponse(BaseModel):
     space_id: str
     space_slug: str
     attachments_copied: int
+    # Echoed back so a caller that filed the copy can confirm where it
+    # went without a second request.
+    collection_id: str | None
     # True when the source is a revision of a standard and the copy was
     # linked to the same one. Worth surfacing: it means the copy joins
     # that standard's revision history rather than starting a new one.
@@ -128,6 +140,14 @@ async def copy_item(
     db.add(copy)
     await db.flush()
 
+    if payload.target_collection_id is not None:
+        await _file_under(
+            db,
+            copy_id=copy.id,
+            collection_id=payload.target_collection_id,
+            target_space_id=target.id,
+        )
+
     await _copy_tags(db, source_id=source.id, copy=copy, target_space_id=target.id)
     linked = await _copy_standard_link(db, source_id=source.id, copy_id=copy.id)
 
@@ -143,8 +163,40 @@ async def copy_item(
         space_id=str(target.id),
         space_slug=target.slug,
         attachments_copied=copied,
+        collection_id=(
+            str(payload.target_collection_id)
+            if payload.target_collection_id is not None
+            else None
+        ),
         linked_to_standard=linked,
     )
+
+
+async def _file_under(
+    db: AsyncSession,
+    *,
+    copy_id: uuid.UUID,
+    collection_id: uuid.UUID,
+    target_space_id: uuid.UUID,
+) -> None:
+    """File the copy under one of the target space's collections.
+
+    The collection has to belong to the target, not to the source and
+    not to a space the target merely inherits from: an inherited folder
+    is read-only here, and filing into it would be a write to somebody
+    else's structure.
+    """
+    owner_space_id = (
+        await db.execute(
+            select(Collection.space_id).where(Collection.id == collection_id)
+        )
+    ).scalar_one_or_none()
+    if owner_space_id != target_space_id:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "No such collection in the target space",
+        )
+    db.add(ItemCollection(item_id=copy_id, collection_id=collection_id))
 
 
 async def _copy_tags(

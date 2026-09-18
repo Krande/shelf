@@ -179,6 +179,8 @@ export interface CopyItemResult {
   space_id: string;
   space_slug: string;
   attachments_copied: number;
+  /** Collection the copy was filed under, null if left unfiled. */
+  collection_id: string | null;
   linked_to_standard: boolean;
 }
 
@@ -195,13 +197,17 @@ export interface CopyItemResult {
 export function copyItem(
   id: string,
   targetSlug: string,
-  opts: { includeAttachments?: boolean } = {},
+  opts: { includeAttachments?: boolean; targetCollectionId?: string } = {},
 ): Promise<CopyItemResult> {
   return apiFetch<CopyItemResult>(`/api/items/${encodeURIComponent(id)}/copy`, {
     method: "POST",
     body: JSON.stringify({
       target_slug: targetSlug,
       include_attachments: opts.includeAttachments ?? true,
+      // Omitted rather than null when unset, so the copy lands unfiled.
+      ...(opts.targetCollectionId
+        ? { target_collection_id: opts.targetCollectionId }
+        : {}),
     }),
   });
 }

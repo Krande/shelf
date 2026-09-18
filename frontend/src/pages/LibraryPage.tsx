@@ -71,6 +71,7 @@ import ItemDetail from "@/components/library/ItemDetail";
 import TagChips from "@/components/library/TagChips";
 import CollectionRail from "@/components/library/CollectionRail";
 import BulkAddToCollection from "@/components/library/BulkAddToCollection";
+import BulkCopyToSpace from "@/components/library/BulkCopyToSpace";
 import SearchScopePopover from "@/components/library/SearchScopePopover";
 import FulltextHitsRow from "@/components/library/FulltextHitsRow";
 
@@ -1497,6 +1498,10 @@ export default function LibraryPage() {
                   <BulkAddToCollection
                     items={flatItems.filter((i) => checkedIds.has(i.id))}
                     collections={collections.data ?? []}
+                    slug={slug}
+                  />
+                  <BulkCopyToSpace
+                    items={flatItems.filter((i) => checkedIds.has(i.id))}
                     slug={slug}
                   />
                   <button
