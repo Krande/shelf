@@ -42,12 +42,40 @@ export const PREF_PALETTE: PrefSpec<Palette> = {
   default: "graphite",
 };
 
-export type ReaderMode = "single" | "continuous";
+/**
+ * How pages are laid out and scrolled, matching pdf.js's scroll modes.
+ *
+ * - `page`: one page — or one spread — at a time.
+ * - `vertical`: the document in a column, scrolled down.
+ * - `horizontal`: in a line, scrolled across.
+ * - `wrapped`: flowed into as many columns as fit, then wrapped.
+ *
+ * The key is unchanged from when these were "single" and "continuous",
+ * so `readScrollMode` maps those old values rather than resetting
+ * anyone's choice.
+ */
+export type ScrollMode = "page" | "vertical" | "horizontal" | "wrapped";
 
-export const PREF_READER_MODE: PrefSpec<ReaderMode> = {
-  key: "reader_mode",
-  default: "continuous",
+export const SCROLL_MODE_LABELS: Record<ScrollMode, string> = {
+  page: "Page scrolling",
+  vertical: "Vertical scrolling",
+  horizontal: "Horizontal scrolling",
+  wrapped: "Wrapped scrolling",
 };
+
+export const PREF_READER_MODE: PrefSpec<ScrollMode> = {
+  key: "reader_mode",
+  default: "vertical",
+};
+
+/** Reads the pref, translating the two values it used to hold. */
+export function readScrollMode(raw: string): ScrollMode {
+  if (raw === "single") return "page";
+  if (raw === "continuous") return "vertical";
+  return raw === "horizontal" || raw === "wrapped" || raw === "page"
+    ? raw
+    : "vertical";
+}
 
 export type ReaderFit = "width" | "page";
 
@@ -72,6 +100,20 @@ export const PREF_READER_FIT: PrefSpec<ReaderFit> = {
 export const PREF_SUBCOLLECTION_AUTO_EXPAND_BELOW: PrefSpec<number> = {
   key: "subcollection_auto_expand_below",
   default: 5,
+};
+
+/**
+ * Facing-page layout, matching pdf.js's spread modes.
+ *
+ * "odd" pairs from page 1 — (1,2), (3,4) — which suits a document whose
+ * cover is a left-hand page. "even" leaves page 1 alone and pairs from
+ * there — (1), (2,3) — the shape of a bound book.
+ */
+export type SpreadPref = "none" | "odd" | "even";
+
+export const PREF_READER_SPREAD: PrefSpec<SpreadPref> = {
+  key: "reader_spread",
+  default: "none",
 };
 
 export function getPref<T>(spec: PrefSpec<T>): T {

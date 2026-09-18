@@ -24,6 +24,7 @@ import io
 import logging
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 import obstore
 from sqlalchemy import delete, select
@@ -259,6 +260,31 @@ async def _fetch_body(storage_key: str) -> bytes:
     return bytes(buf)
 
 
+
+def _display_size(page: Any) -> tuple[float, float]:
+    """The size a viewer will lay this page out at, in points.
+
+    Two things the raw MediaBox does not account for, both of which the
+    client's renderer (pdf.js) does:
+
+    * ``/Rotate`` turns the page 90 or 270 degrees for display, which
+      swaps width and height. Landscape sheets in a drawing package are
+      routinely stored portrait with a rotation.
+    * The CropBox, when present, is what gets displayed; the MediaBox
+      can be considerably larger.
+
+    These dimensions drive the client's scroll geometry, so a page
+    reported portrait and rendered landscape puts every later page at
+    the wrong offset -- the scrollbar stops matching the document.
+    """
+    box = getattr(page, "cropbox", None) or page.mediabox
+    width = float(box.width)
+    height = float(box.height)
+    rotation = int(getattr(page, "rotation", 0) or 0) % 360
+    if rotation in (90, 270):
+        width, height = height, width
+    return width, height
+
 def _extract_pages_and_toc(
     body: bytes,
 ) -> tuple[list[tuple[int, str, float | None, float | None]], int]:
@@ -300,11 +326,9 @@ def _extract_pages_and_toc(
         if "\x00" in t:
             t = t.replace("\x00", "")
         try:
-            mb = page.mediabox
-            width = float(mb.width)
-            height = float(mb.height)
+            width, height = _display_size(page)
         except Exception:
-            log.exception("page %d mediabox read failed", idx)
+            log.exception("page %d size read failed", idx)
             width = None
             height = None
         out.append((idx, t.strip(), width, height))

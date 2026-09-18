@@ -23,6 +23,9 @@ const WHEEL_SENSITIVITY = 0.0075;
 const LINE_HEIGHT = 16;
 const PAGE_HEIGHT = 800;
 
+/** How far a touch may travel and still count as a tap, in CSS px. */
+const TAP_SLOP = 10;
+
 /**
  * How much one wheel event should multiply the zoom by.
  *
@@ -84,12 +87,17 @@ export function usePinchZoom(
     panStartY: 0,
     initialTranslateX: 0,
     initialTranslateY: 0,
+    // Whether the current touch has travelled far enough to be a drag
+    // rather than a tap.
+    moved: false,
+    downX: 0,
+    downY: 0,
   });
 
   const stateRef = useRef(state);
   stateRef.current = state;
 
-  const lastTapRef = useRef(0);
+  const lastTapRef = useRef({ at: 0, x: 0, y: 0 });
 
   const resetZoom = useCallback(() => {
     setState({ scale: 1, translateX: 0, translateY: 0 });
@@ -138,19 +146,42 @@ export function usePinchZoom(
       }
 
       if (e.touches.length === 1) {
+        // Reads the *previous* touch's travel, which is why it is reset
+        // at the end of this block rather than the start.
+        const gesture = gestureRef.current;
         const now = Date.now();
-        if (now - lastTapRef.current < 300) {
+        const t = e.touches[0];
+        // A tap is a touch that did not travel. Without the distance
+        // check, two flick-scrolls inside the double-tap window read as
+        // a double tap and snap the zoom away -- and flicking twice in
+        // a row is how anyone reads a long document.
+        const near =
+          Math.abs(t.clientX - lastTapRef.current.x) < TAP_SLOP &&
+          Math.abs(t.clientY - lastTapRef.current.y) < TAP_SLOP;
+        if (now - lastTapRef.current.at < 300 && near && !gesture.moved) {
           e.preventDefault();
           setState({ scale: 1, translateX: 0, translateY: 0 });
-          lastTapRef.current = 0;
+          lastTapRef.current = { at: 0, x: 0, y: 0 };
         } else {
-          lastTapRef.current = now;
+          lastTapRef.current = { at: now, x: t.clientX, y: t.clientY };
         }
+        gesture.moved = false;
+        gesture.downX = t.clientX;
+        gesture.downY = t.clientY;
       }
     }
 
     function handleTouchMove(e: TouchEvent): void {
       const g = gestureRef.current;
+      if (e.touches.length === 1 && !g.moved) {
+        const t = e.touches[0];
+        if (
+          Math.abs(t.clientX - g.downX) > TAP_SLOP ||
+          Math.abs(t.clientY - g.downY) > TAP_SLOP
+        ) {
+          g.moved = true;
+        }
+      }
 
       if (g.active && e.touches.length === 2) {
         e.preventDefault();
@@ -230,6 +261,18 @@ export function usePinchZoom(
         );
         if (newScale === s.scale) return;
 
+        // Back at 1:1, land on the exact identity transform. translateY
+        // is an incremental anchor update, so without this it keeps
+        // whatever offset the trip out and back accumulated: you return
+        // to scale 1 with the content shifted a few hundred pixels, and
+        // from then on scrollTop and what you can see disagree, which
+        // makes every later scrollIntoView and scrollToIndex land
+        // wrong. The touch path has always snapped; the wheel path
+        // never did.
+        if (newScale === 1) {
+          setState({ scale: 1, translateX: 0, translateY: 0 });
+          return;
+        }
         // Horizontally the page stays centred rather than following the
         // cursor. The page is centred in its box at rest, and a wheel
         // zoom that walks it sideways off the viewport is the thing

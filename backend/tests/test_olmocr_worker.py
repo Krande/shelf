@@ -14,6 +14,7 @@ import pytest
 from httpx import AsyncClient
 from obstore.store import MemoryStore
 
+from shelf.config import settings
 from shelf.services import storage
 
 
@@ -22,6 +23,15 @@ def memory_store() -> Any:
     storage._store = MemoryStore()
     yield
     storage.reset_store()
+
+
+@pytest.fixture(autouse=True)
+def _everyone_is_an_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The GPU trigger is admin-only; this file tests what it does.
+
+    The role gate has its own tests in test_processing_admin_only.
+    """
+    monkeypatch.setattr(settings, "dev_login_role", "admin")
 
 
 async def _login(client: AsyncClient, email: str = "alice@example.com") -> str:

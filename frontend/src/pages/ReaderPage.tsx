@@ -1,8 +1,6 @@
 import {
-  forwardRef,
   useCallback,
   useEffect,
-  useImperativeHandle,
   useMemo,
   useRef,
   useState,
@@ -14,72 +12,75 @@ import {
   useSearchParams,
 } from "react-router";
 import {
-  ArrowLeft,
-  Bookmark,
-  Check,
   ChevronLeft,
   ChevronRight,
-  Eye,
-  EyeOff,
-  FileText,
-  Highlighter,
-  Link2,
-  List,
-  ListTree,
   Loader2,
-  Maximize,
-  MoveHorizontal,
   Search,
-  Trash2,
   X,
 } from "lucide-react";
-import type {
-  PDFDocumentProxy,
-  PDFPageProxy,
-  RenderTask,
-} from "pdfjs-dist";
+import type { PDFDocumentProxy } from "pdfjs-dist";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useVirtualizer } from "@tanstack/react-virtual";
 import { pdfjs } from "@/api/pdfWorkerSetup";
 import { useAuth } from "@/auth/session";
 import { getDownloadUrl, getPageDims } from "@/api/attachments";
 import {
   type Annotation,
-  annotationLink,
   type Rect,
   createAnnotation,
   deleteAnnotation,
   listAnnotations,
   updateAnnotation,
 } from "@/api/annotations";
-import { PREF_READER_FIT, PREF_READER_MODE, usePref } from "@/auth/prefs";
+import {
+  PREF_READER_FIT,
+  PREF_READER_MODE,
+  PREF_READER_SPREAD,
+  readScrollMode,
+  usePref,
+} from "@/auth/prefs";
 import { useDebounce } from "@/hooks/useDebounce";
-import { usePinchZoom } from "@/hooks/usePinchZoom";
-import { pageLinks, type PageLink } from "@/lib/pdfLinks";
-import OutlinePanel from "@/components/library/OutlinePanel";
-import ProcessingMenu from "@/components/reader/ProcessingMenu";
-import VersionPicker from "@/components/reader/VersionPicker";
+import {
+  clampZoom,
+  useZoomGestures,
+} from "@/hooks/useZoomGestures";
+import { CanvasBudget } from "@/lib/canvasBudget";
+import { RenderQueue } from "@/lib/renderQueue";
+import { pageRows, rowOfPage } from "@/lib/spreads";
+import { PageCanvas } from "@/components/reader/PageCanvas";
+import { ContinuousList } from "@/components/reader/ContinuousList";
+import { HighlightsPanel } from "@/components/reader/HighlightsPanel";
+import { ReaderToolbar } from "@/components/reader/ReaderToolbar";
+import {
+  ESTIMATE_PAGE_HEIGHT,
+  PAGE_GAP,
+  SCROLL_PADDING,
+  SPREAD_GAP,
+  type ContinuousListHandle,
+  type NativeViewport,
+} from "@/components/reader/types";
+import { PageThumbnails } from "@/lib/pageThumbnails";
+import { ReaderSidebar } from "@/components/reader/ReaderSidebar";
+import type { LayerGroup } from "@/components/reader/LayersPanel";
 
-const PAGE_GAP = 16;
+/**
+ * pdfjs's optional-content config, taken from the method that returns
+ * it — the class itself is not exported from the package root.
+ */
+type OcConfig = Awaited<
+  ReturnType<PDFDocumentProxy["getOptionalContentConfig"]>
+>;
+
+/**
+ * CSS pixels per PDF point at pdf.js's scale 1, which is what its
+ * viewer calls "actual size" and what 100% means in its zoom menu.
+ */
+const PDF_TO_CSS_UNITS = 4 / 3;
+
+/** Page-width, but not blown up past this on a narrow document. */
+const MAX_AUTO_SCALE = 1.25;
+
 // p-4 padding on the scroll container = 16px each side, 32px total
 // horizontal — pages render to fit the inner content width.
-const SCROLL_PADDING = 32;
-const ESTIMATE_PAGE_HEIGHT = 1100;
-// Cap how much extra pixel detail we ask pdfjs to bake at zoom.
-// Each step squares memory usage per page (e.g. 3× → 9× pixels);
-// 4 keeps a 1 MP base page under ~16 MP which is workable for a
-// few mounted virtual rows. The user sees diminishing returns past
-// the device's effective DPI anyway.
-const MAX_OVERSAMPLE = 4;
-// Wait this long after the last pinch-scale change before kicking
-// off the higher-resolution re-render. Avoids re-rendering during
-// the gesture itself — pdfjs render is CPU-heavy.
-const OVERSAMPLE_SETTLE_MS = 1500;
-
-interface NativeViewport {
-  width: number;
-  height: number;
-}
 
 
 /**
@@ -120,7 +121,12 @@ export default function ReaderPage() {
   );
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [mode, setMode] = usePref(PREF_READER_MODE);
+  const [storedMode, setStoredMode] = usePref(PREF_READER_MODE);
+  const scrollMode = readScrollMode(storedMode);
+  const setMode = setStoredMode;
+  // Page mode shows one band at a time; the rest scroll a list of them.
+  const paged = scrollMode === "page";
+  const horizontal = scrollMode === "horizontal";
   const [fit, setFit] = usePref(PREF_READER_FIT);
   // Diagnostic — colour the text-layer spans so we can see where
   // pdfjs places them vs the rendered glyphs.
@@ -134,6 +140,10 @@ export default function ReaderPage() {
   // = false (i.e. desktop with mouse) since drag-select already
   // works there with the default cursor.
   const [selectMode, setSelectMode] = useState(false);
+  // The editing tool in hand, named as pdf.js names them. Null is
+  // reading. Draw is absent for now: ink would be a new annotation
+  // kind rather than a new way to make one that already exists.
+  const [tool, setTool] = useState<"highlight" | "text" | null>(null);
   // Side drawer listing all highlights for this PDF.
   const [highlightsOpen, setHighlightsOpen] = useState(false);
   // Side drawer with the PDF's embedded outline (table of contents).
@@ -161,7 +171,17 @@ export default function ReaderPage() {
     if (!el) return;
     const ro = new ResizeObserver((entries) => {
       const r = entries[0]?.contentRect;
-      if (r) setContainerSize({ width: r.width, height: r.height });
+      if (!r) return;
+      // Rounded: sub-pixel churn would otherwise re-run the scale
+      // calculation, and so every page's render, for a change nobody
+      // can see.
+      const width = Math.round(r.width);
+      const height = Math.round(r.height);
+      setContainerSize((prev) =>
+        prev.width === width && prev.height === height
+          ? prev
+          : { width, height },
+      );
     });
     ro.observe(el);
     return () => ro.disconnect();
@@ -253,9 +273,10 @@ export default function ReaderPage() {
         } else {
           // Server hasn't extracted dims yet (pre-feature row, or
           // extract worker hasn't run). Open just page 1 to get a
-          // baseline and apply it to every page; the per-page
-          // render path corrects each page's height as it actually
-          // renders.
+          // baseline and apply it to every page. Each page corrects
+          // itself on first render — see onNativeSize — so a document
+          // of mixed page sizes converges as it is read rather than
+          // staying wrong.
           const p = await loaded.getPage(1);
           const vp = p.getViewport({ scale: 1 });
           for (let i = 1; i <= loaded.numPages; i++) {
@@ -282,7 +303,22 @@ export default function ReaderPage() {
     };
   }, [auth.status, params.attachmentId, version]);
 
+  // Page text, kept for the life of the document. Pulling it is the
+  // expensive half of a search and it never changes, so the second
+  // search of a document costs nothing on the worker -- which matters
+  // because the query is debounced, not final: "fatigue" is searched
+  // after "fati" and "fatig" have been.
+  const pageText = useRef(new Map<number, string>());
+  useEffect(() => {
+    pageText.current = new Map();
+  }, [doc]);
+
   // Whole-document text scan when the find query changes.
+  //
+  // Results are published as they are found rather than at the end, so
+  // a hit on page 3 is usable while page 300 is still being read, and
+  // the scan yields between pages so it shares the worker with page
+  // rendering instead of starving it.
   useEffect(() => {
     if (!doc) return;
     const needle = findQuery.trim().toLowerCase();
@@ -293,17 +329,30 @@ export default function ReaderPage() {
     }
     let cancelled = false;
     setFindScanning(true);
+    // Before the first partial publish, or the new list is indexed with
+    // the old query's match and the reader is yanked to whatever that
+    // happens to point at.
+    setCurrentMatch(0);
 
     (async () => {
       const found: Array<{ page: number; occurrence: number }> = [];
       for (let n = 1; n <= doc.numPages; n++) {
         if (cancelled) return;
-        const p = await doc.getPage(n);
-        const tc = await p.getTextContent();
-        const text = tc.items
-          .map((it) => ("str" in it ? (it as { str: string }).str : ""))
-          .join(" ")
-          .toLowerCase();
+        let text = pageText.current.get(n);
+        if (text === undefined) {
+          const p = await doc.getPage(n);
+          try {
+            const tc = await p.getTextContent();
+            text = tc.items
+              .map((it) => ("str" in it ? (it as { str: string }).str : ""))
+              .join(" ")
+              .toLowerCase();
+            pageText.current.set(n, text);
+          } finally {
+            p.cleanup();
+          }
+        }
+        if (cancelled) return;
         let from = 0;
         let occ = 0;
         while (true) {
@@ -313,7 +362,14 @@ export default function ReaderPage() {
           occ += 1;
           from = idx + needle.length;
         }
-        p.cleanup();
+        // Publish what we have so far, and hand the event loop back so
+        // the page the reader is looking at can render. Every 8 pages
+        // rather than every page: a re-render per page of a 357-page
+        // document is its own stall.
+        if (found.length > 0 && n % 8 === 0) {
+          setMatches([...found]);
+        }
+        if (n % 8 === 0) await new Promise((r) => setTimeout(r, 0));
       }
       if (!cancelled) {
         setMatches(found);
@@ -330,11 +386,20 @@ export default function ReaderPage() {
   }, [doc, findQuery]);
 
   // Sync ?page= so reload + back/forward restore the position.
+  //
+  // Trailing-debounced: `page` follows the scroll, so a drag through a
+  // few hundred pages would otherwise be a few hundred history
+  // mutations in a couple of seconds. Chrome and Firefox both throttle
+  // same-document history writes and start dropping them, and the URL
+  // only has to be right once the scrolling stops.
   useEffect(() => {
-    const url = new URL(window.location.href);
-    if (page > 1) url.searchParams.set("page", String(page));
-    else url.searchParams.delete("page");
-    window.history.replaceState(null, "", url.toString());
+    const t = setTimeout(() => {
+      const url = new URL(window.location.href);
+      if (page > 1) url.searchParams.set("page", String(page));
+      else url.searchParams.delete("page");
+      window.history.replaceState(null, "", url.toString());
+    }, 300);
+    return () => clearTimeout(t);
   }, [page]);
 
   // Scroll the continuous virtualizer to whatever page= the URL is
@@ -359,7 +424,7 @@ export default function ReaderPage() {
   // reader would throw you back to the page the deep link named.
   const handledPageNav = useRef<string | null>(null);
   useEffect(() => {
-    if (mode !== "continuous") return;
+    if (paged) return;
     if (!heightsReady || numPages === 0) return;
     const raw = searchParams.get("page");
     const target = Number(raw || 0);
@@ -377,7 +442,7 @@ export default function ReaderPage() {
       continuousRef.current?.scrollToPage(target);
     }, 50);
     return () => clearTimeout(t);
-  }, [mode, heightsReady, numPages, searchParams, location.key]);
+  }, [paged, heightsReady, numPages, searchParams, location.key]);
 
   // Per-page base render scale. Default is fit-to-width (renders the
   // page to fill the container's inner width); "page" mode clamps
@@ -388,31 +453,141 @@ export default function ReaderPage() {
   // ResizeObserver fires) we return 1 as a safe fallback; the
   // virtualizer is remounted on width/height/fit change below so the
   // wrong heights don't get cached.
-  const pageScaleFor = useCallback(
-    (n: number): number => {
-      const native = pageNativeRef.current.get(n);
-      if (!native || containerSize.width === 0) return 1;
-      const innerW = Math.max(0, containerSize.width - SCROLL_PADDING);
-      const widthScale = innerW / native.width;
+  // Zoom multiplies the fit scale rather than transforming what the
+  // fit scale produced. Everything downstream — the page box, the
+  // canvas, the virtualizer's geometry — is built from the product, so
+  // the document's scroll height grows with the zoom and native
+  // scrolling reaches all of a zoomed page. pdf.js's own viewer works
+  // this way, and so does every other viewer that behaves.
+  const [zoom, setZoom] = useState(1);
+  const [spread, setSpread] = usePref(PREF_READER_SPREAD);
+
+  // How the document is laid out: a row per page, or facing pairs.
+  const rows = useMemo(() => pageRows(numPages, spread), [numPages, spread]);
+  // Read by the page-stepping callbacks, which are defined above this
+  // and should not be rebuilt every time the layout changes.
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
+
+
+  /**
+   * The scale a row renders at.
+   *
+   * Per row rather than per page, because a facing pair has to fit the
+   * width between them — so a spread is drawn at roughly half the scale
+   * a lone page would be, which is what makes it a spread rather than
+   * two pages overflowing. Fit-page measures the tallest page in the
+   * row, since that is the one that has to clear the viewport.
+   */
+  const fitScaleFor = useCallback(
+    (pages: number[]): number => {
+      if (pages.length === 0 || containerSize.width === 0) return 1;
+      const natives = pages.map((n) => pageNativeRef.current.get(n));
+      if (natives.some((n) => !n)) return 1;
+      const totalW = natives.reduce((sum, n) => sum + n!.width, 0);
+      const maxH = Math.max(...natives.map((n) => n!.height));
+      const gutter = (pages.length - 1) * SPREAD_GAP;
+      const innerW = Math.max(
+        1,
+        containerSize.width - SCROLL_PADDING - gutter,
+      );
+      const widthScale = innerW / totalW;
       if (fit === "page" && containerSize.height > 0) {
         const innerH = Math.max(0, containerSize.height - SCROLL_PADDING);
-        if (innerH > 0) {
-          const heightScale = innerH / native.height;
-          return Math.min(widthScale, heightScale);
-        }
+        if (innerH > 0) return Math.min(widthScale, innerH / maxH);
       }
       return widthScale;
     },
     [containerSize.width, containerSize.height, fit],
   );
 
+  const rowScaleFor = useCallback(
+    (pages: number[]): number => fitScaleFor(pages) * zoom,
+    [fitScaleFor, zoom],
+  );
+
+  /**
+   * The zoom that would put the page in view at a given size on screen,
+   * where 1 is pdf.js's "actual size" — its scale 1, which is 4/3 of a
+   * PDF point per CSS pixel.
+   *
+   * Zoom here multiplies the fit scale, so a percentage has to be
+   * converted through whatever the window is currently making the page:
+   * the same 100% is a different multiplier on a narrow window than on
+   * a wide one, which is the point of it meaning a size.
+   */
+  const zoomForAbsolute = useCallback(
+    (absolute: number): number => {
+      const here = rows[rowOfPage(rows, page)] ?? [page];
+      const fitScale = fitScaleFor(here);
+      if (!(fitScale > 0)) return 1;
+      return (absolute * PDF_TO_CSS_UNITS) / fitScale;
+    },
+    [fitScaleFor, rows, page],
+  );
+
+  /** What the current zoom works out to as a size on screen. */
+  const absoluteZoom = useMemo(() => {
+    const here = rows[rowOfPage(rows, page)] ?? [page];
+    return (fitScaleFor(here) * zoom) / PDF_TO_CSS_UNITS;
+  }, [fitScaleFor, rows, page, zoom]);
+
+  // Rows grouped into the bands the list scrolls through. One row per
+  // band everywhere except wrapped, which fits as many across as the
+  // width allows.
+  const bands = useMemo(() => {
+    if (scrollMode !== "wrapped") return rows.map((r) => [r]);
+    const out: number[][][] = [];
+    let line: number[][] = [];
+    let used = 0;
+    const room = Math.max(1, containerSize.width - SCROLL_PADDING);
+    for (const row of rows) {
+      const width =
+        row.reduce(
+          (sum, n) => sum + (pageNativeRef.current.get(n)?.width ?? 0),
+          0,
+        ) *
+          rowScaleFor(row) +
+        (row.length - 1) * SPREAD_GAP;
+      if (line.length > 0 && used + width + SPREAD_GAP > room) {
+        out.push(line);
+        line = [];
+        used = 0;
+      }
+      line.push(row);
+      used += width + SPREAD_GAP;
+    }
+    if (line.length > 0) out.push(line);
+    return out;
+  }, [rows, scrollMode, containerSize.width, rowScaleFor]);
+
   const estimateSize = useCallback(
     (index: number) => {
-      const native = pageNativeRef.current.get(index + 1);
-      if (!native) return ESTIMATE_PAGE_HEIGHT + PAGE_GAP;
-      return native.height * pageScaleFor(index + 1) + PAGE_GAP;
+      const band = bands[index];
+      if (!band || band.length === 0) return ESTIMATE_PAGE_HEIGHT + PAGE_GAP;
+      if (horizontal) {
+        // Along the scroll axis a band measures its width.
+        const row = band[0];
+        const natives = row.map((n) => pageNativeRef.current.get(n));
+        if (natives.some((n) => !n)) return ESTIMATE_PAGE_HEIGHT + PAGE_GAP;
+        const total = natives.reduce((sum, n) => sum + n!.width, 0);
+        return (
+          total * rowScaleFor(row) + (row.length - 1) * SPREAD_GAP + PAGE_GAP
+        );
+      }
+      const tallest = Math.max(
+        ...band.map((row) =>
+          Math.max(
+            ...row.map(
+              (n) =>
+                (pageNativeRef.current.get(n)?.height ?? 0) * rowScaleFor(row),
+            ),
+          ),
+        ),
+      );
+      return (tallest || ESTIMATE_PAGE_HEIGHT) + PAGE_GAP;
     },
-    [pageScaleFor],
+    [bands, horizontal, rowScaleFor],
   );
 
   // useVirtualizer is moved into ContinuousList (a child component
@@ -422,7 +597,10 @@ export default function ReaderPage() {
   // here and survived the remount — its cached estimateSize results
   // from the first paint kept totalSize stuck small, capping how
   // far you could scroll.
-  const virtualKey = `${numPages}-${containerSize.width}-${containerSize.height}-${heightsReady}-${fit}`;
+  // Deliberately excludes the container size and the zoom: those
+  // change often and are handled by re-measuring in place. Only the
+  // things that invalidate the virtualizer wholesale remain.
+  const virtualKey = `${numPages}-${heightsReady}`;
 
   // Imperative bridge so the toolbar's prev/next/page-input can
   // command scrolling on the (key'd, possibly remounted) child.
@@ -430,24 +608,34 @@ export default function ReaderPage() {
 
   const goPrev = useCallback(() => {
     setPage((p) => {
-      const n = Math.max(1, p - 1);
-      if (mode === "continuous") {
+      // A step is a band, not a page: with spreads on, stepping one
+      // page would leave the same pair on screen with a different one
+      // marked current. Both sides move, which is what the arrows
+      // either side of the page number look like they should do.
+      const at = rowOfPage(rowsRef.current, p);
+      const n = rowsRef.current[Math.max(0, at - 1)]?.[0] ?? Math.max(1, p - 1);
+      if (!paged) {
         continuousRef.current?.scrollToPage(n);
       }
       return n;
     });
-  }, [mode]);
+  }, [paged]);
 
   const goNext = useCallback(() => {
     setPage((p) => {
       if (!numPages) return p;
-      const n = Math.min(numPages, p + 1);
-      if (mode === "continuous") {
+      const at = rowOfPage(rowsRef.current, p);
+      const n = Math.min(
+        numPages,
+        rowsRef.current[Math.min(rowsRef.current.length - 1, at + 1)]?.[0] ??
+          p + 1,
+      );
+      if (!paged) {
         continuousRef.current?.scrollToPage(n);
       }
       return n;
     });
-  }, [numPages, mode]);
+  }, [numPages, paged]);
 
   function jumpToMatch(idx: number): void {
     if (matches.length === 0) return;
@@ -455,15 +643,7 @@ export default function ReaderPage() {
     setCurrentMatch(wrapped);
     const target = matches[wrapped];
     setPage(target.page);
-    // Reset pinch before scrolling. While pinched, the visible
-    // viewport is driven by translateY on the wrapper rather than
-    // scrollTop on the container, so the virtualizer's scrollToIndex
-    // moves a "scroll" position the user can't see — the target
-    // page never enters the mount window and the user lands on
-    // background. Resetting drops translate/scale to identity so
-    // scrollTop and visible viewport agree again.
-    pinch.resetZoom();
-    if (mode === "continuous") {
+    if (!paged) {
       continuousRef.current?.scrollToPage(target.page);
     }
   }
@@ -474,6 +654,18 @@ export default function ReaderPage() {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
         e.preventDefault();
         setFindOpen(true);
+        return;
+      }
+      // Escape closes the find bar from anywhere, not only from the
+      // field: after clicking into the document to read a hit, the bar
+      // is still open and the key that should dismiss it did nothing,
+      // because focus had moved off the input that was listening.
+      // Checked before the input guard so it works in the field too,
+      // which is where the field's own handler stops mattering.
+      if (e.key === "Escape" && findOpen) {
+        e.preventDefault();
+        setFindOpen(false);
+        setFindInput("");
         return;
       }
       if (e.target instanceof HTMLInputElement) return;
@@ -498,7 +690,7 @@ export default function ReaderPage() {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [goPrev, goNext, nav]);
+  }, [goPrev, goNext, nav, findOpen]);
 
   // Block document-level pinch-zoom while the reader is mounted.
   useEffect(() => {
@@ -517,7 +709,99 @@ export default function ReaderPage() {
   // translate. When state.scale === 1, touchAction falls back to
   // pan-y so native vertical scroll works. Disabled while in
   // select mode so finger drags select text instead of pinching.
-  const pinch = usePinchZoom(scrollRef, { enabled: !selectMode });
+  // The element the transient pinch preview is applied to, and which
+  // holds the pages. Only touched during a live gesture.
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  /**
+   * Change zoom while holding the reader's place.
+   *
+   * The anchor is a row and how far into it the viewport sits, not a
+   * fraction of the document: the virtualizer only estimates its total
+   * height and revises it as pages render, so a fraction of that total
+   * means something different a moment later. A row and an offset
+   * within it survive the rows changing height, which is the one thing
+   * a zoom is guaranteed to do.
+   *
+   * Restoring happens in ContinuousList, straight after it re-measures.
+   * Doing it here would run before that and use the old geometry, which
+   * is what made zooming out scroll down the document.
+   */
+  // Single-page mode has no virtualizer to correct, but it still has to
+  // record the true page size: that height is the origin the
+  // selection-to-PDF conversion flips around, so a stale one stores
+  // highlights at the wrong coordinates everywhere else.
+  const applyNativeSizeSingle = useCallback(
+    (n: number, size: NativeViewport) => {
+      pageNativeRef.current.set(n, size);
+    },
+    [],
+  );
+
+  const applyZoom = useCallback((next: number) => {
+    setZoom(clampZoom(next));
+    // A wheel or a button leaves the named modes behind: the reader
+    // asked for a size, not for "whatever fits".
+    setZoomChoice("custom");
+  }, []);
+
+  // Which entry of the zoom menu is selected. "custom" is anything
+  // reached by wheel or button, shown as its own percentage rather than
+  // snapped to the nearest preset.
+  const [zoomChoice, setZoomChoice] = useState<string>("page-width");
+  const isNamedZoom =
+    zoomChoice === "auto" ||
+    zoomChoice === "page-fit" ||
+    zoomChoice === "page-width" ||
+    zoomChoice === "page-actual";
+
+  /**
+   * The zoom menu, in pdf.js's terms.
+   *
+   * The named modes are the two fits plus actual size; everything else
+   * is a size on screen, which has to be converted through the current
+   * fit scale because zoom here is a multiple of it.
+   */
+  const applyZoomChoice = useCallback(
+    (choice: string) => {
+      setZoomChoice(choice);
+      switch (choice) {
+        case "page-width":
+          setFit("width");
+          setZoom(1);
+          return;
+        case "page-fit":
+          setFit("page");
+          setZoom(1);
+          return;
+        case "auto":
+          // Page width, but a narrow document is not blown up past
+          // legibility — the same cap pdf.js puts on it.
+          setFit("width");
+          setZoom(
+            clampZoom(Math.min(1, zoomForAbsolute(MAX_AUTO_SCALE))),
+          );
+          return;
+        case "page-actual":
+          setFit("width");
+          setZoom(clampZoom(zoomForAbsolute(1)));
+          return;
+        default: {
+          const absolute = Number(choice);
+          if (!Number.isFinite(absolute)) return;
+          setFit("width");
+          setZoom(clampZoom(zoomForAbsolute(absolute)));
+        }
+      }
+    },
+    [zoomForAbsolute, setFit],
+  );
+
+  const { previewRef } = useZoomGestures(scrollRef, contentRef, {
+    zoom,
+    onZoom: applyZoom,
+    enabled: !selectMode,
+  });
   // Mirror pinch.scale into a ref so the find-highlight effect (in
   // PageCanvas) can read the current value without listing
   // pinch.scale as a dependency. We don't want the effect to re-run
@@ -527,10 +811,7 @@ export default function ReaderPage() {
   // textLayer changes) and the divs get placed in *layout*
   // coordinates so the parent transform composes them correctly
   // through any subsequent pinch.
-  const pinchScaleRef = useRef(pinch.scale);
-  useEffect(() => {
-    pinchScaleRef.current = pinch.scale;
-  }, [pinch.scale]);
+  const pinchScaleRef = previewRef;
 
   // Annotations for this PDF.
   const qc = useQueryClient();
@@ -565,9 +846,14 @@ export default function ReaderPage() {
   }, [annotationsQuery.data]);
 
   const createHighlight = useMutation({
-    mutationFn: (input: { pageNumber: number; rects: Rect[]; text: string }) =>
+    mutationFn: (input: {
+      pageNumber: number;
+      rects: Rect[];
+      text: string;
+      kind?: "highlight" | "note";
+    }) =>
       createAnnotation(params.attachmentId!, {
-        kind: "highlight",
+        kind: input.kind ?? "highlight",
         page_number: input.pageNumber,
         rects: input.rects,
         text: input.text,
@@ -577,17 +863,43 @@ export default function ReaderPage() {
     },
   });
 
+  const mutateHighlight = createHighlight.mutate;
+  /**
+   * Leave a note at a point on a page.
+   *
+   * Shelf's own annotation, not one written into the PDF: it carries
+   * visibility, an author and a link, which a note baked into the file
+   * could not.
+   */
+  const mutateNote = createHighlight.mutate;
+  const createNote = useCallback(
+    (pageNumber: number, x: number, y: number) => {
+      const text = window.prompt("Note");
+      if (text === null || !text.trim()) return;
+      mutateNote({
+        pageNumber,
+        rects: [[x, y, 0, 0]],
+        text: text.trim(),
+        kind: "note",
+      });
+    },
+    [mutateNote],
+  );
+
   const onCreateHighlight = useCallback(
     (pageNumber: number, rects: Rect[], text: string) => {
       // Drop the OS selection so the floating button doesn't linger
       // and so a re-tap on the same word doesn't show stale state.
       window.getSelection()?.removeAllRanges();
-      createHighlight.mutate({ pageNumber, rects, text });
+      mutateHighlight({ pageNumber, rects, text });
       // Exit mobile select-mode after a successful highlight so the
       // user can scroll/pinch again without an extra tap.
       setSelectMode(false);
     },
-    [createHighlight],
+    // `.mutate` is stable across renders; the mutation object it hangs
+    // off is not, and depending on that rebuilt this callback -- and
+    // re-rendered every mounted page -- on every render of the reader.
+    [mutateHighlight],
   );
 
   const removeAnnotation = useMutation({
@@ -631,24 +943,51 @@ export default function ReaderPage() {
   // Generic "scroll the reader to page N" — used by every panel
   // that wants to navigate (annotations, outline, fulltext).
   const goToPage = useCallback(
-    (n: number) => {
-      // Reset pinch first — when zoomed the visible viewport is
-      // driven by translate, not scrollTop, so scrollToPage won't
-      // bring the target into view.
-      pinch.resetZoom();
+    (n: number, offsetWithinPage?: number) => {
       setPage(n);
-      if (mode === "continuous") {
-        // Defer past the pinch-reset / setPage render flush so the
-        // virtualizer measures with the identity transform in place;
-        // without this, scrollToIndex computed against a pinched
-        // layout would silently land on the wrong scrollTop and the
-        // viewer would stay on whatever page was already visible.
-        setTimeout(() => {
-          continuousRef.current?.scrollToPage(n);
-        }, 0);
-      }
+      // Deferred past the setPage render flush so the geometry is the
+      // one being scrolled in. Zoom no longer enters into it: the
+      // layout is the zoom, so this is always in the coordinates the
+      // reader sees.
+      setTimeout(() => {
+        if (!paged) {
+          continuousRef.current?.scrollToPage(n, offsetWithinPage);
+          return;
+        }
+        // Page mode holds one band, so the container itself is what
+        // scrolls to a point inside it.
+        const el = scrollRef.current;
+        if (!el) return;
+        el.scrollTop =
+          offsetWithinPage === undefined
+            ? 0
+            : Math.max(0, offsetWithinPage - el.clientHeight * 0.3);
+      }, 0);
     },
-    [pinch, mode],
+    [paged],
+  );
+
+  /**
+   * How far down a page an annotation sits, in CSS pixels.
+   *
+   * Its rects are in PDF user-space, whose origin is the bottom-left
+   * corner, so the topmost edge is the largest y — and the distance
+   * from the top of the page is what is left after taking that off the
+   * page's height, scaled by whatever the page is being drawn at.
+   */
+  const annotationOffset = useCallback(
+    (a: Annotation): number | undefined => {
+      const native = pageNativeRef.current.get(a.page_number);
+      if (!native || a.rects.length === 0) return undefined;
+      const topEdge = Math.max(...a.rects.map(([, y, , h]) => y + h));
+      const scale = rowScaleFor(
+        rowsRef.current[rowOfPage(rowsRef.current, a.page_number)] ?? [
+          a.page_number,
+        ],
+      );
+      return Math.max(0, (native.height - topEdge) * scale);
+    },
+    [rowScaleFor],
   );
 
   // The annotation to ring, if any. Set by a deep link or by clicking
@@ -674,13 +1013,13 @@ export default function ReaderPage() {
 
   const jumpToAnnotation = useCallback(
     (a: Annotation) => {
-      goToPage(a.page_number);
+      goToPage(a.page_number, annotationOffset(a));
       focusAnnotation(a.id);
       // Auto-close the drawer on coarse-pointer devices so the user
       // can see the highlight without an extra tap.
       if (isCoarsePointer) setHighlightsOpen(false);
     },
-    [goToPage, focusAnnotation, isCoarsePointer],
+    [goToPage, annotationOffset, focusAnnotation, isCoarsePointer],
   );
 
   // `?annotation=<id>` — open at that annotation and ring it.
@@ -724,21 +1063,79 @@ export default function ReaderPage() {
     [goToPage, isCoarsePointer],
   );
 
-  // Once the user holds a zoom level still for OVERSAMPLE_SETTLE_MS,
-  // we ask pdfjs to re-render the visible pages at higher pixel
-  // detail (canvas pixel buffer × oversample, CSS box unchanged) so
-  // text and vector strokes turn crisp again. While the user is
-  // actively pinching, pinch.scale changes per frame, the timer
-  // keeps resetting, and pdfjs stays out of the way.
-  const [oversample, setOversample] = useState(1);
+  /**
+   * The PDF's layers, and the config the renderer draws them by.
+   *
+   * The config object is pdfjs's own and is mutated in place by
+   * setVisibility, so it cannot be React state — nothing about it
+   * changes identity. `layerVersion` is what tells the pages to draw
+   * again, and it is part of each page's drawn-key so a toggle
+   * invalidates what is already on screen.
+   */
+  const ocConfigRef = useRef<OcConfig | null>(null);
+  const [layers, setLayers] = useState<LayerGroup[] | undefined>(undefined);
+  const [layerVersion, setLayerVersion] = useState(0);
+
   useEffect(() => {
-    const target = Math.max(1, Math.min(MAX_OVERSAMPLE, pinch.scale));
-    if (Math.abs(target - oversample) < 0.01) return;
-    const t = setTimeout(() => {
-      setOversample(target);
-    }, OVERSAMPLE_SETTLE_MS);
-    return () => clearTimeout(t);
-  }, [pinch.scale, oversample]);
+    if (!doc) return;
+    let cancelled = false;
+    doc
+      .getOptionalContentConfig()
+      .then((config) => {
+        if (cancelled) return;
+        ocConfigRef.current = config;
+        // The config is iterable over [id, group]; there is no
+        // getGroups(), and getOrder() is about display order rather
+        // than membership.
+        setLayers(
+          [...config].map(([id, group]) => ({
+            id: String(id),
+            name:
+              (group as { name?: string }).name?.trim() || "Unnamed layer",
+            visible: (group as { visible?: boolean }).visible !== false,
+          })),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setLayers([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [doc]);
+
+  const toggleLayer = useCallback((id: string, visible: boolean) => {
+    const config = ocConfigRef.current;
+    if (!config) return;
+    config.setVisibility(id, visible);
+    setLayers((prev) =>
+      prev?.map((l) => (l.id === id ? { ...l, visible } : l)),
+    );
+    setLayerVersion((v) => v + 1);
+  }, []);
+
+  // Which find match the view last scrolled to. Shared by every page
+  // so a remount does not re-scroll to it; see PageCanvas.
+  const lastScrolledTo = useRef<string | null>(null);
+
+  // Page renders run one at a time, nearest the viewport first. One
+  // queue for the document, so the single pdfjs worker is never asked
+  // for nine pages at once.
+  const renderQueue = useRef(new RenderQueue()).current;
+  // Shared pixel ceiling across every rendered page. Per-page clamping
+  // bounds one canvas; how many are mounted is decided by the viewport,
+  // not by anything about memory.
+  const canvasBudget = useRef(new CanvasBudget()).current;
+  // A thumbnail of every page seen so far, so a page returning to view
+  // has something to show while its real render is queued. Cleared with
+  // the document.
+  const thumbnails = useRef(new PageThumbnails()).current;
+  useEffect(() => {
+    return () => thumbnails.clear();
+  }, [doc, thumbnails]);
+  // Read by the queue's priority function without re-subscribing it.
+  const pageRef = useRef(page);
+  pageRef.current = page;
 
   const currentMatchInfo = matches[currentMatch] ?? null;
 
@@ -747,229 +1144,47 @@ export default function ReaderPage() {
       className="flex h-dvh flex-col"
       style={{ backgroundColor: "var(--color-bg)" }}
     >
-      <div
-        className="flex flex-wrap items-center gap-2 border-b px-3 py-2"
-        style={{ borderColor: "var(--color-border)" }}
-      >
-        <button
-          onClick={() => nav(-1)}
-          aria-label="Back"
-          className="flex items-center gap-1 rounded px-2 py-1 text-xs hover:opacity-80"
-          style={{ color: "var(--color-text-muted)" }}
-        >
-          <ArrowLeft className="h-3.5 w-3.5" />
-          Back
-        </button>
-
-        <button
-          onClick={() => setFindOpen((v) => !v)}
-          aria-label="Find in document"
-          title="Find in document"
-          className="flex items-center gap-1 rounded px-2 py-1 text-xs hover:opacity-80"
-          style={{
-            color: findOpen
-              ? "var(--color-accent)"
-              : "var(--color-text-muted)",
-          }}
-        >
-          <Search className="h-3.5 w-3.5" />
-        </button>
-
-        {isCoarsePointer && (
-          <button
-            onClick={() => setSelectMode((v) => !v)}
-            aria-label="Select text"
-            title={
-              selectMode
-                ? "Exit text-select mode"
-                : "Enable text-select mode (drag to select)"
-            }
-            className="flex items-center gap-1 rounded px-2 py-1 text-xs hover:opacity-80"
-            style={{
-              color: selectMode
-                ? "var(--color-accent)"
-                : "var(--color-text-muted)",
-            }}
-          >
-            <Highlighter className="h-3.5 w-3.5" />
-            {selectMode ? "Selecting" : "Select"}
-          </button>
-        )}
-
-        <button
-          onClick={() => {
-            setOutlineOpen((v) => {
-              const next = !v;
-              if (next) setHighlightsOpen(false);
-              return next;
-            });
-          }}
-          aria-label="Outline"
-          title="Show document outline"
-          className="flex items-center gap-1 rounded px-2 py-1 text-xs hover:opacity-80"
-          style={{
-            color: outlineOpen
-              ? "var(--color-accent)"
-              : "var(--color-text-muted)",
-          }}
-        >
-          <ListTree className="h-3.5 w-3.5" />
-        </button>
-
-        <button
-          onClick={() => {
-            setHighlightsOpen((v) => {
-              const next = !v;
-              if (next) setOutlineOpen(false);
-              return next;
-            });
-          }}
-          aria-label="Highlights"
-          title="Show highlights for this PDF"
-          className="flex items-center gap-1 rounded px-2 py-1 text-xs hover:opacity-80"
-          style={{
-            color: highlightsOpen
-              ? "var(--color-accent)"
-              : "var(--color-text-muted)",
-          }}
-        >
-          <Bookmark className="h-3.5 w-3.5" />
-          {annotationsSorted.length > 0 && (
-            <span className="tabular-nums">{annotationsSorted.length}</span>
-          )}
-        </button>
-
-        <button
-          onClick={() => setDebugText((v) => !v)}
-          aria-label="Toggle text-layer debug"
-          title={
-            debugText
-              ? "Hide text-layer overlay"
-              : "Show text-layer overlay (debug)"
-          }
-          className="flex items-center gap-1 rounded px-2 py-1 text-xs hover:opacity-80"
-          style={{
-            color: debugText
-              ? "var(--color-accent)"
-              : "var(--color-text-muted)",
-          }}
-        >
-          {debugText ? (
-            <Eye className="h-3.5 w-3.5" />
-          ) : (
-            <EyeOff className="h-3.5 w-3.5" />
-          )}
-        </button>
-
-        <button
-          onClick={() =>
-            setMode(mode === "single" ? "continuous" : "single")
-          }
-          aria-label="Toggle reader mode"
-          title={
-            mode === "single"
-              ? "Switch to continuous (all pages)"
-              : "Switch to single-page"
-          }
-          className="flex items-center gap-1 rounded px-2 py-1 text-xs hover:opacity-80"
-          style={{ color: "var(--color-text-muted)" }}
-        >
-          {mode === "single" ? (
-            <>
-              <FileText className="h-3.5 w-3.5" />
-              Single
-            </>
-          ) : (
-            <>
-              <List className="h-3.5 w-3.5" />
-              Continuous
-            </>
-          )}
-        </button>
-
-        <button
-          onClick={() => {
-            // Reset any pinch zoom so the new base scale is what the
-            // user actually sees — otherwise a pinched-in view would
-            // hide the fit change.
-            pinch.resetZoom();
-            setFit(fit === "width" ? "page" : "width");
-          }}
-          aria-label="Toggle fit mode"
-          title={
-            fit === "width"
-              ? "Fit page to viewport height"
-              : "Fit page to viewport width"
-          }
-          className="flex items-center gap-1 rounded px-2 py-1 text-xs hover:opacity-80"
-          style={{ color: "var(--color-text-muted)" }}
-        >
-          {fit === "width" ? (
-            <>
-              <MoveHorizontal className="h-3.5 w-3.5" />
-              Fit width
-            </>
-          ) : (
-            <>
-              <Maximize className="h-3.5 w-3.5" />
-              Fit page
-            </>
-          )}
-        </button>
-
-        {params.attachmentId && (
-          <ProcessingMenu attachmentId={params.attachmentId} />
-        )}
-
-        {params.attachmentId && (
-          <VersionPicker attachmentId={params.attachmentId} />
-        )}
-
-        <div className="ml-auto flex items-center gap-1">
-          <button
-            onClick={goPrev}
-            disabled={page <= 1}
-            aria-label="Previous page"
-            className="rounded p-1 hover:opacity-70 disabled:opacity-30"
-            style={{ color: "var(--color-text-muted)" }}
-          >
-            <ChevronLeft className="h-4 w-4" />
-          </button>
-          <input
-            type="number"
-            min={1}
-            max={numPages || 1}
-            value={page}
-            onChange={(e) => {
-              const v = Number(e.target.value);
-              if (Number.isNaN(v) || !numPages) return;
-              const clamped = Math.max(1, Math.min(numPages, v));
-              setPage(clamped);
-              if (mode === "continuous") {
-                continuousRef.current?.scrollToPage(clamped);
-              }
-            }}
-            className="w-14 rounded border px-2 py-0.5 text-center text-xs"
-            style={{
-              backgroundColor: "var(--color-surface)",
-              borderColor: "var(--color-border)",
-              color: "var(--color-text)",
-            }}
-          />
-          <span className="text-xs" style={{ color: "var(--color-text-muted)" }}>
-            / {numPages || "—"}
-          </span>
-          <button
-            onClick={goNext}
-            disabled={!numPages || page >= numPages}
-            aria-label="Next page"
-            className="rounded p-1 hover:opacity-70 disabled:opacity-30"
-            style={{ color: "var(--color-text-muted)" }}
-          >
-            <ChevronRight className="h-4 w-4" />
-          </button>
-        </div>
-      </div>
+      <ReaderToolbar
+        navigation={{
+          onBack: () => nav(-1),
+          page,
+          numPages,
+          goPrev,
+          goNext,
+          setPage: goToPage,
+          outlineOpen,
+          setOutlineOpen,
+          findOpen,
+          setFindOpen,
+        }}
+        view={{
+          scrollMode,
+          setMode,
+          spread,
+          setSpread,
+          zoom,
+          applyZoom,
+          zoomChoice,
+          applyZoomChoice,
+          isNamedZoom,
+          absoluteZoom,
+        }}
+        marks={{
+          tool,
+          setTool,
+          highlightsOpen,
+          setHighlightsOpen,
+          annotationCount: annotationsSorted.length,
+          attachmentId: params.attachmentId,
+          isAdmin:
+            auth.status === "authenticated" && auth.user.is_admin,
+          debugText,
+          setDebugText,
+          selectMode,
+          setSelectMode,
+          isCoarsePointer,
+        }}
+      />
 
       {findOpen && (
         <div
@@ -986,16 +1201,12 @@ export default function ReaderPage() {
             value={findInput}
             onChange={(e) => setFindInput(e.target.value)}
             onKeyDown={(e) => {
+              // Escape is handled at the window, so it works whether
+              // or not this field has focus; it would only be a second
+              // copy of the same thing here.
               if (e.key === "Enter") {
                 e.preventDefault();
                 jumpToMatch(currentMatch + (e.shiftKey ? -1 : 1));
-              } else if (e.key === "Escape") {
-                e.preventDefault();
-                // Clear as well as close, like the X does. A query left
-                // behind keeps its highlights on the page with no
-                // visible control left to clear them.
-                setFindOpen(false);
-                setFindInput("");
               }
             }}
             placeholder="Find in PDF…"
@@ -1050,20 +1261,47 @@ export default function ReaderPage() {
       )}
 
       <div className="flex min-h-0 flex-1">
+        {/* Before the scroll area, so the drawer opens on the side the
+            document is read from rather than against the far edge. */}
+        {outlineOpen && (
+          <ReaderSidebar
+            doc={doc}
+            numPages={numPages}
+            currentPage={page}
+            onJumpTo={jumpFromOutline}
+            onClose={() => setOutlineOpen(false)}
+            queue={renderQueue}
+            thumbnails={thumbnails}
+            layers={layers}
+            onToggleLayer={toggleLayer}
+          />
+        )}
       <div
         ref={scrollRef}
-        // overflow-y only — pinch handles horizontal pan via
-        // translate, no native horizontal scroll. touchAction
-        // toggles inside usePinchZoom (pan-y at scale=1, none when
-        // zoomed).
-        className={`flex-1 overflow-y-auto p-4${
+        // Both axes: with layout zoom a zoomed page is genuinely
+        // wider than the viewport, so the browser can scroll to the
+        // rest of it. The transform model had to pan it by hand.
+        className={`flex-1 overflow-auto p-4${
           (highlightsOpen || outlineOpen) && isCoarsePointer
             ? " hidden sm:block"
             : ""
         }`}
         style={{
-          touchAction: pinch.contentStyle.touchAction,
+          // `none` only while drag-select owns the touches; otherwise
+          // the browser scrolls both ways and the pinch handler takes
+          // two-finger gestures via preventDefault.
+          // `pan-x pan-y` keeps native one-finger scrolling while
+          // reserving multi-finger gestures for the pinch handler;
+          // `auto` let the compositor claim them, which made
+          // preventDefault a no-op and pinch-to-zoom dead.
+          touchAction: selectMode ? "none" : "pan-x pan-y",
           overscrollBehavior: "contain",
+          // Hold the scrollbar's space open. Without it, zooming past
+          // the viewport width brings a scrollbar in, which shrinks the
+          // container, which changes the fit scale, which can push the
+          // content back under the width and take the scrollbar away
+          // again -- a loop the reader sees as flicker.
+          scrollbarGutter: "stable",
         }}
       >
         {loading && (
@@ -1082,37 +1320,51 @@ export default function ReaderPage() {
             Failed to load PDF: {error}
           </div>
         )}
-        {doc && mode === "single" && (
+        {doc && paged && (
           <div
+            ref={contentRef}
             style={{
-              ...pinch.contentStyle,
-              width: "100%",
+              width: "fit-content",
+              margin: "0 auto",
               display: "flex",
-              justifyContent: "center",
+              gap: `${SPREAD_GAP}px`,
+              alignItems: "flex-start",
             }}
           >
-            <PageCanvas
-              doc={doc}
-              pageNumber={page}
-              renderScale={pageScaleFor(page)}
-              oversample={oversample}
-              native={pageNativeRef.current.get(page)}
-              findQuery={findQuery}
-              currentOccurrence={
-                currentMatchInfo && currentMatchInfo.page === page
-                  ? currentMatchInfo.occurrence
-                  : null
-              }
-              annotations={annotationsByPage.get(page) ?? []}
-              focusedAnnotationId={focusedAnnotationId}
-              debugText={debugText}
-              pinchScaleRef={pinchScaleRef}
-              onCreateHighlight={onCreateHighlight}
-              onFollowLink={goToPage}
-            />
+            {(rows[rowOfPage(rows, page)] ?? [page]).map((n) => (
+              <PageCanvas
+                key={n}
+                doc={doc}
+                pageNumber={n}
+                renderScale={rowScaleFor(rows[rowOfPage(rows, page)] ?? [n])}
+                native={pageNativeRef.current.get(n)}
+                findQuery={findQuery}
+                currentOccurrence={
+                  currentMatchInfo && currentMatchInfo.page === n
+                    ? currentMatchInfo.occurrence
+                    : null
+                }
+                annotations={annotationsByPage.get(n) ?? []}
+                focusedAnnotationId={focusedAnnotationId}
+                debugText={debugText}
+                onNativeSize={applyNativeSizeSingle}
+                queue={renderQueue}
+                budget={canvasBudget}
+                thumbnails={thumbnails}
+                ocConfigRef={ocConfigRef}
+                layerVersion={layerVersion}
+                tool={tool}
+                onCreateNote={createNote}
+                pageRef={pageRef}
+                pinchScaleRef={pinchScaleRef}
+                lastScrolledTo={lastScrolledTo}
+                onCreateHighlight={onCreateHighlight}
+                onFollowLink={goToPage}
+              />
+            ))}
           </div>
         )}
-        {doc && mode === "continuous" && (
+        {doc && !paged && (
           <ContinuousList
             // Keying on virtualKey forces a fresh useVirtualizer
             // call when numPages / containerSize / heightsReady
@@ -1121,32 +1373,34 @@ export default function ReaderPage() {
             key={virtualKey}
             ref={continuousRef}
             doc={doc}
-            numPages={numPages}
             scrollRef={scrollRef}
             estimateSize={estimateSize}
-            pageScaleFor={pageScaleFor}
+            bands={bands}
+            horizontal={horizontal}
+            rowScaleFor={rowScaleFor}
             pageNativeRef={pageNativeRef}
-            pinchStyle={pinch.contentStyle}
-            oversample={oversample}
+            contentRef={contentRef}
             findQuery={findQuery}
             currentMatchInfo={currentMatchInfo}
             annotationsByPage={annotationsByPage}
             focusedAnnotationId={focusedAnnotationId}
             debugText={debugText}
+            queue={renderQueue}
+            budget={canvasBudget}
+            thumbnails={thumbnails}
+            ocConfigRef={ocConfigRef}
+            layerVersion={layerVersion}
+            tool={tool}
+            onCreateNote={createNote}
+            pageRef={pageRef}
             pinchScaleRef={pinchScaleRef}
+            lastScrolledTo={lastScrolledTo}
             onCreateHighlight={onCreateHighlight}
             onFollowLink={goToPage}
             onVisiblePageChange={setPage}
           />
         )}
       </div>
-        {outlineOpen && (
-          <OutlinePanel
-            doc={doc}
-            onJumpTo={jumpFromOutline}
-            onClose={() => setOutlineOpen(false)}
-          />
-        )}
         {highlightsOpen && (
           <HighlightsPanel
             annotations={annotationsSorted}
@@ -1166,938 +1420,3 @@ export default function ReaderPage() {
 // Standard highlight palette — yellow first matches the create-time
 // default. Anything outside the set still renders correctly via the
 // stored hex; the palette only governs what users can pick from.
-const HIGHLIGHT_PALETTE: ReadonlyArray<{ name: string; hex: string }> = [
-  { name: "Yellow", hex: "#ffd400" },
-  { name: "Lime", hex: "#a3e635" },
-  { name: "Blue", hex: "#60a5fa" },
-  { name: "Pink", hex: "#f472b6" },
-  { name: "Orange", hex: "#fb923c" },
-  { name: "Purple", hex: "#c084fc" },
-];
-
-function HighlightsPanel({
-  annotations,
-  attachmentId,
-  isDeleting,
-  onJumpTo,
-  onDelete,
-  onRecolor,
-  onClose,
-}: {
-  annotations: Annotation[];
-  attachmentId: string;
-  isDeleting: boolean;
-  onJumpTo: (a: Annotation) => void;
-  onDelete: (id: string) => void;
-  onRecolor: (id: string, color: string) => void;
-  onClose: () => void;
-}) {
-  const [pickerOpenId, setPickerOpenId] = useState<string | null>(null);
-  const [copiedId, setCopiedId] = useState<string | null>(null);
-
-  const onCopyLink = useCallback(
-    async (a: Annotation) => {
-      const url = annotationLink(attachmentId, a.id, window.location.origin);
-      try {
-        await navigator.clipboard.writeText(url);
-      } catch {
-        // Clipboard access needs a secure context, so an instance
-        // served over plain http has none. Fall back to selecting the
-        // text in a prompt, which always works.
-        window.prompt("Copy this link", url);
-        return;
-      }
-      setCopiedId(a.id);
-      setTimeout(() => setCopiedId((id) => (id === a.id ? null : id)), 1800);
-    },
-    [attachmentId],
-  );
-  return (
-    <aside
-      className="flex w-full flex-col border-l sm:w-80"
-      style={{
-        borderColor: "var(--color-border)",
-        backgroundColor: "var(--color-surface)",
-      }}
-    >
-      <div
-        className="flex items-center justify-between border-b px-3 py-2"
-        style={{ borderColor: "var(--color-border)" }}
-      >
-        <span
-          className="text-xs font-medium"
-          style={{ color: "var(--color-text)" }}
-        >
-          Highlights ({annotations.length})
-        </span>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Close highlights panel"
-          className="rounded p-1 hover:opacity-70"
-          style={{ color: "var(--color-text-muted)" }}
-        >
-          <X className="h-3.5 w-3.5" />
-        </button>
-      </div>
-      {annotations.length === 0 ? (
-        <div
-          className="px-3 py-6 text-center text-xs"
-          style={{ color: "var(--color-text-muted)" }}
-        >
-          No highlights yet. Select text in the PDF and tap "Highlight" to
-          create one.
-        </div>
-      ) : (
-        <ul className="min-h-0 flex-1 overflow-y-auto">
-          {annotations.map((a) => {
-            const pickerOpen = pickerOpenId === a.id;
-            return (
-              <li
-                key={a.id}
-                className="border-b last:border-b-0"
-                style={{ borderColor: "var(--color-border)" }}
-              >
-                <div className="flex items-start gap-2 px-3 py-2">
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setPickerOpenId(pickerOpen ? null : a.id)
-                    }
-                    aria-label="Change highlight color"
-                    title="Change color"
-                    aria-expanded={pickerOpen}
-                    className="mt-0.5 inline-block h-3.5 w-3.5 shrink-0 rounded-sm border border-black/10 hover:opacity-80"
-                    style={{ backgroundColor: a.color }}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => onJumpTo(a)}
-                    className="min-w-0 flex-1 text-left hover:opacity-80"
-                  >
-                    <div
-                      className="mb-1 text-[10px] uppercase tracking-wide"
-                      style={{ color: "var(--color-text-muted)" }}
-                    >
-                      Page {a.page_number}
-                    </div>
-                    <div
-                      className="line-clamp-3 text-xs"
-                      style={{ color: "var(--color-text)" }}
-                    >
-                      {a.text?.trim() || (
-                        <em style={{ color: "var(--color-text-muted)" }}>
-                          (no text)
-                        </em>
-                      )}
-                    </div>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onCopyLink(a)}
-                    aria-label="Copy link to highlight"
-                    title={
-                      copiedId === a.id
-                        ? "Link copied"
-                        : "Copy a link to this highlight"
-                    }
-                    className="rounded p-1 hover:opacity-70"
-                    style={{
-                      color:
-                        copiedId === a.id
-                          ? "var(--color-accent)"
-                          : "var(--color-text-muted)",
-                    }}
-                  >
-                    {copiedId === a.id ? (
-                      <Check className="h-3.5 w-3.5" />
-                    ) : (
-                      <Link2 className="h-3.5 w-3.5" />
-                    )}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onDelete(a.id)}
-                    disabled={isDeleting}
-                    aria-label="Delete highlight"
-                    title="Delete highlight"
-                    className="rounded p-1 hover:opacity-70 disabled:opacity-30"
-                    style={{ color: "var(--color-text-muted)" }}
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-                {pickerOpen && (
-                  <div
-                    className="flex items-center gap-2 px-3 pb-2"
-                    role="radiogroup"
-                    aria-label="Highlight color"
-                  >
-                    {HIGHLIGHT_PALETTE.map((c) => {
-                      const selected =
-                        a.color.toLowerCase() === c.hex.toLowerCase();
-                      return (
-                        <button
-                          key={c.hex}
-                          type="button"
-                          role="radio"
-                          aria-checked={selected}
-                          aria-label={c.name}
-                          title={c.name}
-                          onClick={() => {
-                            if (!selected) onRecolor(a.id, c.hex);
-                            setPickerOpenId(null);
-                          }}
-                          className="h-5 w-5 rounded-full border hover:scale-110"
-                          style={{
-                            backgroundColor: c.hex,
-                            borderColor: selected
-                              ? "var(--color-text)"
-                              : "rgba(0,0,0,0.15)",
-                            borderWidth: selected ? 2 : 1,
-                          }}
-                        />
-                      );
-                    })}
-                  </div>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-      )}
-    </aside>
-  );
-}
-
-interface ContinuousListHandle {
-  scrollToPage: (page: number) => void;
-}
-
-const ContinuousList = forwardRef<
-  ContinuousListHandle,
-  {
-    doc: PDFDocumentProxy;
-    numPages: number;
-    scrollRef: React.RefObject<HTMLDivElement | null>;
-    estimateSize: (index: number) => number;
-    pageScaleFor: (n: number) => number;
-    pageNativeRef: React.RefObject<Map<number, NativeViewport>>;
-    pinchStyle: React.CSSProperties;
-    oversample: number;
-    findQuery: string;
-    currentMatchInfo: { page: number; occurrence: number } | null;
-    annotationsByPage: Map<number, Annotation[]>;
-    focusedAnnotationId: string | null;
-    debugText: boolean;
-    pinchScaleRef: React.RefObject<number>;
-    onCreateHighlight: (
-      pageNumber: number,
-      rects: Rect[],
-      text: string,
-    ) => void;
-    onFollowLink: (page: number) => void;
-    onVisiblePageChange: (page: number) => void;
-  }
->(function ContinuousList(
-  {
-    doc,
-    numPages,
-    scrollRef,
-    estimateSize,
-    pageScaleFor,
-    pageNativeRef,
-    pinchStyle,
-    oversample,
-    findQuery,
-    currentMatchInfo,
-    annotationsByPage,
-    focusedAnnotationId,
-    debugText,
-    pinchScaleRef,
-    onCreateHighlight,
-    onFollowLink,
-    onVisiblePageChange,
-  },
-  ref,
-) {
-  const virtualizer = useVirtualizer({
-    count: numPages,
-    getScrollElement: () => scrollRef.current,
-    estimateSize,
-    overscan: 3,
-  });
-
-  useImperativeHandle(
-    ref,
-    () => ({
-      scrollToPage: (page: number) => {
-        virtualizer.scrollToIndex(page - 1, { align: "start" });
-      },
-    }),
-    [virtualizer],
-  );
-
-  const items = virtualizer.getVirtualItems();
-
-  // Scroll-driven page indicator. Each scroll tick we pick the page
-  // whose top edge has just passed the viewport's "current page"
-  // line — a small offset below the top so a page only switches once
-  // it's clearly the dominant one on screen. The previous build had
-  // no listener here, so the page number was frozen at whatever the
-  // toolbar / outline / URL last set it to.
-  const lastReportedRef = useRef<number>(0);
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const compute = () => {
-      const offset = virtualizer.scrollOffset ?? el.scrollTop;
-      const viewportH = el.clientHeight;
-      // Threshold: a page becomes "current" once its top has scrolled
-      // about a third of the viewport past the top edge.
-      const line = offset + viewportH * 0.3;
-      const visible = virtualizer.getVirtualItems();
-      if (visible.length === 0) return;
-      let pick = visible[0].index;
-      for (const v of visible) {
-        if (v.start <= line) pick = v.index;
-        else break;
-      }
-      const page = pick + 1;
-      if (page !== lastReportedRef.current) {
-        lastReportedRef.current = page;
-        onVisiblePageChange(page);
-      }
-    };
-    // No initial compute() — at mount scrollTop=0 would always
-    // resolve to page 1, which would clobber a deep-link ?page=N
-    // before the URL-jump effect has scrolled to N.
-    el.addEventListener("scroll", compute, { passive: true });
-    return () => el.removeEventListener("scroll", compute);
-  }, [scrollRef, virtualizer, onVisiblePageChange]);
-
-  return (
-    <div
-      style={{
-        ...pinchStyle,
-        width: "100%",
-        position: "relative",
-        height: `${virtualizer.getTotalSize()}px`,
-      }}
-    >
-      {items.map((vi) => {
-        const pageNumber = vi.index + 1;
-        return (
-          <div
-            key={vi.key}
-            data-index={vi.index}
-            style={{
-              position: "absolute",
-              top: 0,
-              left: 0,
-              width: "100%",
-              transform: `translateY(${vi.start}px)`,
-              paddingBottom: `${PAGE_GAP}px`,
-              display: "flex",
-              justifyContent: "center",
-            }}
-          >
-            <PageCanvas
-              doc={doc}
-              pageNumber={pageNumber}
-              renderScale={pageScaleFor(pageNumber)}
-              oversample={oversample}
-              native={pageNativeRef.current.get(pageNumber)}
-              findQuery={findQuery}
-              currentOccurrence={
-                currentMatchInfo && currentMatchInfo.page === pageNumber
-                  ? currentMatchInfo.occurrence
-                  : null
-              }
-              annotations={annotationsByPage.get(pageNumber) ?? []}
-              focusedAnnotationId={focusedAnnotationId}
-              debugText={debugText}
-              pinchScaleRef={pinchScaleRef}
-              onCreateHighlight={onCreateHighlight}
-              onFollowLink={onFollowLink}
-            />
-          </div>
-        );
-      })}
-    </div>
-  );
-});
-
-function PageCanvas({
-  doc,
-  pageNumber,
-  renderScale,
-  oversample,
-  native,
-  findQuery,
-  currentOccurrence,
-  annotations,
-  focusedAnnotationId,
-  debugText,
-  pinchScaleRef,
-  onCreateHighlight,
-  onFollowLink,
-}: {
-  doc: PDFDocumentProxy;
-  pageNumber: number;
-  renderScale: number;
-  /** Pixel-buffer multiplier on top of dpr. CSS box stays at
-   *  renderScale × native; the extra pixels are spent on detail
-   *  visible only when the wrapper is CSS-scaled (pinch zoom).
-   *  Default 1 means "no oversample". */
-  oversample: number;
-  native?: NativeViewport;
-  findQuery: string;
-  currentOccurrence: number | null;
-  annotations: Annotation[];
-  focusedAnnotationId: string | null;
-  debugText: boolean;
-  pinchScaleRef: React.RefObject<number>;
-  onCreateHighlight: (
-    pageNumber: number,
-    rects: Rect[],
-    text: string,
-  ) => void;
-  /** Follow an internal link — scroll the reader to that page. */
-  onFollowLink: (page: number) => void;
-}) {
-  const wrapperRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const textLayerRef = useRef<HTMLDivElement>(null);
-  const [textLayerVersion, setTextLayerVersion] = useState(0);
-  // Which match this page last scrolled to, so a re-render does not
-  // scroll to it again.
-  const lastScrolledTo = useRef<string | null>(null);
-
-  const cssW = native ? native.width * renderScale : undefined;
-  const cssH = native ? native.height * renderScale : undefined;
-
-  // Pending selection for the "Highlight" floating button. Rects are
-  // in *layout* coords within the wrapper (un-pinched, un-rendered)
-  // so the button can position itself with the same coord system as
-  // the wrapper. Conversion to PDF user-space happens on commit.
-  const [pendingHighlight, setPendingHighlight] = useState<{
-    layoutRects: { x: number; y: number; w: number; h: number }[];
-    pdfRects: Rect[];
-    text: string;
-  } | null>(null);
-
-  // The PDF's own hyperlinks on this page. Independent of the canvas
-  // render effect because it doesn't depend on scale — the rects come
-  // back in PDF user-space and the overlay scales them itself, so a
-  // zoom change re-lays-out the same links instead of re-reading them.
-  const [links, setLinks] = useState<PageLink[]>([]);
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const pdfPage = await doc.getPage(pageNumber);
-      if (cancelled) return;
-      const found = await pageLinks(doc, pdfPage);
-      if (!cancelled) setLinks(found);
-    })().catch(() => {
-      // A page whose annotations won't parse just has no links.
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [doc, pageNumber]);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    const wrapper = wrapperRef.current;
-    const textLayer = textLayerRef.current;
-    if (!canvas || !wrapper || !textLayer) return;
-    if (renderScale <= 0) return;
-
-    let cancelled = false;
-    let task: RenderTask | null = null;
-    let pdfPage: PDFPageProxy | null = null;
-
-    (async () => {
-      pdfPage = await doc.getPage(pageNumber);
-      if (cancelled || !pdfPage) return;
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      // pixelMultiplier puts more detail in the canvas's pixel
-      // buffer than its CSS box demands. dpr handles HiDPI;
-      // oversample handles "user has pinch-zoomed and now wants
-      // crisp text". The CSS box stays at renderScale × native, so
-      // the wrapper layout (and thus the virtualizer geometry) is
-      // unaffected.
-      const pixelMultiplier = dpr * oversample;
-      const viewport = pdfPage.getViewport({
-        scale: renderScale * pixelMultiplier,
-      });
-
-      const offscreen = document.createElement("canvas");
-      offscreen.width = viewport.width;
-      offscreen.height = viewport.height;
-      const offCtx = offscreen.getContext("2d");
-      if (!offCtx) return;
-      task = pdfPage.render({
-        canvasContext: offCtx,
-        viewport,
-        canvas: offscreen,
-      });
-      try {
-        await task.promise;
-      } catch (e) {
-        if ((e as Error).name !== "RenderingCancelledException") throw e;
-        return;
-      }
-      if (cancelled) return;
-
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-      canvas.style.width = `${viewport.width / pixelMultiplier}px`;
-      canvas.style.height = `${viewport.height / pixelMultiplier}px`;
-      const ctx = canvas.getContext("2d");
-      ctx?.drawImage(offscreen, 0, 0);
-
-      // pdfjs reads `--total-scale-factor` from the container (or
-      // an ancestor) when computing per-span font-size + transforms.
-      // Without it, every span defaults to scale=1 and per-character
-      // positions don't line up with the rendered glyphs — that was
-      // the source of the find-highlight offset.
-      textLayer.replaceChildren();
-      const cssViewport = pdfPage.getViewport({ scale: renderScale });
-      textLayer.style.setProperty(
-        "--total-scale-factor",
-        String(cssViewport.scale),
-      );
-      const layer = new pdfjs.TextLayer({
-        textContentSource: pdfPage.streamTextContent(),
-        container: textLayer,
-        viewport: cssViewport,
-      });
-      try {
-        await layer.render();
-        if (!cancelled) setTextLayerVersion((v) => v + 1);
-      } catch {
-        // selection layer is best-effort
-      }
-    })().catch(() => {
-      // per-page errors don't crash the reader
-    });
-
-    return () => {
-      cancelled = true;
-      task?.cancel();
-      pdfPage?.cleanup();
-    };
-  }, [doc, pageNumber, renderScale, oversample]);
-
-  // Capture the user's text selection. Listens at the document
-  // level for `selectionchange` (debounced ~180ms) so we catch the
-  // selection no matter where the user's finger ends up — Android's
-  // selection handles fire pointer events on the document body, not
-  // on the page wrapper, so the older wrapper-only `pointerup`
-  // listener missed most mobile selections. Debouncing means the
-  // floating button only appears after the selection settles, not
-  // during handle drag. The pending state drives the floating
-  // "Highlight" button; clicking it commits via onCreateHighlight.
-  useEffect(() => {
-    const wrapper = wrapperRef.current;
-    if (!wrapper || !native) return;
-
-    function check(): void {
-      if (!wrapper) return;
-      const sel = window.getSelection();
-      if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
-        setPendingHighlight(null);
-        return;
-      }
-      const range = sel.getRangeAt(0);
-      // Only capture selections that are entirely within this page.
-      if (!wrapper.contains(range.commonAncestorContainer)) {
-        setPendingHighlight(null);
-        return;
-      }
-      const rects = Array.from(range.getClientRects());
-      if (rects.length === 0) {
-        setPendingHighlight(null);
-        return;
-      }
-
-      const wrapperRect = wrapper.getBoundingClientRect();
-      const s = pinchScaleRef.current || 1;
-      const layoutRects = rects.map((r) => ({
-        x: (r.left - wrapperRect.left) / s,
-        y: (r.top - wrapperRect.top) / s,
-        w: r.width / s,
-        h: r.height / s,
-      }));
-      // PDF user-space: divide by renderScale to undo the canvas
-      // scale, flip y so origin is bottom-left.
-      const nativeH = native!.height;
-      const pdfRects: Rect[] = layoutRects.map((r) => {
-        const pdfX = r.x / renderScale;
-        const pdfH = r.h / renderScale;
-        const pdfW = r.w / renderScale;
-        const pdfY = nativeH - r.y / renderScale - pdfH;
-        return [pdfX, pdfY, pdfW, pdfH];
-      });
-      setPendingHighlight({
-        layoutRects,
-        pdfRects,
-        text: sel.toString(),
-      });
-    }
-
-    let timer: number | null = null;
-    function schedule(): void {
-      if (timer != null) window.clearTimeout(timer);
-      // 180ms is short enough to feel responsive after a release
-      // but long enough to skip the per-character storm while the
-      // user is actively dragging a selection handle on Android.
-      timer = window.setTimeout(check, 180);
-    }
-
-    document.addEventListener("selectionchange", schedule);
-    // pointerup/touchend at the document level catches the case
-    // where the selection's final state is established by a
-    // gesture-end without a trailing selectionchange (e.g. tap to
-    // collapse the selection, or release after handle drag).
-    document.addEventListener("pointerup", schedule);
-    document.addEventListener("touchend", schedule);
-    return () => {
-      if (timer != null) window.clearTimeout(timer);
-      document.removeEventListener("selectionchange", schedule);
-      document.removeEventListener("pointerup", schedule);
-      document.removeEventListener("touchend", schedule);
-    };
-  }, [native, renderScale, pinchScaleRef]);
-
-  // Per-occurrence find highlight via DOM Range geometry. The
-  // earlier "wrap matches in <mark>" approach was double-broken on
-  // pdfjs text layers — both size and position. pdfjs renders each
-  // text item as one span using a *system* font, then applies a CSS
-  // scale transform so the span's overall width matches the canvas
-  // glyph width. Per-character positions inside the span don't map
-  // to the real glyph positions; the system font has its own
-  // metrics. So a <mark> at characters N..M sat at character-flow
-  // positions of a different font, scaled by the span's transform —
-  // visually misaligned and mis-sized.
-  // Range.getClientRects on the text node returns the *actual*
-  // rendered DOM rectangles, transformed by the browser; same
-  // geometry as the rendered glyphs. We draw absolute-positioned
-  // overlay divs at those rects. Same approach pdfjs's own viewer
-  // uses.
-  useEffect(() => {
-    const textLayer = textLayerRef.current;
-    if (!textLayer) return;
-
-    // Drop any prior overlay divs from the previous query so we
-    // start clean.
-    textLayer
-      .querySelectorAll(".shelf-find-rect")
-      .forEach((el) => el.remove());
-
-    const needle = findQuery.trim();
-    if (!needle || textLayerVersion === 0) {
-      // Nothing highlighted, so the next match to be drawn is worth
-      // scrolling to even if it is the one we scrolled to last time --
-      // searching the same word again should still take you there.
-      lastScrolledTo.current = null;
-      return;
-    }
-
-    const lowerNeedle = needle.toLowerCase();
-    const spans = Array.from(
-      textLayer.querySelectorAll<HTMLSpanElement>("span"),
-    );
-    const layerRect = textLayer.getBoundingClientRect();
-
-    let occ = 0;
-    let currentEl: HTMLElement | null = null;
-
-    for (const span of spans) {
-      const text = span.textContent ?? "";
-      const lowerText = text.toLowerCase();
-      const node = span.firstChild;
-      if (!node || node.nodeType !== Node.TEXT_NODE) continue;
-
-      let from = 0;
-      while (true) {
-        const idx = lowerText.indexOf(lowerNeedle, from);
-        if (idx === -1) break;
-        const end = idx + lowerNeedle.length;
-
-        const range = document.createRange();
-        try {
-          range.setStart(node, idx);
-          range.setEnd(node, end);
-        } catch {
-          from = end;
-          occ += 1;
-          continue;
-        }
-
-        const isCurrent = occ === currentOccurrence;
-        // getClientRects returns *visual* (post-transform) viewport
-        // coords. The new overlay div lives inside the textLayer,
-        // which is itself inside the pinch wrapper's CSS scale
-        // transform — anything we set via style.left gets multiplied
-        // by the pinch scale on render. Divide the visual diff by
-        // the current pinch.scale so the *layout-coord* placement
-        // composes back into the right visual position. The pinch
-        // hook then transforms the divs along with the glyphs, so
-        // they stay aligned through subsequent pinch changes
-        // without re-running this effect every frame.
-        const s = pinchScaleRef.current || 1;
-        for (const rect of Array.from(range.getClientRects())) {
-          const div = document.createElement("div");
-          div.className = isCurrent
-            ? "shelf-find-rect shelf-find-current"
-            : "shelf-find-rect shelf-find-match";
-          div.style.left = `${(rect.left - layerRect.left) / s}px`;
-          div.style.top = `${(rect.top - layerRect.top) / s}px`;
-          div.style.width = `${rect.width / s}px`;
-          div.style.height = `${rect.height / s}px`;
-          textLayer.appendChild(div);
-          if (isCurrent && !currentEl) currentEl = div;
-        }
-
-        from = end;
-        occ += 1;
-      }
-    }
-
-    // Only when the target actually moved. This effect also re-runs
-    // whenever the text layer is rebuilt, which happens on any change
-    // of render scale -- and closing the find bar resizes the scroll
-    // container, so it re-rendered every page and then scrolled back to
-    // the match the user had just finished with. Escaping out of a
-    // search should leave you where you are reading.
-    const target = `${needle}:${currentOccurrence}`;
-    if (currentEl && lastScrolledTo.current !== target) {
-      lastScrolledTo.current = target;
-      currentEl.scrollIntoView({ behavior: "smooth", block: "center" });
-    }
-    // pinchScaleRef is read inside the loop above. Listing it here
-    // would be a no-op since refs don't drive re-runs, but the
-    // closure does need to capture the ref; depending on it costs
-    // nothing.
-  }, [findQuery, currentOccurrence, textLayerVersion, pinchScaleRef]);
-
-  return (
-    <div
-      ref={wrapperRef}
-      className="relative rounded border shadow-md"
-      style={{
-        borderColor: "var(--color-border)",
-        backgroundColor: "var(--color-surface)",
-        display: "inline-block",
-        width: cssW != null ? `${cssW}px` : undefined,
-        height: cssH != null ? `${cssH}px` : undefined,
-      }}
-    >
-      <canvas ref={canvasRef} className="absolute inset-0" />
-      {/*
-        Both pdfjs's `.textLayer` styles (font/transform vars,
-        per-span sizing) and our shelf-specific positioning kick in
-        from this composite class.
-      */}
-      <div
-        ref={textLayerRef}
-        className={`textLayer shelf-textlayer${
-          debugText ? " shelf-debug-text" : ""
-        }`}
-      />
-      {native && cssH != null && links.length > 0 && (
-        <LinkOverlay
-          links={links}
-          renderScale={renderScale}
-          pageHeight={native.height}
-          onFollowLink={onFollowLink}
-        />
-      )}
-      {native && cssH != null && annotations.length > 0 && (
-        <AnnotationOverlay
-          annotations={annotations}
-          focusedAnnotationId={focusedAnnotationId}
-          renderScale={renderScale}
-          pageHeight={native.height}
-        />
-      )}
-      {pendingHighlight && (
-        <HighlightSelectionButton
-          layoutRects={pendingHighlight.layoutRects}
-          onClick={() =>
-            onCreateHighlight(
-              pageNumber,
-              pendingHighlight.pdfRects,
-              pendingHighlight.text,
-            )
-          }
-        />
-      )}
-    </div>
-  );
-}
-
-/**
- * The PDF's own hyperlinks, drawn over the page.
- *
- * Inert until Ctrl (or Cmd) is held — see `.shelf-links` in index.css
- * for why. External links open in a new tab; internal ones scroll the
- * reader.
- */
-function LinkOverlay({
-  links,
-  renderScale,
-  pageHeight,
-  onFollowLink,
-}: {
-  links: PageLink[];
-  renderScale: number;
-  /** Native (scale=1) page height in PDF user-space; needed to flip
-   *  the y-axis from PDF (origin bottom-left) to CSS (origin top). */
-  pageHeight: number;
-  onFollowLink: (page: number) => void;
-}) {
-  return (
-    <div className="shelf-links">
-      {links.map(({ rect: [x, y, w, h], page, url, label }, idx) => {
-        const style = {
-          left: `${x * renderScale}px`,
-          top: `${(pageHeight - y - h) * renderScale}px`,
-          width: `${w * renderScale}px`,
-          height: `${h * renderScale}px`,
-        };
-        const title = `Ctrl+click to open — ${label}`;
-        if (url) {
-          return (
-            <a
-              key={idx}
-              className="shelf-link"
-              style={style}
-              href={url}
-              target="_blank"
-              // noreferrer as well as noopener: an outbound link in an
-              // uploaded PDF shouldn't learn which instance opened it.
-              rel="noopener noreferrer"
-              title={title}
-              aria-label={title}
-            />
-          );
-        }
-        return (
-          <button
-            key={idx}
-            type="button"
-            className="shelf-link"
-            style={style}
-            title={title}
-            aria-label={title}
-            onClick={() => onFollowLink(page!)}
-          />
-        );
-      })}
-    </div>
-  );
-}
-
-function HighlightSelectionButton({
-  layoutRects,
-  onClick,
-}: {
-  layoutRects: { x: number; y: number; w: number; h: number }[];
-  onClick: () => void;
-}) {
-  // Position the button at the bottom-right corner of the last
-  // rect — that's the natural "selection end" for left-to-right
-  // text.
-  const last = layoutRects[layoutRects.length - 1];
-  const left = last.x + last.w;
-  const top = last.y + last.h;
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      // Stop propagation so the wrapper's pointerup handler
-      // doesn't immediately re-evaluate (and clear) the selection.
-      onPointerDown={(e) => e.stopPropagation()}
-      onMouseDown={(e) => e.stopPropagation()}
-      className="shelf-highlight-button"
-      style={{ left: `${left}px`, top: `${top}px` }}
-    >
-      Highlight
-    </button>
-  );
-}
-
-function AnnotationOverlay({
-  annotations,
-  focusedAnnotationId,
-  renderScale,
-  pageHeight,
-}: {
-  annotations: Annotation[];
-  /** Ringed briefly after a deep link or a jump from the panel, so the
-   *  eye lands on the passage rather than just the right page. */
-  focusedAnnotationId: string | null;
-  renderScale: number;
-  /** Native (scale=1) page height in PDF user-space; needed to flip
-   *  the y-axis from PDF (origin bottom-left) to CSS (origin top). */
-  pageHeight: number;
-}) {
-  return (
-    <div className="shelf-annotations">
-      {annotations.map((a) => {
-        const focused = a.id === focusedAnnotationId;
-        if (a.kind === "note") {
-          // Notes draw a single pin centred on the rect's origin.
-          const r = a.rects[0];
-          if (!r) return null;
-          const cssX = r[0] * renderScale;
-          const cssY = (pageHeight - r[1]) * renderScale;
-          return (
-            <button
-              key={a.id}
-              type="button"
-              className={
-                "shelf-annotation-note" +
-                (focused ? " shelf-annotation-focused" : "")
-              }
-              style={{
-                left: `${cssX}px`,
-                top: `${cssY}px`,
-                backgroundColor: a.color,
-              }}
-              title={a.text ?? ""}
-              aria-label={a.text ?? "Note"}
-            />
-          );
-        }
-        // Highlight: one tinted rect per quad.
-        return a.rects.map(([x, y, w, h], idx) => {
-          const cssX = x * renderScale;
-          const cssY = (pageHeight - y - h) * renderScale;
-          return (
-            <div
-              key={`${a.id}-${idx}`}
-              className={
-                "shelf-annotation-rect" +
-                (focused ? " shelf-annotation-focused" : "")
-              }
-              style={{
-                left: `${cssX}px`,
-                top: `${cssY}px`,
-                width: `${w * renderScale}px`,
-                height: `${h * renderScale}px`,
-                backgroundColor: a.color,
-                opacity: focused ? 0.65 : 0.45,
-              }}
-              title={a.text ?? ""}
-            />
-          );
-        });
-      })}
-    </div>
-  );
-}
