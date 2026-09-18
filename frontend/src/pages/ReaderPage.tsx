@@ -656,6 +656,18 @@ export default function ReaderPage() {
         setFindOpen(true);
         return;
       }
+      // Escape closes the find bar from anywhere, not only from the
+      // field: after clicking into the document to read a hit, the bar
+      // is still open and the key that should dismiss it did nothing,
+      // because focus had moved off the input that was listening.
+      // Checked before the input guard so it works in the field too,
+      // which is where the field's own handler stops mattering.
+      if (e.key === "Escape" && findOpen) {
+        e.preventDefault();
+        setFindOpen(false);
+        setFindInput("");
+        return;
+      }
       if (e.target instanceof HTMLInputElement) return;
       if (e.key === "ArrowLeft" || e.key === "PageUp") {
         e.preventDefault();
@@ -678,7 +690,7 @@ export default function ReaderPage() {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [goPrev, goNext, nav]);
+  }, [goPrev, goNext, nav, findOpen]);
 
   // Block document-level pinch-zoom while the reader is mounted.
   useEffect(() => {
@@ -1155,16 +1167,12 @@ export default function ReaderPage() {
             value={findInput}
             onChange={(e) => setFindInput(e.target.value)}
             onKeyDown={(e) => {
+              // Escape is handled at the window, so it works whether
+              // or not this field has focus; it would only be a second
+              // copy of the same thing here.
               if (e.key === "Enter") {
                 e.preventDefault();
                 jumpToMatch(currentMatch + (e.shiftKey ? -1 : 1));
-              } else if (e.key === "Escape") {
-                e.preventDefault();
-                // Clear as well as close, like the X does. A query left
-                // behind keeps its highlights on the page with no
-                // visible control left to clear them.
-                setFindOpen(false);
-                setFindInput("");
               }
             }}
             placeholder="Find in PDF…"

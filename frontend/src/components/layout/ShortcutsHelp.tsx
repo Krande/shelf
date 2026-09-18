@@ -55,7 +55,10 @@ const READER: Shortcut[] = [
   { keys: "Backspace", what: "Back to the library, on the document you were reading" },
   { keys: "Ctrl / ⌘ + F", what: "Find in this PDF" },
   { keys: "Enter / Shift + Enter", what: "Next / previous match, while the find bar has focus" },
-  { keys: "Escape", what: "Close the find bar" },
+  {
+    keys: "Escape",
+    what: "Close the find bar, whether or not it has focus",
+  },
   {
     keys: "Hold Ctrl / ⌘",
     what: "Arm the PDF's own hyperlinks — they tint, and a click follows one. Held down so a drag across a cross-reference still selects text",
