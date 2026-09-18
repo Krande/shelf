@@ -254,9 +254,10 @@ export default function ReaderPage() {
         } else {
           // Server hasn't extracted dims yet (pre-feature row, or
           // extract worker hasn't run). Open just page 1 to get a
-          // baseline and apply it to every page; the per-page
-          // render path corrects each page's height as it actually
-          // renders.
+          // baseline and apply it to every page. Each page corrects
+          // itself on first render — see onNativeSize — so a document
+          // of mixed page sizes converges as it is read rather than
+          // staying wrong.
           const p = await loaded.getPage(1);
           const vp = p.getViewport({ scale: 1 });
           for (let i = 1; i <= loaded.numPages; i++) {
@@ -1456,6 +1457,18 @@ const ContinuousList = forwardRef<
     overscan: 3,
   });
 
+  // A page telling us it is a different size than we assumed. Rare
+  // after the first read of a document, so re-measuring here is cheap;
+  // leaving it wrong is not, since every page below it sits at the
+  // wrong offset.
+  const applyNativeSize = useCallback(
+    (page: number, size: NativeViewport) => {
+      pageNativeRef.current.set(page, size);
+      virtualizer.measure();
+    },
+    [pageNativeRef, virtualizer],
+  );
+
   useImperativeHandle(
     ref,
     () => ({
@@ -1546,6 +1559,7 @@ const ContinuousList = forwardRef<
               focusedAnnotationId={focusedAnnotationId}
               debugText={debugText}
               deferWork={virtualizer.isScrolling}
+              onNativeSize={applyNativeSize}
               pinchScaleRef={pinchScaleRef}
               lastScrolledTo={lastScrolledTo}
               onCreateHighlight={onCreateHighlight}
@@ -1574,6 +1588,7 @@ function PageCanvas({
   lastScrolledTo,
   onCreateHighlight,
   onFollowLink,
+  onNativeSize,
 }: {
   doc: PDFDocumentProxy;
   pageNumber: number;
@@ -1604,6 +1619,11 @@ function PageCanvas({
   ) => void;
   /** Follow an internal link — scroll the reader to that page. */
   onFollowLink: (page: number) => void;
+  /** The size pdfjs actually lays this page out at, reported once it is
+   *  known. The estimate it replaces comes from the server, which may
+   *  predate the CropBox/rotation fix, or from page 1 standing in for
+   *  a document of mixed sizes. */
+  onNativeSize?: (page: number, size: NativeViewport) => void;
 }) {
   const wrapperRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -1685,6 +1705,23 @@ function PageCanvas({
       // canvases of hundreds of megapixels -- past what a browser will
       // back, and a canvas it cannot back hands you a valid context
       // and paints nothing, which is the black page.
+      // What pdfjs will actually lay this page out at. Compared
+      // against the estimate driving the virtualizer, and reported when
+      // they disagree by more than a rounding error -- a wrong estimate
+      // means the scrollbar does not match the document.
+      const trueNative = pdfPage.getViewport({ scale: 1 });
+      if (
+        onNativeSize &&
+        (!native ||
+          Math.abs(native.width - trueNative.width) > 1 ||
+          Math.abs(native.height - trueNative.height) > 1)
+      ) {
+        onNativeSize(pageNumber, {
+          width: trueNative.width,
+          height: trueNative.height,
+        });
+      }
+
       const base = pdfPage.getViewport({ scale: renderScale });
       const pixelMultiplier = clampPixelMultiplier(
         dpr * oversample,
