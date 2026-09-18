@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import case, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 from sqlalchemy.types import String
 
 from ..auth.deps import get_current_user
@@ -128,6 +129,24 @@ class ListItemsResponse(BaseModel):
     total: int
 
 
+def _descendant_collection_ids(collection_id: uuid.UUID):
+    """Every collection below this one, to any depth.
+
+    A recursive CTE rather than a walk in Python: the depth is unbounded
+    and a nested tree would otherwise cost a round trip per level.
+    """
+    top = (
+        select(Collection.id.label("id"))
+        .where(Collection.parent_id == collection_id)
+        .cte("descendant_collections", recursive=True)
+    )
+    child = aliased(Collection)
+    top = top.union_all(
+        select(child.id).join(top, child.parent_id == top.c.id)
+    )
+    return select(top.c.id)
+
+
 async def _attach_collection_ids(
     db: AsyncSession, items: list[Item], *, home_space_id: uuid.UUID | None = None
 ) -> list[dict[str, Any]]:
@@ -195,6 +214,20 @@ class ItemSort(StrEnum):
 class SortDirection(StrEnum):
     asc = "asc"
     desc = "desc"
+
+
+class CollectionScope(StrEnum):
+    """Which side of a collection's tree `collection=` selects.
+
+    A collection's own documents and the ones filed under its
+    subcollections are two separate listings, not one merged tree: the
+    library shows the first and offers the second below it, so each is
+    fetched on its own and the two never double-count an item that is
+    in both.
+    """
+
+    direct = "direct"
+    subcollections = "subcollections"
 
 
 class RevisionFilter(StrEnum):
@@ -281,6 +314,7 @@ async def list_items(
     sort: Annotated[ItemSort, Query()] = ItemSort.updated,
     direction: Annotated[SortDirection, Query()] = SortDirection.desc,
     collection: Annotated[str | None, Query(max_length=64)] = None,
+    collection_scope: Annotated[CollectionScope, Query()] = CollectionScope.direct,
     scope: Annotated[list[SearchScope] | None, Query()] = None,
     revisions: Annotated[RevisionFilter, Query()] = RevisionFilter.pinned,
 ) -> dict[str, Any]:
@@ -441,9 +475,33 @@ async def list_items(
                     status.HTTP_404_NOT_FOUND,
                     "No such collection in this space",
                 )
-            stmt = stmt.join(
-                ItemCollection, ItemCollection.item_id == Item.id
-            ).where(ItemCollection.collection_id == cid)
+            filed_here = (
+                select(ItemCollection.item_id)
+                .where(
+                    ItemCollection.item_id == Item.id,
+                    ItemCollection.collection_id == cid,
+                )
+                .exists()
+            )
+            if collection_scope is CollectionScope.subcollections:
+                # EXISTS rather than a join: an item filed in two
+                # different subcollections would otherwise come back
+                # twice. Excluding the parent's own members keeps this
+                # listing disjoint from the `direct` one, so the two
+                # can be shown one above the other without repeats.
+                stmt = stmt.where(
+                    select(ItemCollection.item_id)
+                    .where(
+                        ItemCollection.item_id == Item.id,
+                        ItemCollection.collection_id.in_(
+                            _descendant_collection_ids(cid)
+                        ),
+                    )
+                    .exists(),
+                    ~filed_here,
+                )
+            else:
+                stmt = stmt.where(filed_here)
 
     # Sort. Title sort dips into the JSONB blob via data->>'title' and
     # is therefore not index-backed; build an expression index when the

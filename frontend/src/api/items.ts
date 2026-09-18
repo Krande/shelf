@@ -99,6 +99,9 @@ export function listItems(
     sort?: ItemSort;
     direction?: SortDirection;
     collection?: string;
+    /** "subcollections" lists what is filed below `collection` instead
+     *  of in it. Omitted means the collection's own items. */
+    collectionScope?: "direct" | "subcollections";
     scope?: SearchScope[];
     revisions?: RevisionFilter;
   } = {},
@@ -128,6 +131,9 @@ export function listItems(
     for (const s of opts.scope) params.append("scope", s);
   }
   if (opts.collection) params.set("collection", opts.collection);
+  if (opts.collectionScope && opts.collectionScope !== "direct") {
+    params.set("collection_scope", opts.collectionScope);
+  }
   // Only when overriding: "pinned" is the server default and sending it
   // would put a redundant param in every URL and every query key.
   if (opts.revisions === "all") params.set("revisions", "all");

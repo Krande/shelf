@@ -464,6 +464,55 @@ export default function LibraryPage() {
     return () => observer.disconnect();
   }, [items.hasNextPage, items.isFetchingNextPage, items.fetchNextPage, flatItems.length]);
 
+  // What is filed under the open collection's subcollections, shown in
+  // a collapsible section below its own documents. A separate query
+  // rather than a widened filter: the two listings stay distinct, and
+  // nothing is fetched at all for a folder with no children.
+  const openCollection =
+    collectionParam && collectionParam !== "unfiled" ? collectionParam : null;
+  const hasSubcollections = useMemo(
+    () =>
+      !!openCollection &&
+      (collections.data ?? []).some((c) => c.parent_id === openCollection),
+    [collections.data, openCollection],
+  );
+  const [subOpen, setSubOpen] = useState(false);
+  // Collapsed again whenever the rail selection changes — the previous
+  // folder's expansion says nothing about this one.
+  useEffect(() => {
+    setSubOpen(false);
+  }, [openCollection]);
+
+  const subItemsQuery = useQuery({
+    queryKey: ["items", slug, "subcollections", openCollection, status],
+    queryFn: () =>
+      listItems(slug!, {
+        limit: ITEMS_PAGE_SIZE,
+        status,
+        collection: openCollection!,
+        collectionScope: "subcollections",
+      }),
+    enabled: !!slug && !!openCollection && hasSubcollections,
+  });
+  const subItems = subItemsQuery.data?.items ?? [];
+  const subTotal = subItemsQuery.data?.total ?? 0;
+
+  // Every item the page holds, wherever it is rendered. Id lookups go
+  // through this so a row from the subcollection section resolves like
+  // any other -- otherwise selecting one would re-fetch it by id and
+  // the "selection vanished from the list" cleanup would clear it.
+  const loadedItems = useMemo(
+    () => [...flatItems, ...subItems],
+    [flatItems, subItems],
+  );
+  // What "select all" and the bulk toolbar act on: the rows actually on
+  // screen. A collapsed section is not on screen, so its items are not
+  // swept into a bulk action nobody can see the scope of.
+  const selectableItems = useMemo(
+    () => (subOpen ? loadedItems : flatItems),
+    [subOpen, loadedItems, flatItems],
+  );
+
   // Compute which scope each item primarily matched in, so the
   // results can be grouped into "Title hits" / "Creator hits" / etc.
   // sections. Priority order matches user expectation: a hit in the
@@ -538,11 +587,11 @@ export default function LibraryPage() {
     enabled:
       !!selectedId &&
       !!items.data &&
-      !flatItems.some((i) => i.id === selectedId),
+      !loadedItems.some((i) => i.id === selectedId),
   });
 
   const selected =
-    flatItems.find((i) => i.id === selectedId) ??
+    loadedItems.find((i) => i.id === selectedId) ??
     (deepLinkedItem.data && deepLinkedItem.data.id === selectedId
       ? deepLinkedItem.data
       : null);
@@ -585,7 +634,7 @@ export default function LibraryPage() {
   // The table body, as data. Hoisted out of the JSX because arrow-key
   // navigation has to walk the rows in the order they're painted, and
   // two constructions of that order would drift apart.
-  const listEntries = useMemo(
+  const ownEntries = useMemo(
     () =>
       groupedItems
         ? ALL_SEARCH_SCOPES.filter((s) => groupedItems[s].length > 0).flatMap(
@@ -615,6 +664,24 @@ export default function LibraryPage() {
     [groupedItems, flatItems, expandedFulltextIds],
   );
 
+  // The subcollection section, appended below the folder's own rows.
+  // Its rows are ordinary rows, so selection, ctrl+click and the arrow
+  // keys reach them without knowing they came from somewhere else.
+  const listEntries = useMemo(() => {
+    if (!hasSubcollections || subTotal === 0) return ownEntries;
+    return [
+      ...ownEntries,
+      { kind: "subheader" as const, count: subTotal, loaded: subItems.length },
+      ...(subOpen
+        ? subItems.map((it) => ({
+            kind: "row" as const,
+            item: it,
+            scope: null,
+          }))
+        : []),
+    ];
+  }, [ownEntries, hasSubcollections, subTotal, subItems, subOpen]);
+
   /** Just the item rows, in painted order — what the arrow keys walk. */
   const navigableItems = useMemo(
     () =>
@@ -624,7 +691,7 @@ export default function LibraryPage() {
 
   useEffect(() => {
     if (!items.data) return;
-    const present = new Set(flatItems.map((i) => i.id));
+    const present = new Set(loadedItems.map((i) => i.id));
     // Don't clear selectedId for deep-linked items that fell back to
     // the direct getItem fetch — they're legitimately not in the
     // current list page but still expected to remain selected.
@@ -1033,11 +1100,11 @@ export default function LibraryPage() {
     // Only toggles across rows currently loaded — selecting "all"
     // when there are 5000 unloaded items would otherwise mean a
     // confusing "checked but not yet visible" state.
-    if (flatItems.length === 0) return;
-    if (checkedIds.size === flatItems.length) {
+    if (selectableItems.length === 0) return;
+    if (checkedIds.size === selectableItems.length) {
       setCheckedIds(new Set());
     } else {
-      setCheckedIds(new Set(flatItems.map((i) => i.id)));
+      setCheckedIds(new Set(selectableItems.map((i) => i.id)));
     }
   }
 
@@ -1072,7 +1139,8 @@ export default function LibraryPage() {
     filterTags.length > 0 ||
     !!collectionParam;
   const allChecked =
-    flatItems.length > 0 && checkedIds.size === flatItems.length;
+    selectableItems.length > 0 &&
+    checkedIds.size === selectableItems.length;
   const someChecked = checkedIds.size > 0 && !allChecked;
   const bulkBusy =
     bulkTrash.isPending || bulkRestore.isPending || bulkPermanent.isPending;
@@ -1496,12 +1564,12 @@ export default function LibraryPage() {
               {view === "library" ? (
                 <>
                   <BulkAddToCollection
-                    items={flatItems.filter((i) => checkedIds.has(i.id))}
+                    items={loadedItems.filter((i) => checkedIds.has(i.id))}
                     collections={collections.data ?? []}
                     slug={slug}
                   />
                   <BulkCopyToSpace
-                    items={flatItems.filter((i) => checkedIds.has(i.id))}
+                    items={loadedItems.filter((i) => checkedIds.has(i.id))}
                     slug={slug}
                   />
                   <button
@@ -1625,6 +1693,37 @@ export default function LibraryPage() {
                   </thead>
                   <tbody ref={listRef}>
                     {listEntries.map((entry) => {
+                      if (entry.kind === "subheader") {
+                        return (
+                          <tr key="subcollections">
+                            <td colSpan={6} className="px-0 py-0">
+                              <button
+                                type="button"
+                                onClick={() => setSubOpen((v) => !v)}
+                                aria-expanded={subOpen}
+                                className="flex w-full items-center gap-1.5 border-t px-3 py-2 text-left text-xs uppercase tracking-widest hover:opacity-80"
+                                style={{
+                                  borderColor: "var(--color-border)",
+                                  color: "var(--color-text-muted)",
+                                }}
+                              >
+                                {subOpen ? (
+                                  <ChevronDown className="h-3.5 w-3.5" />
+                                ) : (
+                                  <ChevronRight className="h-3.5 w-3.5" />
+                                )}
+                                In subcollections ({entry.count})
+                                {entry.loaded < entry.count && subOpen && (
+                                  <span className="normal-case tracking-normal">
+                                    — showing the first {entry.loaded}; open
+                                    the subcollection to see the rest
+                                  </span>
+                                )}
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      }
                       if (entry.kind === "header") {
                         return (
                           <tr

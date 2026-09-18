@@ -466,3 +466,95 @@ async def test_an_inherited_collection_is_still_a_valid_filter(
     )
     assert resp.status_code == 200, resp.text
     assert [i["id"] for i in resp.json()["items"]] == [item_id]
+
+
+async def _sub(client, slug: str, name: str, parent: str | None = None) -> str:
+    body: dict = {"name": name}
+    if parent is not None:
+        body["parent_id"] = parent
+    r = await client.post(f"/api/spaces/{slug}/collections", json=body)
+    assert r.status_code == 201, r.text
+    return str(r.json()["id"])
+
+
+async def _doc(client, slug: str, title: str, colls: list[str]) -> str:
+    item_id = (
+        await client.post(
+            f"/api/spaces/{slug}/items",
+            json={"item_type": "document", "data": {"title": title}},
+        )
+    ).json()["id"]
+    r = await client.put(
+        f"/api/items/{item_id}/collections", json={"collection_ids": colls}
+    )
+    assert r.status_code == 200, r.text
+    return str(item_id)
+
+
+async def test_subcollection_scope_lists_the_tree_below(
+    client: AsyncClient,
+) -> None:
+    """The library shows a folder's own documents, then offers what is
+    filed under its subcollections below them -- two listings, so this
+    one reaches any depth but excludes the parent's own members."""
+    slug = await _login(client)
+    parent = await _sub(client, slug, "Parent")
+    child = await _sub(client, slug, "Child", parent)
+    grandchild = await _sub(client, slug, "Grandchild", child)
+    elsewhere = await _sub(client, slug, "Unrelated")
+
+    own = await _doc(client, slug, "Own", [parent])
+    deep = await _doc(client, slug, "Deep", [grandchild])
+    mid = await _doc(client, slug, "Mid", [child])
+    await _doc(client, slug, "Elsewhere", [elsewhere])
+
+    direct = await client.get(
+        f"/api/spaces/{slug}/items", params={"collection": parent}
+    )
+    assert [i["id"] for i in direct.json()["items"]] == [own]
+
+    subs = await client.get(
+        f"/api/spaces/{slug}/items",
+        params={"collection": parent, "collection_scope": "subcollections"},
+    )
+    assert sorted(i["id"] for i in subs.json()["items"]) == sorted([mid, deep])
+
+
+async def test_subcollection_scope_does_not_repeat_an_item(
+    client: AsyncClient,
+) -> None:
+    """Filed in two subcollections, and also in the parent.
+
+    Without EXISTS the join would return it once per subcollection, and
+    without the parent exclusion it would appear in both listings.
+    """
+    slug = await _login(client)
+    parent = await _sub(client, slug, "Parent")
+    a = await _sub(client, slug, "A", parent)
+    b = await _sub(client, slug, "B", parent)
+
+    both = await _doc(client, slug, "In both", [a, b])
+    everywhere = await _doc(client, slug, "In parent too", [parent, a])
+
+    subs = await client.get(
+        f"/api/spaces/{slug}/items",
+        params={"collection": parent, "collection_scope": "subcollections"},
+    )
+    ids = [i["id"] for i in subs.json()["items"]]
+    assert ids == [both]
+    assert subs.json()["total"] == 1
+    assert everywhere not in ids
+
+
+async def test_subcollection_scope_is_empty_without_children(
+    client: AsyncClient,
+) -> None:
+    slug = await _login(client)
+    leaf = await _sub(client, slug, "Leaf")
+    await _doc(client, slug, "Only doc", [leaf])
+    r = await client.get(
+        f"/api/spaces/{slug}/items",
+        params={"collection": leaf, "collection_scope": "subcollections"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["items"] == []
