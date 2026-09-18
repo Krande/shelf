@@ -26,8 +26,6 @@ import {
   Link2,
   ListTree,
   Loader2,
-  Maximize,
-  MoveHorizontal,
   Search,
   Trash2,
   X,
@@ -80,6 +78,18 @@ import VersionPicker from "@/components/reader/VersionPicker";
 
 /** Multiplier per zoom button press; matches pdf.js's own viewer. */
 const ZOOM_STEP = 1.1;
+
+/**
+ * CSS pixels per PDF point at pdf.js's scale 1, which is what its
+ * viewer calls "actual size" and what 100% means in its zoom menu.
+ */
+const PDF_TO_CSS_UNITS = 4 / 3;
+
+/** The zoom menu's fixed sizes, as pdf.js offers them. */
+const ZOOM_PRESETS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4];
+
+/** Page-width, but not blown up past this on a narrow document. */
+const MAX_AUTO_SCALE = 1.25;
 
 /** Gutter between the two pages of a facing pair. */
 const SPREAD_GAP = 12;
@@ -484,7 +494,7 @@ export default function ReaderPage() {
    * two pages overflowing. Fit-page measures the tallest page in the
    * row, since that is the one that has to clear the viewport.
    */
-  const rowScaleFor = useCallback(
+  const fitScaleFor = useCallback(
     (pages: number[]): number => {
       if (pages.length === 0 || containerSize.width === 0) return 1;
       const natives = pages.map((n) => pageNativeRef.current.get(n));
@@ -499,12 +509,43 @@ export default function ReaderPage() {
       const widthScale = innerW / totalW;
       if (fit === "page" && containerSize.height > 0) {
         const innerH = Math.max(0, containerSize.height - SCROLL_PADDING);
-        if (innerH > 0) return Math.min(widthScale, innerH / maxH) * zoom;
+        if (innerH > 0) return Math.min(widthScale, innerH / maxH);
       }
-      return widthScale * zoom;
+      return widthScale;
     },
-    [containerSize.width, containerSize.height, fit, zoom],
+    [containerSize.width, containerSize.height, fit],
   );
+
+  const rowScaleFor = useCallback(
+    (pages: number[]): number => fitScaleFor(pages) * zoom,
+    [fitScaleFor, zoom],
+  );
+
+  /**
+   * The zoom that would put the page in view at a given size on screen,
+   * where 1 is pdf.js's "actual size" — its scale 1, which is 4/3 of a
+   * PDF point per CSS pixel.
+   *
+   * Zoom here multiplies the fit scale, so a percentage has to be
+   * converted through whatever the window is currently making the page:
+   * the same 100% is a different multiplier on a narrow window than on
+   * a wide one, which is the point of it meaning a size.
+   */
+  const zoomForAbsolute = useCallback(
+    (absolute: number): number => {
+      const here = rows[rowOfPage(rows, page)] ?? [page];
+      const fitScale = fitScaleFor(here);
+      if (!(fitScale > 0)) return 1;
+      return (absolute * PDF_TO_CSS_UNITS) / fitScale;
+    },
+    [fitScaleFor, rows, page],
+  );
+
+  /** What the current zoom works out to as a size on screen. */
+  const absoluteZoom = useMemo(() => {
+    const here = rows[rowOfPage(rows, page)] ?? [page];
+    return (fitScaleFor(here) * zoom) / PDF_TO_CSS_UNITS;
+  }, [fitScaleFor, rows, page, zoom]);
 
   // Rows grouped into the bands the list scrolls through. One row per
   // band everywhere except wrapped, which fits as many across as the
@@ -692,7 +733,62 @@ export default function ReaderPage() {
 
   const applyZoom = useCallback((next: number) => {
     setZoom(clampZoom(next));
+    // A wheel or a button leaves the named modes behind: the reader
+    // asked for a size, not for "whatever fits".
+    setZoomChoice("custom");
   }, []);
+
+  // Which entry of the zoom menu is selected. "custom" is anything
+  // reached by wheel or button, shown as its own percentage rather than
+  // snapped to the nearest preset.
+  const [zoomChoice, setZoomChoice] = useState<string>("page-width");
+  const isNamedZoom =
+    zoomChoice === "auto" ||
+    zoomChoice === "page-fit" ||
+    zoomChoice === "page-width" ||
+    zoomChoice === "page-actual";
+
+  /**
+   * The zoom menu, in pdf.js's terms.
+   *
+   * The named modes are the two fits plus actual size; everything else
+   * is a size on screen, which has to be converted through the current
+   * fit scale because zoom here is a multiple of it.
+   */
+  const applyZoomChoice = useCallback(
+    (choice: string) => {
+      setZoomChoice(choice);
+      switch (choice) {
+        case "page-width":
+          setFit("width");
+          setZoom(1);
+          return;
+        case "page-fit":
+          setFit("page");
+          setZoom(1);
+          return;
+        case "auto":
+          // Page width, but a narrow document is not blown up past
+          // legibility — the same cap pdf.js puts on it.
+          setFit("width");
+          setZoom(
+            clampZoom(Math.min(1, zoomForAbsolute(MAX_AUTO_SCALE))),
+          );
+          return;
+        case "page-actual":
+          setFit("width");
+          setZoom(clampZoom(zoomForAbsolute(1)));
+          return;
+        default: {
+          const absolute = Number(choice);
+          if (!Number.isFinite(absolute)) return;
+          setFit("width");
+          setZoom(clampZoom(zoomForAbsolute(absolute)));
+        }
+      }
+    },
+    [zoomForAbsolute, setFit],
+  );
 
   const { previewRef } = useZoomGestures(scrollRef, contentRef, {
     zoom,
@@ -1088,15 +1184,31 @@ export default function ReaderPage() {
           >
             <ZoomOut className="h-3.5 w-3.5" />
           </button>
-          <button
-            onClick={() => applyZoom(1)}
-            aria-label="Reset zoom"
-            title="Reset zoom to the fit scale"
-            className="min-w-[3.5rem] rounded px-1 py-1 text-center text-xs tabular-nums hover:opacity-80"
+          <select
+            // Value is only ever one of the named modes; a percentage
+            // reached by wheel or button shows as an extra entry rather
+            // than snapping the reader to the nearest preset.
+            value={zoomChoice}
+            onChange={(e) => applyZoomChoice(e.target.value)}
+            aria-label="Zoom"
+            className="rounded border-0 bg-transparent px-1 py-1 text-xs"
             style={{ color: "var(--color-text-muted)" }}
           >
-            {Math.round(zoom * 100)}%
-          </button>
+            <option value="auto">Automatic zoom</option>
+            <option value="page-actual">Actual size</option>
+            <option value="page-fit">Page fit</option>
+            <option value="page-width">Page width</option>
+            {!isNamedZoom && (
+              <option value={String(absoluteZoom)}>
+                {Math.round(absoluteZoom * 100)}%
+              </option>
+            )}
+            {ZOOM_PRESETS.map((z) => (
+              <option key={z} value={String(z)}>
+                {Math.round(z * 100)}%
+              </option>
+            ))}
+          </select>
           <button
             onClick={() => applyZoom(zoom * ZOOM_STEP)}
             disabled={zoom >= MAX_ZOOM - 1e-6}
@@ -1108,37 +1220,6 @@ export default function ReaderPage() {
             <ZoomIn className="h-3.5 w-3.5" />
           </button>
         </span>
-
-        <button
-          onClick={() => {
-            // Back to 1:1 so the new fit is what is actually seen; a
-            // zoomed-in view would otherwise hide the change. Through
-            // applyZoom, so it holds the reader's place like any other
-            // change of scale.
-            applyZoom(1);
-            setFit(fit === "width" ? "page" : "width");
-          }}
-          aria-label="Toggle fit mode"
-          title={
-            fit === "width"
-              ? "Fit page to viewport height"
-              : "Fit page to viewport width"
-          }
-          className="flex items-center gap-1 rounded px-2 py-1 text-xs hover:opacity-80"
-          style={{ color: "var(--color-text-muted)" }}
-        >
-          {fit === "width" ? (
-            <>
-              <MoveHorizontal className="h-3.5 w-3.5" />
-              Fit width
-            </>
-          ) : (
-            <>
-              <Maximize className="h-3.5 w-3.5" />
-              Fit page
-            </>
-          )}
-        </button>
 
         {params.attachmentId && (
           <ProcessingMenu attachmentId={params.attachmentId} />
