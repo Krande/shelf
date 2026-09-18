@@ -36,9 +36,11 @@ export function useZoomGestures(
     enabled = true,
   }: {
     zoom: number;
-    /** Commit a new zoom level. `anchor` is the viewport-relative point
-     *  the gesture was centred on, so the caller can hold it still. */
-    onZoom: (next: number, anchor?: { x: number; y: number }) => void;
+    /** Commit a new zoom level. Where the reader ends up is the
+     *  caller's business: it anchors on a row, which survives the rows
+     *  changing height, rather than on a point in a viewport whose
+     *  contents are about to be re-laid out. */
+    onZoom: (next: number) => void;
     enabled?: boolean;
   },
 ) {
@@ -90,11 +92,7 @@ export function useZoomGestures(
         zoomRef.current * wheelScaleFactor(e.deltaY, e.deltaMode),
       );
       if (next === zoomRef.current) return;
-      const rect = el!.getBoundingClientRect();
-      onZoomRef.current(next, {
-        x: e.clientX - rect.left,
-        y: e.clientY - rect.top,
-      });
+      onZoomRef.current(next);
     }
 
     function onTouchStart(e: TouchEvent) {
@@ -131,13 +129,7 @@ export function useZoomGestures(
       const preview = previewRef.current;
       clearPreview();
       if (Math.abs(preview - 1) < 0.01) return;
-      const rect = el!.getBoundingClientRect();
-      const content = contentRef.current;
-      const contentRect = content?.getBoundingClientRect() ?? rect;
-      onZoomRef.current(clampZoom(zoomRef.current * preview), {
-        x: contentRect.left - rect.left + gesture.midX,
-        y: contentRect.top - rect.top + gesture.midY,
-      });
+      onZoomRef.current(clampZoom(zoomRef.current * preview));
     }
 
     el.addEventListener("wheel", onWheel, { passive: false });

@@ -579,47 +579,24 @@ export default function ReaderPage() {
   const contentRef = useRef<HTMLDivElement>(null);
 
   /**
-   * Change zoom while holding a point still.
+   * Change zoom while holding the reader's place.
    *
-   * Without this a zoom step keeps `scrollTop`, which after the layout
-   * has grown or shrunk points somewhere else entirely — the document
-   * appears to leap. Anchoring on the cursor is what makes zooming into
-   * a figure land on that figure.
+   * The anchor is a row and how far into it the viewport sits, not a
+   * fraction of the document: the virtualizer only estimates its total
+   * height and revises it as pages render, so a fraction of that total
+   * means something different a moment later. A row and an offset
+   * within it survive the rows changing height, which is the one thing
+   * a zoom is guaranteed to do.
+   *
+   * Restoring happens in ContinuousList, straight after it re-measures.
+   * Doing it here would run before that and use the old geometry, which
+   * is what made zooming out scroll down the document.
    */
-  const applyZoom = useCallback(
-    (next: number, anchor?: { x: number; y: number }) => {
-      const el = scrollRef.current;
-      if (!el) {
-        setZoom(clampZoom(next));
-        return;
-      }
-      const ax = anchor?.x ?? el.clientWidth / 2;
-      const ay = anchor?.y ?? el.clientHeight / 2;
-      // Where the anchor sits in the content, as a fraction — the one
-      // quantity that survives the layout changing size.
-      const fx = (el.scrollLeft + ax) / Math.max(1, el.scrollWidth);
-      const fy = (el.scrollTop + ay) / Math.max(1, el.scrollHeight);
-      setZoom(clampZoom(next));
-      pendingAnchor.current = { fx, fy, ax, ay };
-    },
-    [],
-  );
-  const pendingAnchor = useRef<{
-    fx: number;
-    fy: number;
-    ax: number;
-    ay: number;
-  } | null>(null);
-
-  // Restore the anchor once the new layout exists.
-  useLayoutEffect(() => {
-    const el = scrollRef.current;
-    const a = pendingAnchor.current;
-    if (!el || !a) return;
-    pendingAnchor.current = null;
-    el.scrollLeft = a.fx * el.scrollWidth - a.ax;
-    el.scrollTop = a.fy * el.scrollHeight - a.ay;
-  }, [zoom]);
+  const pendingAnchor = useRef<ScrollAnchor | null>(null);
+  const applyZoom = useCallback((next: number) => {
+    pendingAnchor.current = continuousRef.current?.captureAnchor() ?? null;
+    setZoom(clampZoom(next));
+  }, []);
 
   const { previewRef } = useZoomGestures(scrollRef, contentRef, {
     zoom,
@@ -1266,6 +1243,7 @@ export default function ReaderPage() {
             pageScaleFor={pageScaleFor}
             pageNativeRef={pageNativeRef}
             contentRef={contentRef}
+            pendingAnchor={pendingAnchor}
             findQuery={findQuery}
             currentMatchInfo={currentMatchInfo}
             annotationsByPage={annotationsByPage}
@@ -1512,8 +1490,17 @@ function HighlightsPanel({
   );
 }
 
+/** Where the reader is, in terms that survive a change of scale: a row
+ *  and how far into it the viewport's top sits. */
+interface ScrollAnchor {
+  index: number;
+  within: number;
+}
+
 interface ContinuousListHandle {
   scrollToPage: (page: number) => void;
+  /** Take a bearing before something changes every row's height. */
+  captureAnchor: () => ScrollAnchor | null;
 }
 
 const ContinuousList = forwardRef<
@@ -1526,6 +1513,7 @@ const ContinuousList = forwardRef<
     pageScaleFor: (n: number) => number;
     pageNativeRef: React.RefObject<Map<number, NativeViewport>>;
     contentRef: React.RefObject<HTMLDivElement | null>;
+    pendingAnchor: React.RefObject<ScrollAnchor | null>;
     findQuery: string;
     currentMatchInfo: { page: number; occurrence: number } | null;
     annotationsByPage: Map<number, Annotation[]>;
@@ -1553,6 +1541,7 @@ const ContinuousList = forwardRef<
     pageScaleFor,
     pageNativeRef,
     contentRef,
+    pendingAnchor,
     findQuery,
     currentMatchInfo,
     annotationsByPage,
@@ -1580,13 +1569,26 @@ const ContinuousList = forwardRef<
   // after the first read of a document, so re-measuring here is cheap;
   // leaving it wrong is not, since every page below it sits at the
   // wrong offset.
-  // Zoom changes every page's height, and the virtualizer caches what
-  // it measured at the old one.
-  useEffect(() => {
+  // Zoom changes every row's height, and the virtualizer caches what it
+  // measured at the old one. Re-measure, then put the reader back where
+  // they were — in that order, since the anchor is meaningless against
+  // the geometry it is replacing. useLayoutEffect so the corrected
+  // scroll position is in the same frame the new sizes are, rather than
+  // one frame of visibly wrong position later.
+  useLayoutEffect(() => {
     virtualizer.measure();
+    const anchor = pendingAnchor.current;
+    if (!anchor) return;
+    pendingAnchor.current = null;
+    const el = scrollRef.current;
+    const offset = virtualizer.getOffsetForIndex(anchor.index, "start");
+    if (!el || !offset) return;
+    const size =
+      virtualizer.measurementsCache[anchor.index]?.size ?? 0;
+    el.scrollTop = offset[0] + anchor.within * size;
     // pageScaleFor closes over zoom, so estimateSize changing identity
     // is the signal that the scale moved.
-  }, [virtualizer, estimateSize]);
+  }, [virtualizer, estimateSize, pendingAnchor, scrollRef]);
 
   const applyNativeSize = useCallback(
     (page: number, size: NativeViewport) => {
@@ -1602,8 +1604,25 @@ const ContinuousList = forwardRef<
       scrollToPage: (page: number) => {
         virtualizer.scrollToIndex(page - 1, { align: "start" });
       },
+      captureAnchor: () => {
+        const el = scrollRef.current;
+        if (!el) return null;
+        const offset = virtualizer.scrollOffset ?? el.scrollTop;
+        const visible = virtualizer.getVirtualItems();
+        if (visible.length === 0) return null;
+        // The row the viewport's top edge is inside, and how far into
+        // it — a proportion, so it still means the same thing once the
+        // row is a different height.
+        const row =
+          visible.find((v) => v.start <= offset && v.end > offset) ??
+          visible[0];
+        return {
+          index: row.index,
+          within: (offset - row.start) / Math.max(1, row.size),
+        };
+      },
     }),
-    [virtualizer],
+    [virtualizer, scrollRef],
   );
 
   const items = virtualizer.getVirtualItems();
@@ -1914,8 +1933,6 @@ function PageCanvas({
 
       canvas.width = viewport.width;
       canvas.height = viewport.height;
-      canvas.style.width = `${viewport.width / pixelMultiplier}px`;
-      canvas.style.height = `${viewport.height / pixelMultiplier}px`;
       canvas.getContext("2d")?.drawImage(offscreen, 0, 0);
       offscreen.width = 0;
       offscreen.height = 0;
@@ -2181,7 +2198,13 @@ function PageCanvas({
         height: cssH != null ? `${cssH}px` : undefined,
       }}
     >
-      <canvas ref={canvasRef} className="absolute inset-0" />
+      {/* h-full w-full, not intrinsic size: the wrapper is sized
+          from renderScale, so when the scale changes the pixels
+          already drawn stretch to the new box immediately and are
+          replaced by a crisp render when the queue gets to it.
+          Without this the canvas kept its old size while its box
+          changed, which is a visible jump on every zoom step. */}
+      <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
       {!painted && (
         <div
           className="absolute inset-0 flex items-center justify-center gap-2 text-xs"
