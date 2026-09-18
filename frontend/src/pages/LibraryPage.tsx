@@ -712,7 +712,7 @@ export default function LibraryPage() {
             {
               kind: "subgroup" as const,
               collection: g.collection,
-              depth: g.depth,
+              path: g.path,
               count: g.items.length,
             },
             ...g.items.map((it) => ({
@@ -1822,16 +1822,15 @@ export default function LibraryPage() {
                           <tr key={`group-${entry.collection.id}`}>
                             <td
                               colSpan={6}
-                              className="px-3 py-1.5 text-xs"
-                              style={{
-                                color: "var(--color-text-muted)",
-                                paddingLeft: `${entry.depth * 16 + 28}px`,
-                              }}
+                              className="px-3 py-1.5 pl-7 text-xs"
+                              style={{ color: "var(--color-text-muted)" }}
                             >
                               <span className="inline-flex items-center gap-1.5">
-                                <FolderClosed className="h-3.5 w-3.5" />
-                                {entry.collection.name}
-                                {entry.count > 0 && ` (${entry.count})`}
+                                <FolderClosed className="h-3.5 w-3.5 shrink-0" />
+                                {/* The whole path on one line, so a
+                                    nested folder says where it lives
+                                    without spending a row per level. */}
+                                {entry.path.join(" › ")} ({entry.count})
                               </span>
                             </td>
                           </tr>

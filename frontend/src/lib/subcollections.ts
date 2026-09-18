@@ -3,21 +3,21 @@ import type { Item } from "@/api/items";
 
 export interface SubcollectionGroup {
   collection: Collection;
-  /** 0 for a direct child of the open collection. Drives indentation. */
-  depth: number;
-  /** Documents filed directly in this collection. May be empty when the
-   *  group is only here to carry the path down to one that isn't. */
+  /** Names from just below the open collection down to this one, so a
+   *  nested folder can be labelled "Reports > Drafts" on one line. */
+  path: string[];
+  /** Documents filed directly in this collection. Never empty. */
   items: Item[];
 }
 
 /**
- * Group what is filed below a collection, as the rail draws it: one
- * entry per folder, in sibling order, depth first.
+ * Group what is filed below a collection, one entry per folder that
+ * holds something, in the order the rail draws them.
  *
- * Branches holding nothing at any depth are pruned — an empty folder is
- * noise in a list of documents. A folder that is empty itself while a
- * child has documents is kept, because dropping it would detach the
- * child from the path that explains where it lives.
+ * A folder with no documents of its own never appears: it would be a
+ * heading over nothing. Its name still shows, as part of the path on
+ * the folders beneath it — "Reports > Drafts" says where Drafts lives
+ * without spending a row on Reports.
  *
  * A document filed in two subcollections appears under both: the count
  * on the section header is of distinct documents, this is of where they
@@ -48,23 +48,16 @@ export function buildSubcollectionGroups(
   }
 
   const out: SubcollectionGroup[] = [];
-  function walk(parentId: string, depth: number): boolean {
-    let anyHere = false;
+  function walk(parentId: string, path: string[]): void {
     for (const child of byParent.get(parentId) ?? []) {
+      const here = [...path, child.name];
       const mine = itemsByCollection.get(child.id) ?? [];
-      const at = out.length;
-      out.push({ collection: child, depth, items: mine });
-      const deeper = walk(child.id, depth + 1);
-      if (mine.length === 0 && !deeper) {
-        // Nothing here and nothing below. Everything this branch pushed
-        // has already been pruned, so its own header is the last entry.
-        out.splice(at, 1);
-      } else {
-        anyHere = true;
+      if (mine.length > 0) {
+        out.push({ collection: child, path: here, items: mine });
       }
+      walk(child.id, here);
     }
-    return anyHere;
   }
-  walk(rootId, 0);
+  walk(rootId, []);
   return out;
 }

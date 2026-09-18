@@ -26,79 +26,86 @@ function doc(id: string, collectionIds: string[]): Item {
 }
 
 // root
-//  ├── a          (one doc)
-//  │    └── a1    (one doc)
-//  ├── b          (empty, and so is everything under it)
-//  │    └── b1    (empty)
-//  └── c          (empty itself, but c1 below it has a doc)
-//       └── c1    (one doc)
+//  ├── reports
+//  │    ├── drafts
+//  │    └── final
+//  ├── empty
+//  │    └── alsoEmpty
+//  └── docs
 const TREE = [
-  coll("a", "A", "root"),
-  coll("a1", "A1", "a"),
-  coll("b", "B", "root"),
-  coll("b1", "B1", "b"),
-  coll("c", "C", "root"),
-  coll("c1", "C1", "c"),
+  coll("reports", "Reports", "root"),
+  coll("drafts", "Drafts", "reports"),
+  coll("final", "Final", "reports"),
+  coll("empty", "Empty", "root"),
+  coll("alsoEmpty", "Also Empty", "empty"),
+  coll("docs", "Docs", "root"),
   coll("other", "Elsewhere", null),
 ];
 
 describe("buildSubcollectionGroups", () => {
-  it("walks the tree in sibling order, depth first", () => {
-    const groups = buildSubcollectionGroups(
-      "root",
-      TREE,
-      [doc("d1", ["a"]), doc("d2", ["a1"]), doc("d3", ["c1"])],
-    );
-    expect(groups.map((g) => g.collection.id)).toEqual([
-      "a",
-      "a1",
-      "c",
-      "c1",
+  it("labels a nested folder with its path from the open collection", () => {
+    const groups = buildSubcollectionGroups("root", TREE, [
+      doc("d1", ["drafts"]),
+      doc("d2", ["final"]),
+    ]);
+    expect(groups.map((g) => g.path.join(" > "))).toEqual([
+      "Reports > Drafts",
+      "Reports > Final",
     ]);
   });
 
-  it("indents by depth below the open collection", () => {
-    const groups = buildSubcollectionGroups("root", TREE, [doc("d", ["a1"])]);
-    expect(groups.map((g) => [g.collection.id, g.depth])).toEqual([
-      ["a", 0],
-      ["a1", 1],
+  it("walks siblings in order, depth first", () => {
+    const groups = buildSubcollectionGroups("root", TREE, [
+      doc("d1", ["docs"]),
+      doc("d2", ["drafts"]),
+    ]);
+    expect(groups.map((g) => g.collection.id)).toEqual(["drafts", "docs"]);
+  });
+
+  it("omits a folder that holds nothing itself", () => {
+    // Reports is only a path here; a heading over nothing would be noise,
+    // and its name still reaches the reader via the path below it.
+    const groups = buildSubcollectionGroups("root", TREE, [
+      doc("d", ["drafts"]),
+    ]);
+    expect(groups.map((g) => g.collection.id)).toEqual(["drafts"]);
+    expect(groups[0].path).toEqual(["Reports", "Drafts"]);
+  });
+
+  it("includes a folder that holds documents and has children", () => {
+    const groups = buildSubcollectionGroups("root", TREE, [
+      doc("onReports", ["reports"]),
+      doc("onDrafts", ["drafts"]),
+    ]);
+    expect(groups.map((g) => [g.path.join(" > "), g.items.length])).toEqual([
+      ["Reports", 1],
+      ["Reports > Drafts", 1],
     ]);
   });
 
-  it("prunes a branch that holds nothing at any depth", () => {
-    const groups = buildSubcollectionGroups("root", TREE, [doc("d", ["a"])]);
-    // B and B1 are empty all the way down, so neither appears.
-    expect(groups.map((g) => g.collection.id)).toEqual(["a"]);
-  });
-
-  it("keeps an empty folder that carries the path to a full one", () => {
-    // C has no documents of its own; dropping it would leave C1 looking
-    // like a direct child of the open collection.
-    const groups = buildSubcollectionGroups("root", TREE, [doc("d", ["c1"])]);
-    expect(groups.map((g) => [g.collection.id, g.items.length])).toEqual([
-      ["c", 0],
-      ["c1", 1],
+  it("drops a branch that is empty all the way down", () => {
+    const groups = buildSubcollectionGroups("root", TREE, [
+      doc("d", ["docs"]),
     ]);
+    expect(groups.map((g) => g.collection.id)).toEqual(["docs"]);
   });
 
   it("shows a document under each subcollection it is filed in", () => {
     const groups = buildSubcollectionGroups("root", TREE, [
-      doc("both", ["a", "c1"]),
+      doc("both", ["drafts", "docs"]),
     ]);
     expect(
-      groups.map((g) => [g.collection.id, g.items.map((i) => i.id)]),
+      groups.map((g) => [g.path.join(" > "), g.items.map((i) => i.id)]),
     ).toEqual([
-      ["a", ["both"]],
-      ["c", []],
-      ["c1", ["both"]],
+      ["Reports > Drafts", ["both"]],
+      ["Docs", ["both"]],
     ]);
   });
 
   it("ignores collections outside the open one's subtree", () => {
-    const groups = buildSubcollectionGroups("root", TREE, [
-      doc("d", ["other"]),
-    ]);
-    expect(groups).toEqual([]);
+    expect(
+      buildSubcollectionGroups("root", TREE, [doc("d", ["other"])]),
+    ).toEqual([]);
   });
 
   it("returns nothing when there are no documents", () => {

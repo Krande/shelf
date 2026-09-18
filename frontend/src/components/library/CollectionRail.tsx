@@ -9,6 +9,7 @@ import {
   FolderClosed,
   FolderInput,
   FolderOpen,
+  FolderPlus,
   Inbox,
   LibraryBig,
   Link2,
@@ -65,6 +66,10 @@ export default function CollectionRail({
   const qc = useQueryClient();
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [adding, setAdding] = useState(false);
+  // Parent for the collection being drafted: an id nests it, null puts
+  // it at the root. Tracked separately from `adding` so the placeholder
+  // can name where it will land.
+  const [addParent, setAddParent] = useState<string | null>(null);
   const [draftName, setDraftName] = useState("");
 
   // Editing state — only one row can be in a mode at a time.
@@ -141,13 +146,46 @@ export default function CollectionRail({
   }, [collections.data]);
 
   const create = useMutation({
-    mutationFn: (name: string) => createCollection(slug!, { name }),
+    mutationFn: (name: string) =>
+      createCollection(slug!, {
+        name,
+        ...(addParent ? { parent_id: addParent } : {}),
+      }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["collections", slug] });
+      // Open the parent, or the new child lands inside a folded folder
+      // and looks like nothing happened.
+      if (addParent) {
+        const parent = addParent;
+        setExpanded((prev) => new Set(prev).add(parent));
+      }
       setAdding(false);
+      setAddParent(null);
       setDraftName("");
     },
   });
+
+  /** The collection the rail is showing, when it is one this space can
+   *  nest inside. New collections go in it: making a folder while
+   *  inside another almost always means making it there.
+   *
+   *  An inherited collection is excluded — it belongs to another space
+   *  and the API refuses a child, so the new one goes to the root
+   *  rather than failing. */
+  const selectedCollectionId =
+    selection.view === "library" &&
+    selection.collection &&
+    selection.collection !== "unfiled" &&
+    !byId.get(selection.collection)?.is_inherited
+      ? selection.collection
+      : null;
+
+  function startAdding(parentId: string | null) {
+    setAddParent(parentId);
+    setDraftName("");
+    setAdding(true);
+    if (parentId) setExpanded((prev) => new Set(prev).add(parentId));
+  }
 
   const remove = useMutation({
     mutationFn: (id: string) => deleteCollection(id),
@@ -337,8 +375,17 @@ export default function CollectionRail({
         >
           <span>Collections</span>
           <button
-            onClick={() => setAdding(true)}
-            aria-label="New collection"
+            onClick={() => startAdding(selectedCollectionId)}
+            aria-label={
+              selectedCollectionId
+                ? `New collection in ${byId.get(selectedCollectionId)?.name ?? "the open collection"}`
+                : "New collection"
+            }
+            title={
+              selectedCollectionId
+                ? `New collection in ${byId.get(selectedCollectionId)?.name ?? ""}`
+                : "New collection"
+            }
             className="rounded p-0.5 hover:opacity-70"
             disabled={!slug}
           >
@@ -361,10 +408,15 @@ export default function CollectionRail({
               onBlur={() => {
                 if (!draftName.trim()) {
                   setAdding(false);
+                  setAddParent(null);
                   setDraftName("");
                 }
               }}
-              placeholder="Collection name"
+              placeholder={
+                addParent
+                  ? `New collection in ${byId.get(addParent)?.name ?? "…"}`
+                  : "Collection name"
+              }
               className="w-full rounded border px-2 py-1 text-sm"
               style={{
                 backgroundColor: "var(--color-surface)",
@@ -425,6 +477,7 @@ export default function CollectionRail({
             onDownload={(c) => download.mutate(c)}
             downloadingId={download.isPending ? downloadingId : null}
             onDropItems={onDropItems}
+            onAddChild={startAdding}
           />
         ))}
 
@@ -470,6 +523,7 @@ export default function CollectionRail({
                 onDownload={() => {}}
                 downloadingId={null}
                 onDropItems={() => {}}
+                onAddChild={() => {}}
               />
             ))}
           </div>
@@ -582,6 +636,7 @@ function CollectionNode({
   onDownload,
   downloadingId,
   onDropItems,
+  onAddChild,
   readOnly = false,
 }: {
   node: TreeNode;
@@ -610,6 +665,8 @@ function CollectionNode({
   downloadingId: string | null;
   /** Documents dragged from the table onto this folder. */
   onDropItems: (collectionId: string, itemIds: string[]) => void;
+  /** Start drafting a collection nested inside this one. */
+  onAddChild: (parentId: string) => void;
   /** Inherited from another space: browsable, but every write the row
    *  would otherwise offer is refused by the API, so none are shown. */
   readOnly?: boolean;
@@ -745,6 +802,7 @@ function CollectionNode({
             node={node}
             isFirst={siblingIndex === 0}
             isLast={siblingIndex === siblingCount - 1}
+            onAddChild={() => onAddChild(node.id)}
             onRename={() => onStartRename(node.id)}
             onEditDescription={() => onEditDescription(node)}
             onMoveInto={() => onMoveInto(node)}
@@ -781,6 +839,7 @@ function CollectionNode({
               onDownload={onDownload}
               downloadingId={downloadingId}
               onDropItems={onDropItems}
+              onAddChild={onAddChild}
               readOnly={readOnly}
             />
           ))}
@@ -844,6 +903,7 @@ function NodeMenu({
   node,
   isFirst,
   isLast,
+  onAddChild,
   onRename,
   onEditDescription,
   onMoveInto,
@@ -856,6 +916,7 @@ function NodeMenu({
   node: Collection;
   isFirst: boolean;
   isLast: boolean;
+  onAddChild: () => void;
   onRename: () => void;
   onEditDescription: () => void;
   onMoveInto: () => void;
@@ -941,6 +1002,11 @@ function NodeMenu({
             }}
             onClick={(e) => e.stopPropagation()}
           >
+            <MenuItem
+              icon={FolderPlus}
+              label="Add subcollection"
+              onClick={run(onAddChild)}
+            />
             <MenuItem icon={Pencil} label="Rename" onClick={run(onRename)} />
             <MenuItem
               icon={Text}
