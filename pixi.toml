@@ -152,9 +152,12 @@ cwd = "backend"
 description = "Run backend tests (assumes Postgres is already up and migrated)"
 
 # `pixi run test-all` is the one command that takes a fresh checkout to a green
-# suite. conftest's `client` fixture TRUNCATEs against a live database, so the
-# suite cannot run without Postgres — this chain starts it, waits for it, and
-# migrates before pytest sees it.
+# suite. conftest's `client` fixture TRUNCATEs, so the suite cannot run without
+# Postgres — this chain starts it and waits for it.
+#
+# It does NOT migrate: conftest creates its own `<database>_test` and brings it
+# to head on first use, which is also what keeps the suite off the database
+# `pixi run up` is serving. Migrating here would only migrate the dev one.
 #
 # Only postgres is started, not the whole `dev-up` stack: nothing in the suite
 # touches Redis or Gotenberg, and leaving them out keeps the loop quick.
@@ -163,25 +166,15 @@ description = "Run backend tests (assumes Postgres is already up and migrated)"
 # the container passes the pg_isready healthcheck compose.yaml defines, so
 # there is no shell-specific polling loop and no `sleep` guess. Re-running when
 # the container is already up is a no-op that returns as soon as it's healthy.
-#
-# The tasks form a linear depends-on chain rather than one task listing all
-# three, so the execution order is fixed by the graph itself — migrating before
-# the database is accepting connections isn't expressible.
 [tasks.test-db-up]
 cmd = "docker compose up -d --wait postgres"
-description = "Start the test Postgres and block until it reports healthy"
-
-[tasks.test-db-migrate]
-cmd = "alembic upgrade head"
-cwd = "backend"
-depends-on = ["test-db-up"]
-description = "Bring the local test Postgres up to the current schema"
+description = "Start Postgres for the test suite and block until it is healthy"
 
 [tasks.test-all]
 cmd = "pytest"
 cwd = "backend"
-depends-on = ["test-db-migrate"]
-description = "Full local run: start Postgres, migrate, then run the test suite"
+depends-on = ["test-db-up"]
+description = "Full local run: start Postgres, then run the test suite"
 
 [tasks.fmt]
 cmd = "ruff format backend cli"
