@@ -167,11 +167,30 @@ export const ContinuousList = forwardRef<
   useImperativeHandle(
     ref,
     () => ({
-      scrollToPage: (page: number) => {
+      scrollToPage: (page: number, offsetWithinPage?: number) => {
         const at = bands.findIndex((band) =>
           band.some((row) => row.includes(page)),
         );
-        virtualizer.scrollToIndex(at < 0 ? 0 : at, { align: "start" });
+        const index = at < 0 ? 0 : at;
+        if (offsetWithinPage === undefined) {
+          virtualizer.scrollToIndex(index, { align: "start" });
+          return;
+        }
+        // Somewhere inside the page: the top of its band, plus how far
+        // down the page the thing is, less a third of the viewport so
+        // it sits where the eye already is rather than against the top
+        // edge. Zoomed in, the difference between this and the top of
+        // the page can be most of the document.
+        const el = scrollRef.current;
+        const start = virtualizer.getOffsetForIndex(index, "start");
+        if (!el || !start) {
+          virtualizer.scrollToIndex(index, { align: "start" });
+          return;
+        }
+        el.scrollTop = Math.max(
+          0,
+          start[0] + offsetWithinPage - el.clientHeight * 0.3,
+        );
       },
     }),
     [virtualizer, scrollRef, bands],

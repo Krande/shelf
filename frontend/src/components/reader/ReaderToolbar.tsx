@@ -72,6 +72,8 @@ export interface ReaderToolbarProps {
     setHighlightsOpen: (v: boolean) => void;
     annotationCount: number;
     attachmentId: string | undefined;
+    /** OCR and re-processing are admin-only for now. */
+    isAdmin: boolean;
     debugText: boolean;
     setDebugText: (v: boolean) => void;
     selectMode: boolean;
@@ -116,6 +118,7 @@ export function ReaderToolbar({
     setHighlightsOpen,
     annotationCount,
     attachmentId,
+    isAdmin,
     debugText,
     setDebugText,
     selectMode,
@@ -379,7 +382,12 @@ export function ReaderToolbar({
               )}
             </button>
 
-            {attachmentId && (
+            {/* OCR re-runs the extraction pipeline and can replace the
+                stored file with a derived version. That is an
+                instance-level operation, so for now only an admin gets
+                the control -- a viewer of a shared space should not be
+                able to re-process somebody else's document. */}
+            {attachmentId && isAdmin && (
               <ProcessingMenu attachmentId={attachmentId} />
             )}
 

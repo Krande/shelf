@@ -943,19 +943,51 @@ export default function ReaderPage() {
   // Generic "scroll the reader to page N" — used by every panel
   // that wants to navigate (annotations, outline, fulltext).
   const goToPage = useCallback(
-    (n: number) => {
+    (n: number, offsetWithinPage?: number) => {
       setPage(n);
-      if (!paged) {
-        // Deferred past the setPage render flush so the virtualizer has
-        // the current geometry. Zoom no longer enters into it: the
-        // layout is the zoom, so scrollToIndex is always in the same
-        // coordinates the user sees.
-        setTimeout(() => {
-          continuousRef.current?.scrollToPage(n);
-        }, 0);
-      }
+      // Deferred past the setPage render flush so the geometry is the
+      // one being scrolled in. Zoom no longer enters into it: the
+      // layout is the zoom, so this is always in the coordinates the
+      // reader sees.
+      setTimeout(() => {
+        if (!paged) {
+          continuousRef.current?.scrollToPage(n, offsetWithinPage);
+          return;
+        }
+        // Page mode holds one band, so the container itself is what
+        // scrolls to a point inside it.
+        const el = scrollRef.current;
+        if (!el) return;
+        el.scrollTop =
+          offsetWithinPage === undefined
+            ? 0
+            : Math.max(0, offsetWithinPage - el.clientHeight * 0.3);
+      }, 0);
     },
     [paged],
+  );
+
+  /**
+   * How far down a page an annotation sits, in CSS pixels.
+   *
+   * Its rects are in PDF user-space, whose origin is the bottom-left
+   * corner, so the topmost edge is the largest y — and the distance
+   * from the top of the page is what is left after taking that off the
+   * page's height, scaled by whatever the page is being drawn at.
+   */
+  const annotationOffset = useCallback(
+    (a: Annotation): number | undefined => {
+      const native = pageNativeRef.current.get(a.page_number);
+      if (!native || a.rects.length === 0) return undefined;
+      const topEdge = Math.max(...a.rects.map(([, y, , h]) => y + h));
+      const scale = rowScaleFor(
+        rowsRef.current[rowOfPage(rowsRef.current, a.page_number)] ?? [
+          a.page_number,
+        ],
+      );
+      return Math.max(0, (native.height - topEdge) * scale);
+    },
+    [rowScaleFor],
   );
 
   // The annotation to ring, if any. Set by a deep link or by clicking
@@ -981,13 +1013,13 @@ export default function ReaderPage() {
 
   const jumpToAnnotation = useCallback(
     (a: Annotation) => {
-      goToPage(a.page_number);
+      goToPage(a.page_number, annotationOffset(a));
       focusAnnotation(a.id);
       // Auto-close the drawer on coarse-pointer devices so the user
       // can see the highlight without an extra tap.
       if (isCoarsePointer) setHighlightsOpen(false);
     },
-    [goToPage, focusAnnotation, isCoarsePointer],
+    [goToPage, annotationOffset, focusAnnotation, isCoarsePointer],
   );
 
   // `?annotation=<id>` — open at that annotation and ring it.
@@ -1144,6 +1176,8 @@ export default function ReaderPage() {
           setHighlightsOpen,
           annotationCount: annotationsSorted.length,
           attachmentId: params.attachmentId,
+          isAdmin:
+            auth.status === "authenticated" && auth.user.is_admin,
           debugText,
           setDebugText,
           selectMode,

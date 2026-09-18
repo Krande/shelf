@@ -30,7 +30,13 @@ export interface ScrollAnchor {
 }
 
 export interface ContinuousListHandle {
-  scrollToPage: (page: number) => void;
+  /**
+   * Bring a page into view. With `offsetWithinPage` — CSS pixels from
+   * the page's top edge — it brings that point into view instead, which
+   * is the difference between "the right page" and "the thing you asked
+   * for" once the page is taller than the window.
+   */
+  scrollToPage: (page: number, offsetWithinPage?: number) => void;
 }
 
 /** Gutter between the two pages of a facing pair. */
