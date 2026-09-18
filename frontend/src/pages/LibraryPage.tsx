@@ -69,7 +69,9 @@ import ItemForm, {
 } from "@/components/library/ItemForm";
 import ItemDetail from "@/components/library/ItemDetail";
 import TagChips from "@/components/library/TagChips";
-import CollectionRail from "@/components/library/CollectionRail";
+import CollectionRail, {
+  ITEM_DRAG_TYPE,
+} from "@/components/library/CollectionRail";
 import BulkAddToCollection from "@/components/library/BulkAddToCollection";
 import BulkCopyToSpace from "@/components/library/BulkCopyToSpace";
 import SearchScopePopover from "@/components/library/SearchScopePopover";
@@ -805,6 +807,39 @@ export default function LibraryPage() {
     [searchParams, setSearchParams],
   );
 
+  // Documents dragged from the table onto a folder in the rail.
+  // Additive, like the bulk "Add to collection" action: dropping into a
+  // folder files it there, it does not move it out of the others.
+  const fileIntoCollection = useMutation({
+    mutationFn: async ({
+      collectionId,
+      itemIds,
+    }: {
+      collectionId: string;
+      itemIds: string[];
+    }) => {
+      for (const id of itemIds) {
+        const it = loadedItems.find((i) => i.id === id);
+        // Already there, or dragged from a listing this page no longer
+        // holds — either way there is nothing to write.
+        if (!it || it.collection_ids.includes(collectionId)) continue;
+        await setItemCollections(id, [...it.collection_ids, collectionId]);
+      }
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["items", slug] });
+      qc.invalidateQueries({ queryKey: ["collections", slug] });
+    },
+    onError: (e: Error) => window.alert(`Could not file: ${e.message}`),
+  });
+
+  /** Ids this drag carries: the whole checked set when the dragged row
+   *  is part of it, otherwise just the row. Dragging an unchecked row
+   *  while a selection exists should move that row, not the selection. */
+  function dragPayload(itemId: string): string[] {
+    return checkedIds.has(itemId) ? [...checkedIds] : [itemId];
+  }
+
   // Ctrl/Cmd-click a row, or Enter on it, to open the PDF directly.
   // Selecting before navigating is what makes Back work: the selection
   // is in the URL, so the history pop restores the panel. An item with
@@ -1276,6 +1311,9 @@ export default function LibraryPage() {
                 setRailOpen(false);
               }
             }}
+            onDropItems={(collectionId, itemIds) =>
+              fileIntoCollection.mutate({ collectionId, itemIds })
+            }
           />
         )}
 
@@ -1631,7 +1669,11 @@ export default function LibraryPage() {
                   {(items.error as Error).message}
                 </p>
               )}
-              {!items.isLoading && itemsTotal === 0 && (
+              {/* subTotal, not just itemsTotal: a folder can hold nothing
+                  itself and still have documents below it, and telling
+                  someone "no items match" above a section listing them
+                  is worse than saying nothing. */}
+              {!items.isLoading && itemsTotal === 0 && subTotal === 0 && (
                 <p
                   className="p-6 text-sm"
                   style={{ color: "var(--color-text-muted)" }}
@@ -1643,7 +1685,7 @@ export default function LibraryPage() {
                     : "No items yet — click \"New item\" to add one."}
                 </p>
               )}
-              {flatItems.length > 0 && (
+              {listEntries.length > 0 && (
                 <table className="w-full text-sm">
                   <thead
                     className="sticky top-0 border-b text-left text-xs uppercase tracking-wider"
@@ -1766,6 +1808,16 @@ export default function LibraryPage() {
                         <tr
                           key={it.id}
                           data-item-row={it.id}
+                          draggable
+                          onDragStart={(e) => {
+                            e.dataTransfer.setData(
+                              ITEM_DRAG_TYPE,
+                              JSON.stringify(dragPayload(it.id)),
+                            );
+                            // Copy, not move: filing into a folder adds
+                            // a membership, it takes nothing away.
+                            e.dataTransfer.effectAllowed = "copy";
+                          }}
                           onClick={(e) => {
                             if (e.ctrlKey || e.metaKey) openInReader(it);
                             else setSelectedId(it.id);

@@ -29,6 +29,9 @@ import {
 } from "@/api/collections";
 import { downloadCollectionPdfsZip } from "@/api/attachments";
 
+/** Drag payload: a JSON array of item ids being filed into a folder. */
+export const ITEM_DRAG_TYPE = "application/x-shelf-items";
+
 interface Selection {
   collection: string | null; // collection id, "unfiled", or null = All Items
   view: "library" | "trash";
@@ -49,10 +52,15 @@ export default function CollectionRail({
   slug,
   selection,
   onSelect,
+  onDropItems,
 }: {
   slug: string | null;
   selection: Selection;
   onSelect: (s: Selection) => void;
+  /** Documents dragged out of the table and dropped on a folder. Owned
+   *  by the page, which is what holds the items and their current
+   *  memberships. */
+  onDropItems: (collectionId: string, itemIds: string[]) => void;
 }) {
   const qc = useQueryClient();
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -416,6 +424,7 @@ export default function CollectionRail({
             }}
             onDownload={(c) => download.mutate(c)}
             downloadingId={download.isPending ? downloadingId : null}
+            onDropItems={onDropItems}
           />
         ))}
 
@@ -460,6 +469,7 @@ export default function CollectionRail({
                 onDelete={() => {}}
                 onDownload={() => {}}
                 downloadingId={null}
+                onDropItems={() => {}}
               />
             ))}
           </div>
@@ -571,6 +581,7 @@ function CollectionNode({
   onDelete,
   onDownload,
   downloadingId,
+  onDropItems,
   readOnly = false,
 }: {
   node: TreeNode;
@@ -597,6 +608,8 @@ function CollectionNode({
   onDownload: (c: Collection) => void;
   /** Collection whose zip is currently being built, if any. */
   downloadingId: string | null;
+  /** Documents dragged from the table onto this folder. */
+  onDropItems: (collectionId: string, itemIds: string[]) => void;
   /** Inherited from another space: browsable, but every write the row
    *  would otherwise offer is refused by the API, so none are shown. */
   readOnly?: boolean;
@@ -610,6 +623,17 @@ function CollectionNode({
   >(null);
 
   function handleDragOver(e: React.DragEvent) {
+    // Documents dropped on a folder only ever mean "file them here",
+    // so there is no before/after to aim at — the whole row is one
+    // target. An inherited folder takes neither: it belongs to another
+    // space and the API refuses the write.
+    if (e.dataTransfer.types.includes(ITEM_DRAG_TYPE)) {
+      if (readOnly) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+      setDropZone("into");
+      return;
+    }
     if (!e.dataTransfer.types.includes("application/x-shelf-collection")) {
       return;
     }
@@ -625,6 +649,22 @@ function CollectionNode({
   }
 
   function handleDrop(e: React.DragEvent) {
+    const dropped = e.dataTransfer.getData(ITEM_DRAG_TYPE);
+    if (dropped) {
+      setDropZone(null);
+      if (readOnly) return;
+      e.preventDefault();
+      try {
+        const ids: unknown = JSON.parse(dropped);
+        if (Array.isArray(ids) && ids.length > 0) {
+          onDropItems(node.id, ids as string[]);
+        }
+      } catch {
+        // Not ours, or mangled in transit — drop it on the floor
+        // rather than throwing inside a drag handler.
+      }
+      return;
+    }
     const draggedId = e.dataTransfer.getData(
       "application/x-shelf-collection",
     );
@@ -740,6 +780,7 @@ function CollectionNode({
               onDelete={onDelete}
               onDownload={onDownload}
               downloadingId={downloadingId}
+              onDropItems={onDropItems}
               readOnly={readOnly}
             />
           ))}
