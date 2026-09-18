@@ -19,7 +19,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import case, cast, func, or_, select
+from sqlalchemy import Select, case, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 from sqlalchemy.types import String
@@ -129,7 +129,9 @@ class ListItemsResponse(BaseModel):
     total: int
 
 
-def _descendant_collection_ids(collection_id: uuid.UUID):
+def _descendant_collection_ids(
+    collection_id: uuid.UUID,
+) -> Select[tuple[uuid.UUID]]:
     """Every collection below this one, to any depth.
 
     A recursive CTE rather than a walk in Python: the depth is unbounded
