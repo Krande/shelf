@@ -144,8 +144,11 @@ export function ReaderToolbar({
               onClick={() => {
                 const next = !outlineOpen;
                 setOutlineOpen(next);
-                // One drawer at a time; two would leave no document.
-                if (next) setHighlightsOpen(false);
+                // On a phone a drawer is the whole screen, so two open
+                // would leave no document. There is room for both on a
+                // desktop, and wanting the outline beside the notes is
+                // an obvious thing to want.
+                if (next && isCoarsePointer) setHighlightsOpen(false);
               }}
               aria-label="Outline"
               title="Show document outline"
@@ -359,7 +362,7 @@ export function ReaderToolbar({
               onClick={() => {
                 const next = !highlightsOpen;
                 setHighlightsOpen(next);
-                if (next) setOutlineOpen(false);
+                if (next && isCoarsePointer) setOutlineOpen(false);
               }}
               aria-label="Highlights"
               title="Show highlights for this PDF"
