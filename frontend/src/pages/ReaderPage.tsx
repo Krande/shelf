@@ -29,6 +29,7 @@ import {
   Search,
   Trash2,
   X,
+  Type,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
@@ -163,6 +164,10 @@ export default function ReaderPage() {
   // = false (i.e. desktop with mouse) since drag-select already
   // works there with the default cursor.
   const [selectMode, setSelectMode] = useState(false);
+  // The editing tool in hand, named as pdf.js names them. Null is
+  // reading. Draw is absent for now: ink would be a new annotation
+  // kind rather than a new way to make one that already exists.
+  const [tool, setTool] = useState<"highlight" | "text" | null>(null);
   // Side drawer listing all highlights for this PDF.
   const [highlightsOpen, setHighlightsOpen] = useState(false);
   // Side drawer with the PDF's embedded outline (table of contents).
@@ -483,6 +488,10 @@ export default function ReaderPage() {
 
   // How the document is laid out: a row per page, or facing pairs.
   const rows = useMemo(() => pageRows(numPages, spread), [numPages, spread]);
+  // Read by the page-stepping callbacks, which are defined above this
+  // and should not be rebuilt every time the layout changes.
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
 
 
   /**
@@ -623,7 +632,12 @@ export default function ReaderPage() {
 
   const goPrev = useCallback(() => {
     setPage((p) => {
-      const n = Math.max(1, p - 1);
+      // A step is a band, not a page: with spreads on, stepping one
+      // page would leave the same pair on screen with a different one
+      // marked current. Both sides move, which is what the arrows
+      // either side of the page number look like they should do.
+      const at = rowOfPage(rowsRef.current, p);
+      const n = rowsRef.current[Math.max(0, at - 1)]?.[0] ?? Math.max(1, p - 1);
       if (!paged) {
         continuousRef.current?.scrollToPage(n);
       }
@@ -634,7 +648,12 @@ export default function ReaderPage() {
   const goNext = useCallback(() => {
     setPage((p) => {
       if (!numPages) return p;
-      const n = Math.min(numPages, p + 1);
+      const at = rowOfPage(rowsRef.current, p);
+      const n = Math.min(
+        numPages,
+        rowsRef.current[Math.min(rowsRef.current.length - 1, at + 1)]?.[0] ??
+          p + 1,
+      );
       if (!paged) {
         continuousRef.current?.scrollToPage(n);
       }
@@ -839,9 +858,14 @@ export default function ReaderPage() {
   }, [annotationsQuery.data]);
 
   const createHighlight = useMutation({
-    mutationFn: (input: { pageNumber: number; rects: Rect[]; text: string }) =>
+    mutationFn: (input: {
+      pageNumber: number;
+      rects: Rect[];
+      text: string;
+      kind?: "highlight" | "note";
+    }) =>
       createAnnotation(params.attachmentId!, {
-        kind: "highlight",
+        kind: input.kind ?? "highlight",
         page_number: input.pageNumber,
         rects: input.rects,
         text: input.text,
@@ -852,6 +876,28 @@ export default function ReaderPage() {
   });
 
   const mutateHighlight = createHighlight.mutate;
+  /**
+   * Leave a note at a point on a page.
+   *
+   * Shelf's own annotation, not one written into the PDF: it carries
+   * visibility, an author and a link, which a note baked into the file
+   * could not.
+   */
+  const mutateNote = createHighlight.mutate;
+  const createNote = useCallback(
+    (pageNumber: number, x: number, y: number) => {
+      const text = window.prompt("Note");
+      if (text === null || !text.trim()) return;
+      mutateNote({
+        pageNumber,
+        rects: [[x, y, 0, 0]],
+        text: text.trim(),
+        kind: "note",
+      });
+    },
+    [mutateNote],
+  );
+
   const onCreateHighlight = useCallback(
     (pageNumber: number, rects: Rect[], text: string) => {
       // Drop the OS selection so the floating button doesn't linger
@@ -1094,6 +1140,40 @@ export default function ReaderPage() {
           }}
         >
           <ListTree className="h-3.5 w-3.5" />
+        </button>
+
+        <button
+          onClick={() => setTool(tool === "highlight" ? null : "highlight")}
+          aria-label="Highlight"
+          aria-pressed={tool === "highlight"}
+          title="Highlight — selecting text marks it, without the extra click"
+          className="flex items-center gap-1 rounded px-2 py-1 text-xs hover:opacity-80"
+          style={{
+            color:
+              tool === "highlight"
+                ? "var(--color-accent)"
+                : "var(--color-text-muted)",
+          }}
+        >
+          <Highlighter className="h-3.5 w-3.5" />
+          Highlight
+        </button>
+
+        <button
+          onClick={() => setTool(tool === "text" ? null : "text")}
+          aria-label="Text"
+          aria-pressed={tool === "text"}
+          title="Text — click a page to leave a note on it"
+          className="flex items-center gap-1 rounded px-2 py-1 text-xs hover:opacity-80"
+          style={{
+            color:
+              tool === "text"
+                ? "var(--color-accent)"
+                : "var(--color-text-muted)",
+          }}
+        >
+          <Type className="h-3.5 w-3.5" />
+          Text
         </button>
 
         <button
@@ -1354,6 +1434,15 @@ export default function ReaderPage() {
       )}
 
       <div className="flex min-h-0 flex-1">
+        {/* Before the scroll area, so the drawer opens on the side the
+            document is read from rather than against the far edge. */}
+        {outlineOpen && doc && (
+          <OutlinePanel
+            doc={doc}
+            onJumpTo={jumpFromOutline}
+            onClose={() => setOutlineOpen(false)}
+          />
+        )}
       <div
         ref={scrollRef}
         // Both axes: with layout zoom a zoomed page is genuinely
@@ -1429,6 +1518,8 @@ export default function ReaderPage() {
                 queue={renderQueue}
                 budget={canvasBudget}
                 thumbnails={thumbnails}
+                tool={tool}
+                onCreateNote={createNote}
                 pageRef={pageRef}
                 pinchScaleRef={pinchScaleRef}
                 lastScrolledTo={lastScrolledTo}
@@ -1462,6 +1553,8 @@ export default function ReaderPage() {
             queue={renderQueue}
             budget={canvasBudget}
             thumbnails={thumbnails}
+            tool={tool}
+            onCreateNote={createNote}
             pageRef={pageRef}
             pinchScaleRef={pinchScaleRef}
             lastScrolledTo={lastScrolledTo}
@@ -1471,13 +1564,6 @@ export default function ReaderPage() {
           />
         )}
       </div>
-        {outlineOpen && (
-          <OutlinePanel
-            doc={doc}
-            onJumpTo={jumpFromOutline}
-            onClose={() => setOutlineOpen(false)}
-          />
-        )}
         {highlightsOpen && (
           <HighlightsPanel
             annotations={annotationsSorted}
@@ -1731,6 +1817,8 @@ const ContinuousList = forwardRef<
     queue: RenderQueue;
     budget: CanvasBudget;
     thumbnails: PageThumbnails;
+    tool: "highlight" | "text" | null;
+    onCreateNote: (pageNumber: number, x: number, y: number) => void;
     pageRef: React.RefObject<number>;
     pinchScaleRef: React.RefObject<number>;
     lastScrolledTo: React.RefObject<string | null>;
@@ -1760,6 +1848,8 @@ const ContinuousList = forwardRef<
     queue,
     budget,
     thumbnails,
+    tool,
+    onCreateNote,
     pageRef,
     pinchScaleRef,
     lastScrolledTo,
@@ -1966,6 +2056,8 @@ const ContinuousList = forwardRef<
                 queue={queue}
                 budget={budget}
                 thumbnails={thumbnails}
+                tool={tool}
+                onCreateNote={onCreateNote}
                 pageRef={pageRef}
                 pinchScaleRef={pinchScaleRef}
                 lastScrolledTo={lastScrolledTo}
@@ -1994,6 +2086,8 @@ function PageCanvas({
   queue,
   budget,
   thumbnails,
+  tool,
+  onCreateNote,
   pageRef,
   pinchScaleRef,
   lastScrolledTo,
@@ -2016,6 +2110,10 @@ function PageCanvas({
   budget: CanvasBudget;
   /** Small bitmaps of pages already seen, to fill a page instantly. */
   thumbnails: PageThumbnails;
+  /** The tool in hand, or null while reading. */
+  tool: "highlight" | "text" | null;
+  /** Leave a note at a point on a page, in PDF user-space. */
+  onCreateNote: (pageNumber: number, x: number, y: number) => void;
   /** The page in view, for queue priority. */
   pageRef: React.RefObject<number>;
   pinchScaleRef: React.RefObject<number>;
@@ -2360,6 +2458,14 @@ function PageCanvas({
         const pdfY = nativeH - r.y / renderScale - pdfH;
         return [pdfX, pdfY, pdfW, pdfH];
       });
+      if (tool === "highlight") {
+        // The tool is the confirmation. Clear the selection so the same
+        // passage is not marked twice by a stray re-fire.
+        sel.removeAllRanges();
+        setPendingHighlight(null);
+        onCreateHighlight(pageNumber, pdfRects, sel.toString());
+        return;
+      }
       setPendingHighlight({
         layoutRects,
         pdfRects,
@@ -2389,7 +2495,7 @@ function PageCanvas({
       document.removeEventListener("pointerup", schedule);
       document.removeEventListener("touchend", schedule);
     };
-  }, [native, renderScale, pinchScaleRef]);
+  }, [native, renderScale, pinchScaleRef, tool, pageNumber, onCreateHighlight]);
 
   // Per-occurrence find highlight via DOM Range geometry. The
   // earlier "wrap matches in <mark>" approach was double-broken on
@@ -2506,6 +2612,15 @@ function PageCanvas({
   return (
     <div
       ref={wrapperRef}
+      onClick={(e) => {
+        if (tool !== "text" || !native) return;
+        const rect = e.currentTarget.getBoundingClientRect();
+        // Into PDF user-space: undo the render scale, and flip the
+        // y-axis, which runs up from the bottom of the page.
+        const x = (e.clientX - rect.left) / renderScale;
+        const y = native.height - (e.clientY - rect.top) / renderScale;
+        onCreateNote(pageNumber, x, y);
+      }}
       className="relative rounded border shadow-md"
       style={{
         borderColor: "var(--color-border)",
@@ -2517,6 +2632,7 @@ function PageCanvas({
         // about to be, so the fill stops being a state of its own.
         backgroundColor: "#ffffff",
         display: "inline-block",
+        cursor: tool === "text" ? "crosshair" : undefined,
         // A flex item shrinks by default. Past 100% the page is wider
         // than its row, so it was being squeezed horizontally while its
         // explicit height stayed -- the page came out stretched
