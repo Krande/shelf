@@ -285,7 +285,22 @@ export default function ReaderPage() {
     };
   }, [auth.status, params.attachmentId, version]);
 
+  // Page text, kept for the life of the document. Pulling it is the
+  // expensive half of a search and it never changes, so the second
+  // search of a document costs nothing on the worker -- which matters
+  // because the query is debounced, not final: "fatigue" is searched
+  // after "fati" and "fatig" have been.
+  const pageText = useRef(new Map<number, string>());
+  useEffect(() => {
+    pageText.current = new Map();
+  }, [doc]);
+
   // Whole-document text scan when the find query changes.
+  //
+  // Results are published as they are found rather than at the end, so
+  // a hit on page 3 is usable while page 300 is still being read, and
+  // the scan yields between pages so it shares the worker with page
+  // rendering instead of starving it.
   useEffect(() => {
     if (!doc) return;
     const needle = findQuery.trim().toLowerCase();
@@ -301,12 +316,21 @@ export default function ReaderPage() {
       const found: Array<{ page: number; occurrence: number }> = [];
       for (let n = 1; n <= doc.numPages; n++) {
         if (cancelled) return;
-        const p = await doc.getPage(n);
-        const tc = await p.getTextContent();
-        const text = tc.items
-          .map((it) => ("str" in it ? (it as { str: string }).str : ""))
-          .join(" ")
-          .toLowerCase();
+        let text = pageText.current.get(n);
+        if (text === undefined) {
+          const p = await doc.getPage(n);
+          try {
+            const tc = await p.getTextContent();
+            text = tc.items
+              .map((it) => ("str" in it ? (it as { str: string }).str : ""))
+              .join(" ")
+              .toLowerCase();
+            pageText.current.set(n, text);
+          } finally {
+            p.cleanup();
+          }
+        }
+        if (cancelled) return;
         let from = 0;
         let occ = 0;
         while (true) {
@@ -316,7 +340,14 @@ export default function ReaderPage() {
           occ += 1;
           from = idx + needle.length;
         }
-        p.cleanup();
+        // Publish what we have so far, and hand the event loop back so
+        // the page the reader is looking at can render. Every 8 pages
+        // rather than every page: a re-render per page of a 357-page
+        // document is its own stall.
+        if (found.length > 0 && n % 8 === 0) {
+          setMatches([...found]);
+        }
+        if (n % 8 === 0) await new Promise((r) => setTimeout(r, 0));
       }
       if (!cancelled) {
         setMatches(found);
