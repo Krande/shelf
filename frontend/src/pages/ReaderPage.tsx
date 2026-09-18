@@ -991,7 +991,11 @@ export default function ReaderPage() {
                 jumpToMatch(currentMatch + (e.shiftKey ? -1 : 1));
               } else if (e.key === "Escape") {
                 e.preventDefault();
+                // Clear as well as close, like the X does. A query left
+                // behind keeps its highlights on the page with no
+                // visible control left to clear them.
                 setFindOpen(false);
+                setFindInput("");
               }
             }}
             placeholder="Find in PDF…"
@@ -1566,6 +1570,9 @@ function PageCanvas({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const textLayerRef = useRef<HTMLDivElement>(null);
   const [textLayerVersion, setTextLayerVersion] = useState(0);
+  // Which match this page last scrolled to, so a re-render does not
+  // scroll to it again.
+  const lastScrolledTo = useRef<string | null>(null);
 
   const cssW = native ? native.width * renderScale : undefined;
   const cssH = native ? native.height * renderScale : undefined;
@@ -1791,7 +1798,13 @@ function PageCanvas({
       .forEach((el) => el.remove());
 
     const needle = findQuery.trim();
-    if (!needle || textLayerVersion === 0) return;
+    if (!needle || textLayerVersion === 0) {
+      // Nothing highlighted, so the next match to be drawn is worth
+      // scrolling to even if it is the one we scrolled to last time --
+      // searching the same word again should still take you there.
+      lastScrolledTo.current = null;
+      return;
+    }
 
     const lowerNeedle = needle.toLowerCase();
     const spans = Array.from(
@@ -1854,7 +1867,15 @@ function PageCanvas({
       }
     }
 
-    if (currentEl) {
+    // Only when the target actually moved. This effect also re-runs
+    // whenever the text layer is rebuilt, which happens on any change
+    // of render scale -- and closing the find bar resizes the scroll
+    // container, so it re-rendered every page and then scrolled back to
+    // the match the user had just finished with. Escaping out of a
+    // search should leave you where you are reading.
+    const target = `${needle}:${currentOccurrence}`;
+    if (currentEl && lastScrolledTo.current !== target) {
+      lastScrolledTo.current = target;
       currentEl.scrollIntoView({ behavior: "smooth", block: "center" });
     }
     // pinchScaleRef is read inside the loop above. Listing it here
