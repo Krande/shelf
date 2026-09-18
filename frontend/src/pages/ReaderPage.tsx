@@ -72,6 +72,7 @@ import { pageLinks, type PageLink } from "@/lib/pdfLinks";
 import { CanvasBudget, clampPixelMultiplier } from "@/lib/canvasBudget";
 import { RenderQueue } from "@/lib/renderQueue";
 import { pageRows, rowOfPage, SPREAD_LABELS } from "@/lib/spreads";
+import { PageThumbnails } from "@/lib/pageThumbnails";
 import OutlinePanel from "@/components/library/OutlinePanel";
 import ProcessingMenu from "@/components/reader/ProcessingMenu";
 import VersionPicker from "@/components/reader/VersionPicker";
@@ -866,6 +867,13 @@ export default function ReaderPage() {
   // bounds one canvas; how many are mounted is decided by the viewport,
   // not by anything about memory.
   const canvasBudget = useRef(new CanvasBudget()).current;
+  // A thumbnail of every page seen so far, so a page returning to view
+  // has something to show while its real render is queued. Cleared with
+  // the document.
+  const thumbnails = useRef(new PageThumbnails()).current;
+  useEffect(() => {
+    return () => thumbnails.clear();
+  }, [doc, thumbnails]);
   // Read by the queue's priority function without re-subscribing it.
   const pageRef = useRef(page);
   pageRef.current = page;
@@ -1291,6 +1299,7 @@ export default function ReaderPage() {
               onNativeSize={applyNativeSizeSingle}
               queue={renderQueue}
               budget={canvasBudget}
+              thumbnails={thumbnails}
               pageRef={pageRef}
               pinchScaleRef={pinchScaleRef}
               lastScrolledTo={lastScrolledTo}
@@ -1321,6 +1330,7 @@ export default function ReaderPage() {
             debugText={debugText}
             queue={renderQueue}
             budget={canvasBudget}
+            thumbnails={thumbnails}
             pageRef={pageRef}
             pinchScaleRef={pinchScaleRef}
             lastScrolledTo={lastScrolledTo}
@@ -1588,6 +1598,7 @@ const ContinuousList = forwardRef<
     debugText: boolean;
     queue: RenderQueue;
     budget: CanvasBudget;
+    thumbnails: PageThumbnails;
     pageRef: React.RefObject<number>;
     pinchScaleRef: React.RefObject<number>;
     lastScrolledTo: React.RefObject<string | null>;
@@ -1615,6 +1626,7 @@ const ContinuousList = forwardRef<
     debugText,
     queue,
     budget,
+    thumbnails,
     pageRef,
     pinchScaleRef,
     lastScrolledTo,
@@ -1810,6 +1822,7 @@ const ContinuousList = forwardRef<
                 onNativeSize={applyNativeSize}
                 queue={queue}
                 budget={budget}
+                thumbnails={thumbnails}
                 pageRef={pageRef}
                 pinchScaleRef={pinchScaleRef}
                 lastScrolledTo={lastScrolledTo}
@@ -1836,6 +1849,7 @@ function PageCanvas({
   debugText,
   queue,
   budget,
+  thumbnails,
   pageRef,
   pinchScaleRef,
   lastScrolledTo,
@@ -1856,6 +1870,8 @@ function PageCanvas({
   queue: RenderQueue;
   /** Shared pixel ceiling across every rendered page. */
   budget: CanvasBudget;
+  /** Small bitmaps of pages already seen, to fill a page instantly. */
+  thumbnails: PageThumbnails;
   /** The page in view, for queue priority. */
   pageRef: React.RefObject<number>;
   pinchScaleRef: React.RefObject<number>;
@@ -1880,10 +1896,25 @@ function PageCanvas({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const textLayerRef = useRef<HTMLDivElement>(null);
   const [textLayerVersion, setTextLayerVersion] = useState(0);
-  // An unpainted canvas is a blank box, which in the dark theme reads
-  // as a failure rather than as "not yet". Tracked so the placeholder
-  // can say which page it is and that it is coming.
+  // An unpainted canvas is a blank box. Tracked so the placeholder can
+  // say which page it is and that it is coming.
   const [painted, setPainted] = useState(false);
+
+  // Whether anything is actually drawn. Not canvas.width: a canvas
+  // that has never been drawn to is 300x150, not 0, so its dimensions
+  // cannot answer this.
+  const hasPixels = useRef(false);
+
+  // Before any render is queued, and synchronously with the mount so
+  // there is no frame in which the page is empty.
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || hasPixels.current) return;
+    if (thumbnails.paint(pageNumber, canvas)) {
+      hasPixels.current = true;
+      setPainted(true);
+    }
+  }, [pageNumber, thumbnails]);
   // What is currently drawn. A re-run of the render effect that would
   // produce the same pixels is skipped: the list starting and stopping
   // is not a reason to redraw the page.
@@ -2015,6 +2046,35 @@ function PageCanvas({
         viewport,
         canvas: offscreen,
       });
+
+      // Nothing on this page yet: show it building rather than holding
+      // a blank until the whole page is done. pdfjs calls onContinue
+      // between chunks, and its own viewer paints partial results at
+      // exactly this point. A re-render is deliberately excluded --
+      // there the page already has pixels, and replacing them with a
+      // half-drawn page would be a downgrade, so those swap in one go
+      // when the render completes.
+      // Only when there is genuinely nothing on the page. With a
+      // thumbnail up, replacing it with a half-drawn page is a
+      // downgrade -- better to wait and swap the finished render in.
+      const firstPaint = drawnKey.current === null && !hasPixels.current;
+      if (firstPaint) {
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        let lastShown = 0;
+        task.onContinue = (cont: () => void) => {
+          // Throttled: a partial blit per chunk on a dense page is its
+          // own cost, and pdfjs paces its own at half a second.
+          const now = Date.now();
+          if (now - lastShown > 150) {
+            lastShown = now;
+            canvas.getContext("2d")?.drawImage(offscreen, 0, 0);
+            hasPixels.current = true;
+            setPainted(true);
+          }
+          cont();
+        };
+      }
       try {
         await task.promise;
       } catch (e) {
@@ -2032,6 +2092,8 @@ function PageCanvas({
       canvas.width = viewport.width;
       canvas.height = viewport.height;
       canvas.getContext("2d")?.drawImage(offscreen, 0, 0);
+      hasPixels.current = true;
+      thumbnails.store(pageNumber, offscreen);
       offscreen.width = 0;
       offscreen.height = 0;
       drawnKey.current = wantKey;
@@ -2085,7 +2147,7 @@ function PageCanvas({
       textLayerTask?.cancel();
       pdfPage?.cleanup();
     };
-  }, [doc, pageNumber, renderScale, native, queue, budget, pageRef]);
+  }, [doc, pageNumber, renderScale, native, queue, budget, thumbnails, pageRef]);
 
   // Release the canvas when the page really goes away. Deliberately not
   // in the render effect's cleanup: that runs whenever its inputs
@@ -2096,7 +2158,8 @@ function PageCanvas({
     const key = `page-${pageNumber}`;
     return () => {
       budget.release(key);
-      if (canvas && canvas.width > 0) {
+      hasPixels.current = false;
+      if (canvas) {
         canvas.width = 0;
         canvas.height = 0;
       }
