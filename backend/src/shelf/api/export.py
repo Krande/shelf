@@ -377,6 +377,42 @@ def _dedupe_name(name: str, used: set[str]) -> str:
         n += 1
 
 
+async def _collection_item_ids(
+    db: AsyncSession, space_id: uuid.UUID, collection_id: uuid.UUID
+) -> list[uuid.UUID]:
+    """Items filed directly under one of this space's collections.
+
+    Direct members only, no descendants -- the library lists a
+    collection the same way, and a download that quietly included four
+    subfolders would not be the thing on screen.
+
+    A collection belonging to some other space is a 404 rather than an
+    empty archive, for the same reason the item listing rejects one: a
+    filter that silently matches nothing reads as "there is nothing
+    here".
+    """
+    owner_space_id = (
+        await db.execute(
+            select(Collection.space_id).where(Collection.id == collection_id)
+        )
+    ).scalar_one_or_none()
+    if owner_space_id != space_id:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "No such collection in this space"
+        )
+    rows = await db.execute(
+        select(Item.id)
+        .join(ItemCollection, ItemCollection.item_id == Item.id)
+        .where(
+            ItemCollection.collection_id == collection_id,
+            Item.space_id == space_id,
+            Item.deleted_at.is_(None),
+        )
+        .order_by(Item.updated_at.desc())
+    )
+    return list(rows.scalars().all())
+
+
 @router.get("/api/spaces/{slug}/attachments-zip")
 async def download_attachments_zip(
     slug: str,
@@ -386,25 +422,49 @@ async def download_attachments_zip(
         list[uuid.UUID] | None,
         Query(description="Item ids to bundle; repeat the param per id."),
     ] = None,
+    collection: Annotated[
+        uuid.UUID | None,
+        Query(
+            description=(
+                "Bundle every item filed directly under this collection, "
+                "instead of naming ids. Mutually exclusive with `item`."
+            )
+        ),
+    ] = None,
 ) -> Response:
     """Bundle every PDF attachment of the selected items into one flat
-    ZIP. Used by the library's bulk-select "Download PDFs" action.
-    Non-PDF attachments are skipped; a missing blob is logged and left
-    out rather than failing the whole download. 404 if none of the
-    selected items yields a PDF."""
+    ZIP. Used by the library's bulk-select "Download PDFs" action and by
+    "Download PDFs" on a collection. Non-PDF attachments are skipped; a
+    missing blob is logged and left out rather than failing the whole
+    download. 404 if none of the selected items yields a PDF."""
     space = await _resolve_space(db, user, slug)
-    if not item:
+    if collection is not None and item:
         raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, "at least one item id is required"
+            status.HTTP_400_BAD_REQUEST,
+            "pass item ids or a collection, not both",
         )
-    # De-dupe while preserving the caller's selection order so ZIP
-    # entries come out in a predictable sequence.
-    seen: set[uuid.UUID] = set()
-    ids: list[uuid.UUID] = []
-    for iid in item:
-        if iid not in seen:
-            seen.add(iid)
-            ids.append(iid)
+    if collection is None and not item:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "at least one item id, or a collection, is required",
+        )
+
+    if collection is not None:
+        # Resolved here rather than by the caller listing the collection
+        # and sending an id per item: a folder with a few hundred
+        # documents would otherwise build a query string long enough to
+        # be refused, and the membership rule stays in one place.
+        ids = await _collection_item_ids(db, space.id, collection)
+    else:
+        # De-dupe while preserving the caller's selection order so ZIP
+        # entries come out in a predictable sequence.
+        assert item is not None
+        seen: set[uuid.UUID] = set()
+        ids = []
+        for iid in item:
+            if iid not in seen:
+                seen.add(iid)
+                ids.append(iid)
 
     rows = await db.execute(
         select(Item).where(

@@ -5,6 +5,7 @@ import {
   ArrowUp,
   ChevronDown,
   ChevronRight,
+  Download,
   FolderClosed,
   FolderInput,
   FolderOpen,
@@ -26,6 +27,7 @@ import {
   listCollections,
   updateCollection,
 } from "@/api/collections";
+import { downloadCollectionPdfsZip } from "@/api/attachments";
 
 interface Selection {
   collection: string | null; // collection id, "unfiled", or null = All Items
@@ -66,6 +68,34 @@ export default function CollectionRail({
     queryKey: ["collections", slug],
     queryFn: () => listCollections(slug!),
     enabled: !!slug,
+  });
+
+  // "Download PDFs" on a folder. Server-assembled, the same archive the
+  // bulk-select action produces -- the collection id goes over rather
+  // than an id per item, so a big folder doesn't build a query string
+  // long enough to be refused.
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const download = useMutation({
+    mutationFn: (c: Collection) => {
+      setDownloadingId(c.id);
+      return downloadCollectionPdfsZip(slug!, c.id);
+    },
+    onSettled: () => setDownloadingId(null),
+    onSuccess: ({ skipped }) => {
+      if (skipped > 0) {
+        window.alert(
+          `${skipped} PDF${skipped === 1 ? "" : "s"} could not be fetched ` +
+            "from storage and were left out (see _MISSING_FILES.txt in the " +
+            "ZIP).",
+        );
+      }
+    },
+    onError: (e: Error) =>
+      window.alert(
+        e.message === "Not Found"
+          ? "Nothing to download — no PDFs in that collection."
+          : `Download failed: ${e.message}`,
+      ),
   });
 
   // Own collections and inherited ones are built into separate trees and
@@ -384,6 +414,8 @@ export default function CollectionRail({
                 remove.mutate(id);
               }
             }}
+            onDownload={(c) => download.mutate(c)}
+            downloadingId={download.isPending ? downloadingId : null}
           />
         ))}
 
@@ -426,6 +458,8 @@ export default function CollectionRail({
                 onMoveBy={() => {}}
                 onDrop={() => {}}
                 onDelete={() => {}}
+                onDownload={() => {}}
+                downloadingId={null}
               />
             ))}
           </div>
@@ -535,6 +569,8 @@ function CollectionNode({
   onMoveBy,
   onDrop,
   onDelete,
+  onDownload,
+  downloadingId,
   readOnly = false,
 }: {
   node: TreeNode;
@@ -558,6 +594,9 @@ function CollectionNode({
     position: "before" | "after" | "into",
   ) => void;
   onDelete: (id: string, name: string) => void;
+  onDownload: (c: Collection) => void;
+  /** Collection whose zip is currently being built, if any. */
+  downloadingId: string | null;
   /** Inherited from another space: browsable, but every write the row
    *  would otherwise offer is refused by the API, so none are shown. */
   readOnly?: boolean;
@@ -671,6 +710,8 @@ function CollectionNode({
             onMoveInto={() => onMoveInto(node)}
             onMoveUp={() => onMoveBy(node, -1)}
             onMoveDown={() => onMoveBy(node, +1)}
+            onDownload={() => onDownload(node)}
+            downloading={downloadingId === node.id}
             onDelete={() => onDelete(node.id, node.name)}
           />
         )}
@@ -697,6 +738,8 @@ function CollectionNode({
               onMoveBy={onMoveBy}
               onDrop={onDrop}
               onDelete={onDelete}
+              onDownload={onDownload}
+              downloadingId={downloadingId}
               readOnly={readOnly}
             />
           ))}
@@ -765,6 +808,8 @@ function NodeMenu({
   onMoveInto,
   onMoveUp,
   onMoveDown,
+  onDownload,
+  downloading,
   onDelete,
 }: {
   node: Collection;
@@ -775,6 +820,10 @@ function NodeMenu({
   onMoveInto: () => void;
   onMoveUp: () => void;
   onMoveDown: () => void;
+  onDownload: () => void;
+  /** A zip is being built for this folder; the entry says so and stops
+   *  a second click starting another. */
+  downloading: boolean;
   onDelete: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -873,6 +922,16 @@ function NodeMenu({
               icon={FolderInput}
               label="Move into…"
               onClick={run(onMoveInto)}
+            />
+            <div
+              className="my-1 border-t"
+              style={{ borderColor: "var(--color-border)" }}
+            />
+            <MenuItem
+              icon={Download}
+              label={downloading ? "Zipping…" : "Download PDFs"}
+              disabled={downloading}
+              onClick={run(onDownload)}
             />
             <div
               className="my-1 border-t"

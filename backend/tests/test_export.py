@@ -9,7 +9,10 @@ import zipfile
 import pytest
 from httpx import AsyncClient
 
+from shelf.config import settings
 from shelf.services import storage
+
+from .helpers import login
 
 
 async def _login(client: AsyncClient, email: str = "alice@example.com") -> str:
@@ -428,3 +431,115 @@ async def test_csl_json_treats_organisation_as_literal(client: AsyncClient) -> N
     )
     e = json.loads(r.text)[0]
     assert e["author"] == [{"literal": "ACME Inc."}]
+
+
+async def _file_under(
+    client: AsyncClient, slug: str, name: str, item_ids: list[str]
+) -> str:
+    """A collection holding the given items. Returns its id."""
+    coll = (
+        await client.post(f"/api/spaces/{slug}/collections", json={"name": name})
+    ).json()["id"]
+    for iid in item_ids:
+        r = await client.put(
+            f"/api/items/{iid}/collections", json={"collection_ids": [coll]}
+        )
+        assert r.status_code == 200, r.text
+    return str(coll)
+
+
+async def test_collection_zip_bundles_everything_filed_under_it(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """"Download PDFs" on a folder bundles its members, and nothing else.
+
+    The collection id goes over the wire instead of an id per item, so a
+    folder of several hundred documents doesn't build a query string
+    long enough to be refused.
+    """
+
+    async def fake_read_object(key: str) -> bytes:
+        return f"bytes-of-{key}".encode()
+
+    monkeypatch.setattr(storage, "read_object", fake_read_object)
+
+    slug = await _login(client)
+    a = await _make_paper(client, slug, title="Filed A")
+    b = await _make_paper(client, slug, title="Filed B")
+    loose = await _make_paper(client, slug, title="Not in the folder")
+    await _attach(client, a["id"], "a.pdf")
+    await _attach(client, b["id"], "b.pdf")
+    await _attach(client, loose["id"], "loose.pdf")
+
+    coll = await _file_under(client, slug, "Drawings", [a["id"], b["id"]])
+
+    r = await client.get(
+        f"/api/spaces/{slug}/attachments-zip", params={"collection": coll}
+    )
+    assert r.status_code == 200, r.text
+    names = zipfile.ZipFile(io.BytesIO(r.content)).namelist()
+    assert sorted(names) == ["a.pdf", "b.pdf"]
+    assert "loose.pdf" not in names
+
+
+async def test_collection_zip_ignores_a_trashed_member(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_read_object(key: str) -> bytes:
+        return b"x"
+
+    monkeypatch.setattr(storage, "read_object", fake_read_object)
+
+    slug = await _login(client)
+    keep = await _make_paper(client, slug, title="Keep")
+    binned = await _make_paper(client, slug, title="Binned")
+    await _attach(client, keep["id"], "keep.pdf")
+    await _attach(client, binned["id"], "binned.pdf")
+    coll = await _file_under(client, slug, "Mixed", [keep["id"], binned["id"]])
+    assert (await client.delete(f"/api/items/{binned['id']}")).status_code in (
+        200,
+        204,
+    )
+
+    r = await client.get(
+        f"/api/spaces/{slug}/attachments-zip", params={"collection": coll}
+    )
+    assert r.status_code == 200, r.text
+    assert zipfile.ZipFile(io.BytesIO(r.content)).namelist() == ["keep.pdf"]
+
+
+async def test_collection_zip_404s_for_another_space_collection(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A folder id from elsewhere is a 404, not an empty archive."""
+    monkeypatch.setattr(settings, "admin_emails", ["admin@example.com"])
+    await login(client, "admin@example.com")
+    mine = (
+        await client.post("/api/spaces", json={"name": "Mine", "slug": "z-mine"})
+    ).json()["slug"]
+    other = (
+        await client.post("/api/spaces", json={"name": "Other", "slug": "z-other"})
+    ).json()["slug"]
+    foreign = (
+        await client.post(
+            f"/api/spaces/{other}/collections", json={"name": "Theirs"}
+        )
+    ).json()["id"]
+
+    r = await client.get(
+        f"/api/spaces/{mine}/attachments-zip", params={"collection": foreign}
+    )
+    assert r.status_code == 404, r.text
+
+
+async def test_collection_zip_rejects_both_selectors(
+    client: AsyncClient,
+) -> None:
+    slug = await _login(client)
+    item = await _make_paper(client, slug, title="Whatever")
+    coll = await _file_under(client, slug, "Folder", [item["id"]])
+    r = await client.get(
+        f"/api/spaces/{slug}/attachments-zip",
+        params={"collection": coll, "item": [item["id"]]},
+    )
+    assert r.status_code == 400, r.text
