@@ -2302,7 +2302,13 @@ function PageCanvas({
       className="relative rounded border shadow-md"
       style={{
         borderColor: "var(--color-border)",
-        backgroundColor: "var(--color-surface)",
+        // Paper, not the app's surface colour. A page that has not been
+        // drawn yet is a blank canvas, and on a dark theme the surface
+        // behind it reads as a black hole -- which is what a zoom out
+        // looks like, since it brings more pages into view at once than
+        // the queue can have drawn. White is also what the page is
+        // about to be, so the fill stops being a state of its own.
+        backgroundColor: "#ffffff",
         display: "inline-block",
         width: cssW != null ? `${cssW}px` : undefined,
         height: cssH != null ? `${cssH}px` : undefined,
@@ -2318,7 +2324,8 @@ function PageCanvas({
       {!painted && (
         <div
           className="pointer-events-none absolute inset-0 flex items-center justify-center gap-2 text-xs"
-          style={{ color: "var(--color-text-muted)" }}
+          // Against the paper fill above, not the app's surface.
+          style={{ color: "#9a9a9a" }}
         >
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
           Page {pageNumber}
