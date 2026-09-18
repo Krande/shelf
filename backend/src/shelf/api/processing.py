@@ -25,6 +25,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth.deps import get_current_user
+from ..auth.roles import require_admin
 from ..auth.spaces import SPACE_ROLE_EDITOR, readable_space_ids, require_space_role
 from ..db import get_session
 from ..models import Attachment, AttachmentProcessing, Item, Space, User
@@ -401,6 +402,7 @@ async def _set_status_queued(
 async def trigger_ocr(
     attachment_id: uuid.UUID,
     user: Annotated[User, Depends(get_current_user)],
+    _admin: Annotated[User, Depends(require_admin)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> TriggerResult:
     """Force-enqueue an OCR job for one attachment, bypassing the
@@ -437,6 +439,7 @@ class CancelResult(BaseModel):
 async def restore_original(
     attachment_id: uuid.UUID,
     user: Annotated[User, Depends(get_current_user)],
+    _admin: Annotated[User, Depends(require_admin)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> RestoreOriginalResult:
     """Copy ``<storage_key>.original`` back over the live blob.
@@ -511,6 +514,7 @@ async def cancel_processing(
     attachment_id: uuid.UUID,
     payload: CancelRequest,
     user: Annotated[User, Depends(get_current_user)],
+    _admin: Annotated[User, Depends(require_admin)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> CancelResult:
     """Mark a queued or running OCR / outline job as cancelled.
@@ -572,6 +576,7 @@ async def cancel_processing(
 async def trigger_ocr_gpu(
     attachment_id: uuid.UUID,
     user: Annotated[User, Depends(get_current_user)],
+    _admin: Annotated[User, Depends(require_admin)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> TriggerResult:
     """Force-enqueue a GPU-tier OCR job (olmOCR / Qwen2.5-VL-7B).
@@ -601,6 +606,7 @@ async def trigger_ocr_gpu(
 async def trigger_outline(
     attachment_id: uuid.UUID,
     user: Annotated[User, Depends(get_current_user)],
+    _admin: Annotated[User, Depends(require_admin)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> TriggerResult:
     """Force-enqueue an outline-generation job. The Phase C worker

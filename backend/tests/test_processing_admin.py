@@ -13,6 +13,20 @@ import uuid
 import pytest
 from httpx import AsyncClient
 
+from shelf.config import settings
+
+
+@pytest.fixture(autouse=True)
+def _everyone_is_an_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-processing is admin-only; these tests are about what it does.
+
+    The role gate has its own tests. Granting it here keeps each test
+    below exercising the behaviour it was written for -- including the
+    isolation one, which is the more interesting guarantee now: being an
+    admin still does not reach an attachment in a space you cannot read.
+    """
+    monkeypatch.setattr(settings, "dev_login_role", "admin")
+
 
 async def _login(client: AsyncClient, email: str = "alice@example.com") -> str:
     await client.post("/auth/dev-login", json={"email": email})
@@ -114,7 +128,7 @@ async def test_trigger_outline_marks_queued_and_publishes(
 async def test_trigger_ocr_isolates_users(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Bob can't trigger OCR on Alice's attachment."""
+    """Bob can't trigger OCR on Alice's attachment, admin or not."""
     from shelf.api import processing as proc_api
 
     async def fake(_: uuid.UUID) -> bool:
