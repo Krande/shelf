@@ -17,6 +17,24 @@ interface Shortcut {
   what: string;
 }
 
+const SEARCH: Shortcut[] = [
+  { keys: "↑ / ↓", what: "Move through the results" },
+  {
+    keys: "Enter / click",
+    what: "Open the result's PDF — at the matching page, when the row is a passage from one",
+  },
+  {
+    keys: "Shift + Enter / Shift + click",
+    what: "Open the item's details in the library instead",
+  },
+  {
+    keys: "→",
+    what: "Show the pages a full-text result matched on",
+  },
+  { keys: "←", what: "Fold those away again, or leave the list" },
+  { keys: "Escape", what: "Leave the list, keeping what you typed" },
+];
+
 const LIBRARY: Shortcut[] = [
   { keys: "↑ / ↓", what: "Move the selection through the list" },
   { keys: "Enter", what: "Open the selected document's PDF" },
@@ -125,6 +143,7 @@ export default function ShortcutsHelp() {
                   <X className="h-4 w-4" />
                 </button>
               </div>
+              <Section title="Search" rows={SEARCH} />
               <Section title="Library" rows={LIBRARY} />
               <Section title="PDF reader" rows={READER} />
             </div>

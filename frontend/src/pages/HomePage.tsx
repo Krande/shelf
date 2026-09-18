@@ -33,9 +33,11 @@ import ShortcutsHelp from "@/components/layout/ShortcutsHelp";
  * setting (auth/prefs.ts). When the pref is off, App.tsx redirects
  * `/` to `/library` and this page is reachable only via direct URL.
  *
- * As the user types, a dropdown shows the top title hits with two
- * per-row actions: BookOpen jumps straight into the PDF reader,
- * Info opens the item's detail panel in /library. Title-only scope
+ * As the user types, a dropdown shows the top title hits. Picking one
+ * opens its PDF — at the matching page when the row is a full-text
+ * snippet — because a search result is a thing to read, not a record to
+ * inspect. Info on each row still opens the item's detail panel in
+ * /library, and Shift does the same from the keyboard. Title-only scope
  * keeps the query cheap so the dropdown feels instant.
  */
 export default function HomePage() {
@@ -442,17 +444,18 @@ export default function HomePage() {
       }
     } else if (e.key === "Enter" && activeIndex >= 0 && entry) {
       e.preventDefault();
+      // Enter opens the PDF: the result is the thing to read, and
+      // landing on a detail panel instead means a second click every
+      // time. Shift is the way to the record.
       if (entry.kind === "snippet") {
-        if (e.shiftKey) {
+        if (e.shiftKey) openInLibrary(entry.item);
+        else
           nav(
             `/reader/${encodeURIComponent(entry.attachmentId)}?page=${entry.pageNumber}&find=${encodeURIComponent(debouncedQ)}`,
           );
-        } else {
-          openInLibrary(entry.item);
-        }
       } else {
-        if (e.shiftKey) openInReader(entry.item);
-        else openInLibrary(entry.item);
+        if (e.shiftKey) openInLibrary(entry.item);
+        else openInReader(entry.item);
       }
     } else if (e.key === "Escape" && activeIndex >= 0) {
       e.preventDefault();
@@ -597,7 +600,10 @@ export default function HomePage() {
                     <span className="inline-block w-[22px]" />
                   )}
                   <button
-                    onClick={() => openInLibrary(item)}
+                    onClick={(e) =>
+                      e.shiftKey ? openInLibrary(item) : openInReader(item)
+                    }
+                    title="Open PDF · Shift+click for item details"
                     className="min-w-0 flex-1 text-left hover:opacity-80"
                   >
                     <div
@@ -637,9 +643,9 @@ export default function HomePage() {
               );
             };
             // Renders one PDF-snippet row beneath an expanded fulltext
-            // item. Plain click / Enter mirrors the rest of the
-            // dropdown (open library detail); Shift+Enter or a
-            // shift-click jumps straight to the page in the reader.
+            // item. Clicking one goes to that page in the reader with
+            // the find bar filled in — the whole point of showing the
+            // passage. Shift opens the item's record instead.
             const renderSnippet = (
               entry: SnippetNavEntry,
               flatIndex: number,
@@ -657,8 +663,8 @@ export default function HomePage() {
                   }}
                   onMouseEnter={() => setActiveIndex(flatIndex)}
                   onClick={(e) => {
-                    if (e.shiftKey || isCoarsePointer) nav(target);
-                    else openInLibrary(entry.item);
+                    if (e.shiftKey) openInLibrary(entry.item);
+                    else nav(target);
                   }}
                   className="flex cursor-pointer items-start gap-2 border-b px-3 py-1.5 pl-11 text-sm last:border-b-0"
                   style={{
@@ -670,7 +676,7 @@ export default function HomePage() {
                   title={
                     isCoarsePointer
                       ? "Tap to jump to this page"
-                      : "Click to open item · Shift+click to jump to this page"
+                      : "Click to jump to this page · Shift+click for item details"
                   }
                 >
                   <span
