@@ -57,6 +57,7 @@ import { useDebounce } from "@/hooks/useDebounce";
 import { usePinchZoom } from "@/hooks/usePinchZoom";
 import { pageLinks, type PageLink } from "@/lib/pdfLinks";
 import { clampPixelMultiplier } from "@/lib/canvasBudget";
+import { RenderQueue } from "@/lib/renderQueue";
 import OutlinePanel from "@/components/library/OutlinePanel";
 import ProcessingMenu from "@/components/reader/ProcessingMenu";
 import VersionPicker from "@/components/reader/VersionPicker";
@@ -755,6 +756,14 @@ export default function ReaderPage() {
   // so a remount does not re-scroll to it; see PageCanvas.
   const lastScrolledTo = useRef<string | null>(null);
 
+  // Page renders run one at a time, nearest the viewport first. One
+  // queue for the document, so the single pdfjs worker is never asked
+  // for nine pages at once.
+  const renderQueue = useRef(new RenderQueue()).current;
+  // Read by the queue's priority function without re-subscribing it.
+  const pageRef = useRef(page);
+  pageRef.current = page;
+
   const [oversample, setOversample] = useState(1);
   useEffect(() => {
     const target = Math.max(1, Math.min(MAX_OVERSAMPLE, pinch.scale));
@@ -1131,6 +1140,8 @@ export default function ReaderPage() {
               annotations={annotationsByPage.get(page) ?? []}
               focusedAnnotationId={focusedAnnotationId}
               debugText={debugText}
+              queue={renderQueue}
+              pageRef={pageRef}
               pinchScaleRef={pinchScaleRef}
               lastScrolledTo={lastScrolledTo}
               onCreateHighlight={onCreateHighlight}
@@ -1159,6 +1170,8 @@ export default function ReaderPage() {
             annotationsByPage={annotationsByPage}
             focusedAnnotationId={focusedAnnotationId}
             debugText={debugText}
+            queue={renderQueue}
+            pageRef={pageRef}
             pinchScaleRef={pinchScaleRef}
             lastScrolledTo={lastScrolledTo}
             onCreateHighlight={onCreateHighlight}
@@ -1417,6 +1430,8 @@ const ContinuousList = forwardRef<
     annotationsByPage: Map<number, Annotation[]>;
     focusedAnnotationId: string | null;
     debugText: boolean;
+    queue: RenderQueue;
+    pageRef: React.RefObject<number>;
     pinchScaleRef: React.RefObject<number>;
     lastScrolledTo: React.RefObject<string | null>;
     onCreateHighlight: (
@@ -1442,6 +1457,8 @@ const ContinuousList = forwardRef<
     annotationsByPage,
     focusedAnnotationId,
     debugText,
+    queue,
+    pageRef,
     pinchScaleRef,
     lastScrolledTo,
     onCreateHighlight,
@@ -1560,6 +1577,8 @@ const ContinuousList = forwardRef<
               debugText={debugText}
               deferWork={virtualizer.isScrolling}
               onNativeSize={applyNativeSize}
+              queue={queue}
+              pageRef={pageRef}
               pinchScaleRef={pinchScaleRef}
               lastScrolledTo={lastScrolledTo}
               onCreateHighlight={onCreateHighlight}
@@ -1584,6 +1603,8 @@ function PageCanvas({
   focusedAnnotationId,
   debugText,
   deferWork = false,
+  queue,
+  pageRef,
   pinchScaleRef,
   lastScrolledTo,
   onCreateHighlight,
@@ -1607,6 +1628,10 @@ function PageCanvas({
   /** The list is moving. Page work waits until it stops, so a drag
    *  does not queue work for every page it passes. */
   deferWork?: boolean;
+  /** Serialises rendering across pages. */
+  queue: RenderQueue;
+  /** The page in view, for queue priority. */
+  pageRef: React.RefObject<number>;
   pinchScaleRef: React.RefObject<number>;
   /** Which match the reader last scrolled to, shared across pages: a
    *  virtualized list remounts them constantly, and a per-page ref
@@ -1688,7 +1713,13 @@ function PageCanvas({
     let pdfPage: PDFPageProxy | null = null;
     let textLayerTask: { cancel: () => void } | null = null;
 
-    (async () => {
+    const unqueue = queue.push(
+      `page-${pageNumber}`,
+      // Distance from what is on screen, recomputed each time the queue
+      // picks its next job.
+      () => Math.abs(pageNumber - pageRef.current),
+      async () => {
+      if (cancelled) return;
       pdfPage = await doc.getPage(pageNumber);
       if (cancelled || !pdfPage) return;
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -1776,12 +1807,12 @@ function PageCanvas({
       } catch {
         // selection layer is best-effort
       }
-    })().catch(() => {
-      // per-page errors don't crash the reader
-    });
+      },
+    );
 
     return () => {
       cancelled = true;
+      unqueue();
       task?.cancel();
       // Otherwise streamTextContent keeps flowing for a page nobody is
       // looking at any more.
@@ -1794,7 +1825,7 @@ function PageCanvas({
         canvas.height = 0;
       }
     };
-  }, [doc, pageNumber, renderScale, oversample, deferWork]);
+  }, [doc, pageNumber, renderScale, oversample, deferWork, queue, pageRef]);
 
   // Capture the user's text selection. Listens at the document
   // level for `selectionchange` (debounced ~180ms) so we catch the
