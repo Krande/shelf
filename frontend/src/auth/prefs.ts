@@ -74,6 +74,20 @@ export const PREF_SUBCOLLECTION_AUTO_EXPAND_BELOW: PrefSpec<number> = {
   default: 5,
 };
 
+/**
+ * Facing-page layout, matching pdf.js's spread modes.
+ *
+ * "odd" pairs from page 1 — (1,2), (3,4) — which suits a document whose
+ * cover is a left-hand page. "even" leaves page 1 alone and pairs from
+ * there — (1), (2,3) — the shape of a bound book.
+ */
+export type SpreadPref = "none" | "odd" | "even";
+
+export const PREF_READER_SPREAD: PrefSpec<SpreadPref> = {
+  key: "reader_spread",
+  default: "none",
+};
+
 export function getPref<T>(spec: PrefSpec<T>): T {
   if (typeof window === "undefined") return spec.default;
   const raw = window.localStorage.getItem(PREF_PREFIX + spec.key);
