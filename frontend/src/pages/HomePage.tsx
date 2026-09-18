@@ -25,6 +25,7 @@ import {
 import { listAttachments } from "@/api/attachments";
 import { fetchMySpaces } from "@/api/spaces";
 import SearchScopePopover from "@/components/library/SearchScopePopover";
+import ShortcutsHelp from "@/components/layout/ShortcutsHelp";
 
 /**
  * Minimal landing page — centered search box, a couple of jump-off
@@ -947,6 +948,10 @@ export default function HomePage() {
             <Settings className="h-3.5 w-3.5" />
             Settings
           </button>
+          <span style={{ color: "var(--color-border)" }}>·</span>
+          {/* This page has its own nav rather than the app header, so
+              the shortcuts reference has to be placed here too. */}
+          <ShortcutsHelp />
         </div>
       </div>
     </div>

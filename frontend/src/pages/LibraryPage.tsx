@@ -215,11 +215,11 @@ function SortHeader({
   return (
     <th
       onClick={() => onClick(column)}
-      className="relative cursor-pointer select-none px-4 py-2 hover:opacity-80"
+      className="relative cursor-pointer select-none overflow-hidden px-4 py-2 hover:opacity-80"
       style={{ width: columns.width(columnKey) }}
     >
-      <span className="inline-flex items-center gap-1 truncate">
-        {label}
+      <span className="flex min-w-0 items-center gap-1">
+        <span className="truncate">{label}</span>
         <Icon
           className="h-3 w-3 shrink-0"
           style={{
@@ -1870,6 +1870,11 @@ export default function LibraryPage() {
                         columnKey="updated"
                         columns={columns}
                       />
+                      {/* Swallows whatever the sized columns do not
+                          use. Without it a fixed layout shares the
+                          surplus out proportionally and every column
+                          shifts when one is dragged. */}
+                      <th aria-hidden="true" />
                     </tr>
                   </thead>
                   <tbody ref={listRef}>
@@ -1877,7 +1882,7 @@ export default function LibraryPage() {
                       if (entry.kind === "subheader") {
                         return (
                           <tr key="subcollections">
-                            <td colSpan={6} className="px-0 py-0">
+                            <td colSpan={7} className="px-0 py-0">
                               <button
                                 type="button"
                                 onClick={() => setSubOpenOverride(!subOpen)}
@@ -1909,7 +1914,7 @@ export default function LibraryPage() {
                         return (
                           <tr key={`group-${entry.collection.id}`}>
                             <td
-                              colSpan={6}
+                              colSpan={7}
                               className="px-3 py-1.5 pl-7 text-xs"
                               style={{ color: "var(--color-text-muted)" }}
                             >
@@ -1936,7 +1941,7 @@ export default function LibraryPage() {
                             }}
                           >
                             <td
-                              colSpan={6}
+                              colSpan={7}
                               className="px-4 py-1.5 text-xs uppercase tracking-wider"
                               style={{ color: "var(--color-text-muted)" }}
                             >
@@ -1952,7 +1957,7 @@ export default function LibraryPage() {
                             key={`hits-${entry.itemId}`}
                             itemId={entry.itemId}
                             query={debouncedQuery}
-                            colSpan={6}
+                            colSpan={7}
                             onOpen={setSelectedId}
                           />
                         );
@@ -2000,8 +2005,8 @@ export default function LibraryPage() {
                               className="cursor-pointer"
                             />
                           </td>
-                          <td className="px-4 py-2">
-                            <div className="flex items-center gap-1.5">
+                          <td className="overflow-hidden px-4 py-2">
+                            <div className="flex min-w-0 items-center gap-1.5">
                               {isFulltextRow ? (
                                 <button
                                   type="button"
@@ -2032,24 +2037,28 @@ export default function LibraryPage() {
                                 // their fulltext-group siblings.
                                 <span className="inline-block w-[18px]" />
                               )}
-                              <span title="Ctrl+click to open the PDF">
+                              <span
+                                className="truncate"
+                                title={itemTitle(it)}
+                              >
                                 {itemTitle(it)}
                               </span>
                             </div>
                           </td>
                           <td
-                            className="px-4 py-2 text-xs"
+                            className="truncate px-4 py-2 text-xs"
                             style={{ color: "var(--color-text-muted)" }}
+                            title={creatorSummary(it)}
                           >
                             {creatorSummary(it)}
                           </td>
                           <td
-                            className="px-4 py-2 text-xs"
+                            className="truncate px-4 py-2 text-xs"
                             style={{ color: "var(--color-text-muted)" }}
                           >
                             {itemTypeLabel(it.item_type)}
                           </td>
-                          <td className="px-4 py-2">
+                          <td className="overflow-hidden px-4 py-2">
                             <TagChips
                               tags={tagNamesById(it.tag_ids)}
                               max={3}
@@ -2058,7 +2067,7 @@ export default function LibraryPage() {
                             />
                           </td>
                           <td
-                            className="px-4 py-2 text-xs"
+                            className="truncate px-4 py-2 text-xs"
                             style={{ color: "var(--color-text-muted)" }}
                           >
                             {formatDate(
@@ -2067,6 +2076,7 @@ export default function LibraryPage() {
                                 : it.updated_at,
                             )}
                           </td>
+                          <td aria-hidden="true" />
                         </tr>
                       );
                     })}
