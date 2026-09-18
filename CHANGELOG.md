@@ -2,6 +2,314 @@
 
 
 
+## v0.8.0 (2026-09-18)
+
+### Feature
+
+* feat(search): open the PDF from a search result, not the record
+
+Picking a result from the landing page opened the item&#39;s detail panel in
+the library, so reading the document a search had just found took a
+second click every time. A search result is a thing to read.
+
+Enter and a plain click now open the PDF -- and for a full-text passage,
+at the page it matched, with the find bar filled in, which is the whole
+reason the passage is on screen. Shift reaches the detail panel, and the
+Info button on each row already did and still does, so nothing is out of
+reach.
+
+The snippet rows lose their coarse-pointer special case: a tap and a
+click now mean the same thing, so there is nothing left to special-case.
+
+The shortcuts reference gains a Search section covering these, plus the
+arrow keys that unfold a result&#39;s matching pages.
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`0148691`](https://github.com/Krande/shelf/commit/01486910560038fdf5698d6cb76a4278fd3b2be7))
+
+* feat(library): resizable columns, and a shortcuts reference in the header
+
+Column widths drag from a strip on each header&#39;s right edge, remembered
+per browser. The strip stops its own events, or grabbing the edge of a
+sortable column would re-sort it; arrow keys nudge and Home or a
+double-click puts one column back. The table turns table-fixed so the
+widths are honoured, with a minimum equal to their sum so a wide layout
+scrolls rather than squeezing back down.
+
+An (i) in the header opens what the keyboard and the mouse can do.
+Ctrl-click to open a PDF, Backspace out of the reader, drag a row onto a
+collection, the modifier that arms a PDF&#39;s own hyperlinks, and opening a
+search hit straight at its page are all invisible until someone tries
+them, which makes them shortcuts nobody finds.
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`982b6ff`](https://github.com/Krande/shelf/commit/982b6ffc416362f8ef4535d94eee34a1a824e23c))
+
+* feat(library): nest new collections, and label subcollections by path
+
+The + button now creates inside whatever collection is open rather than
+always at the root: making a folder while inside another almost always
+means making it there. Nothing open, Unfiled, or an inherited collection
+-- which the API refuses a child -- still puts it at the root. The
+folder menu gains &#34;Add subcollection&#34; for the same thing without having
+to open the folder first, and the parent is expanded afterwards so the
+new child is not created inside a folded folder.
+
+The subcollection section drops the indented per-level headings for one
+line per folder, labelled with its path: &#34;Reports &gt; Drafts (1)&#34;. A
+folder holding nothing of its own no longer gets a row -- it would be a
+heading over nothing -- and its name reaches the reader through the path
+on the folders beneath it instead.
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`913a507`](https://github.com/Krande/shelf/commit/913a507b782cd1b5439545026895338ec08e0aab))
+
+* feat(library): nest the subcollection section, and open it on a sparse folder
+
+The section was one flat list. It now mirrors the rail: a group per
+subcollection, in sibling order, depth first, indented by depth. A
+document filed in two subcollections shows under both -- the header
+count is of distinct documents, the groups are of where they are.
+
+Branches holding nothing at any depth are pruned. A folder that is empty
+itself but has a child with documents is kept: dropping it would leave
+the child looking like a direct child of the open collection, detached
+from the path that explains where it lives. The pruning lives in lib so
+those rules are testable without a rendered page.
+
+The section also opens on its own when the folder holds fewer documents
+of its own than a new Options tab&#39;s threshold, default 5 -- a folder
+with a handful has room to show what is below it, and an empty one that
+says &#34;no items&#34; while its subcollections hold the documents is the case
+the section exists for. Clicking the header still wins, and the override
+is dropped when the rail selection changes.
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`bb75a5c`](https://github.com/Krande/shelf/commit/bb75a5c9a583978e8cc9e14354e7403caf04a985))
+
+* feat(library): drag documents onto a collection to file them
+
+Rows are drag sources carrying a JSON array of item ids, and folders in
+the rail accept them. Dragging a row that is part of the checked
+selection carries the whole selection; dragging one that is not carries
+just that row, so a forgotten selection cannot come along by surprise.
+
+Additive, like the bulk &#34;Add to collection&#34; action: filing into a folder
+does not move the document out of the others, which is why the drop
+effect is copy rather than move. An inherited folder takes no drop -- it
+belongs to another space and the API refuses the write.
+
+The payload rides its own MIME type, so a folder being reordered and a
+document being filed stay distinguishable: a document drop targets the
+whole row and only ever means &#34;into&#34;, with no before/after to aim at.
+
+Also fixes the subcollection section never appearing for a folder with
+no documents of its own -- the usual shape of a parent whose documents
+live a level or two down. The table only rendered when the folder&#39;s own
+listing had rows, so that case showed &#34;no items match the current
+filters&#34; and never reached the section listing them. The table now
+renders whenever there is anything to put in it, and the empty-state
+message waits until both listings are empty.
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`f684bd4`](https://github.com/Krande/shelf/commit/f684bd41b491f892fdb7ecfbe793800fa5399925))
+
+* feat(library): show a collection&#39;s subcollection documents below its own
+
+Opening a folder that has subcollections now lists its own documents
+first and offers everything filed below it -- to any depth -- in a
+collapsible section underneath, collapsed by default.
+
+Two listings rather than one widened filter, so neither loses its
+identity: the listing endpoint takes collection_scope=subcollections,
+which walks the tree with a recursive CTE and excludes the parent&#39;s own
+members, keeping the two sets disjoint. EXISTS rather than a join, or an
+item filed in two subcollections would come back once per subcollection.
+
+The section&#39;s rows are ordinary rows, so selection, ctrl+click, Enter
+and the arrow keys reach them without knowing where they came from. Id
+lookups go through every loaded item for the same reason. &#34;Select all&#34;
+and the bulk toolbar act on what is on screen: a collapsed section is
+not, so its items are not swept into an action whose scope nobody can
+see.
+
+Nothing is fetched for a folder without children.
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`79e0e58`](https://github.com/Krande/shelf/commit/79e0e5889cbce1150d6e366a2db80e6eb4fcac50))
+
+* feat(library): copy a selection to another space, and choose where it lands
+
+&#34;Copy to space&#34; sits next to &#34;Add to collection&#34; on the bulk toolbar and
+copies every checked item. Copies run one at a time so a refusal names
+the item it belongs to, and one refusal -- an item already in the target
+is the common case -- no longer strands the rest of the selection.
+
+Both the bulk action and the detail panel&#39;s copy button now ask which
+collection in the target the copy should land in. Copying still does not
+translate the source&#39;s folders, since they mean nothing on the other
+side; this is a choice about where it arrives, made while the copy is
+being set up rather than by hunting for it afterwards. Leaving it unset
+keeps the old behaviour and the copy lands unfiled.
+
+Only the target&#39;s own collections are offered: an inherited one belongs
+to another space and is read-only there. A collection that is not the
+target&#39;s is a 404, and the copy is abandoned rather than quietly landing
+unfiled.
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`8df0085`](https://github.com/Krande/shelf/commit/8df0085ec6554592259e6dbf2cb5989227475886))
+
+* feat(library): download a collection&#39;s PDFs as one zip
+
+&#34;Download PDFs&#34; on a collection&#39;s menu, using the archive endpoint the
+bulk-select action already uses -- same assembly, same current-best
+version resolution, same _MISSING_FILES.txt and X-Shelf-Skipped when a
+blob cannot be fetched.
+
+The endpoint takes `collection=` rather than the client expanding the
+folder into one `item=` per document, which would build a query string
+long enough to be refused on a folder of a few hundred files. The two
+selectors are mutually exclusive.
+
+Direct members only, no descendants: the library lists a collection the
+same way, so the archive is what is on screen. Trashed members are left
+out. A collection belonging to another space is a 404, not an empty
+archive.
+
+Not offered on inherited collections -- their menu is hidden because
+every other entry is a write the API refuses, and the endpoint bundles
+only the space&#39;s own items.
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`9429b84`](https://github.com/Krande/shelf/commit/9429b84d504afe005f365f9b0400a822fe6c69f8))
+
+### Fix
+
+* fix(items): annotate the descendant-collection query&#39;s return type
+
+mypy runs over the backend in its own CI job and wants every function
+annotated; the recursive CTE helper went in without one.
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`3a27c4f`](https://github.com/Krande/shelf/commit/3a27c4f1a81f351c9bd8c76508f58eb12c23df68))
+
+* fix(reader): stop the find highlight re-scrolling on every re-render
+
+Escaping out of a search scrolled the page, and so did zooming. Same
+cause, and not the one the previous commit fixed.
+
+The effect that draws the find highlights ends by scrolling the current
+match into view, and it re-runs whenever the text layer is rebuilt --
+which happens on any change of render scale. Closing the find bar
+resizes the scroll container, so every page re-rendered and the view
+snapped back to the match just left behind. Zooming does it too, with a
+delay that made it look unrelated: oversample only changes once the
+gesture settles, and that rebuild fires the same scroll.
+
+It now scrolls only when the target match actually moved, tracked per
+page. A query cleared to nothing resets that, so searching the same word
+again still takes you to it.
+
+Escape also clears the query now, as the X button already did. A query
+left behind keeps its highlights on the page with no visible control
+left to clear them.
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`e801d5f`](https://github.com/Krande/shelf/commit/e801d5fabf51ddf379cd8d8a50f97853a206ea23))
+
+* fix(reader): stop a stale ?page= reclaiming the view, and tame wheel zoom
+
+Closing the find bar threw the reader back to the page the deep link
+named. The ?page= writeback uses replaceState, which react-router never
+sees, so its copy of the param stays frozen at whatever opened the
+document -- while the effect that honours it also depends on layout
+state that changes much later, since opening or closing the find bar
+resizes the scroll container and flips heightsReady. Follow a hyperlink
+to page 40, close the find bar, and it re-applied page 5. It is now
+honoured once per navigation, keyed on the location key so arriving at
+the same page from two different search hits still scrolls.
+
+Wheel zoom moved in enormous steps. The exponential was tuned for a
+trackpad pinch&#39;s small deltas; a mouse notch arrives as 100px in one
+event, which through exp(-dy * 0.01) is a 172% jump. Normalising the
+delta modes and clamping puts a notch at about 10% while leaving a
+pinch&#39;s small deltas fine-grained, and the factor is now a pure
+function with tests, since &#34;how big is one notch&#34; is the whole
+complaint.
+
+Zooming also walked the page sideways: the horizontal anchor followed
+the cursor, so a few notches pushed the page off the viewport. There is
+only one page across, so there is nothing to the side worth anchoring
+on -- it now stays centred horizontally while the point under the
+cursor still holds vertically, which is what zooming into a figure
+needs.
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`0069791`](https://github.com/Krande/shelf/commit/0069791ee64d7cd536ddc25c17f461e9a3047d19))
+
+* fix(library): make column widths real, and keep the scope filter in place
+
+Three things the last commit got wrong, and one older one.
+
+Columns did not clip. A fixed column constrains the box, not the text
+inside it, so a title simply spilled past the divider and narrowing a
+column changed nothing visible. Cells truncate now, with the full value
+on the title attribute.
+
+Dragging one divider moved every column. Under table-layout: fixed a
+table wider than the sum of its columns spreads the surplus across every
+sized column in proportion, so each drag nudged all of them -- including
+the header label, which is why &#34;Title&#34; appeared to float. An unsized
+trailing column swallows the surplus instead, and each declared width is
+now the width you get.
+
+The shortcuts reference was only in the app header, which the landing
+page does not use -- it has its own nav. It sits there too now.
+
+And the landing page&#39;s scope filter navigated away instead of opening:
+its trigger had no type, so inside that page&#39;s search form it defaulted
+to submit and ran the search. One attribute, with a test, because the
+next button added to a form will make the same mistake.
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`58dbc7e`](https://github.com/Krande/shelf/commit/58dbc7e701dd67549f4fc89bfc6f3ef76706d3d3))
+
+* fix(tests): run the suite against its own database
+
+conftest&#39;s client fixture TRUNCATEs every core table, and the default
+SHELF_DATABASE_URL names the database `pixi run up` serves. Running the
+suite against a live dev stack therefore wiped its data and logged out
+its sessions, with nothing in the output to say what had happened.
+
+The URL is now rewritten to a sibling ending in `_test` before shelf.db
+builds its engine, so the app under test and the TRUNCATE address the
+same throwaway database and no environment variable can aim them at a
+real one. It is created and migrated on first use, so a clean checkout
+needs no setup step and a new migration needs no separate command.
+
+test-db-migrate and the CI migrate step go with it: both brought up the
+database the suite no longer uses.
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`098613a`](https://github.com/Krande/shelf/commit/098613a556a6dd3394d573cc0e224361b6babc02))
+
+* fix(library): drop the collection filter when switching space
+
+Collection ids are per-space, but the library kept ?collection= in the
+URL across a space switch. The new space&#39;s listing was then filtered by
+a folder it does not have, which matched nothing and returned 200 with
+an empty list -- indistinguishable from an empty space, and invisible in
+the server log.
+
+It showed up after copying an item between spaces: copy does not carry
+collections across (the target&#39;s folder tree is its own), so the copy
+landed unfiled and the stale filter hid it. The copy itself was fine.
+
+Switching space now drops `collection` and `item` in one write, both
+being scoped to the space being left.
+
+The listing also stops accepting a collection it cannot see: not found
+is a 404 rather than an empty result. The check is against the space
+plus everything it inherits, since an inherited item brings its own
+space&#39;s collections with it and filtering by one of those is legitimate.
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`5851566`](https://github.com/Krande/shelf/commit/58515662a883d71fe2731843f18e715ed389191a))
+
+### Unknown
+
+* Merge pull request #9 from Krande/fix/collection-scope-and-download
+
+feat: collection tooling, search-to-PDF, reader fixes, and test isolation ([`baa7dde`](https://github.com/Krande/shelf/commit/baa7dde37cb984dc90bd02192b4e440b52f50391))
+
+
 ## v0.7.0 (2026-09-17)
 
 ### Feature
