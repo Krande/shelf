@@ -1750,6 +1750,10 @@ function PageCanvas({
   // as a failure rather than as "not yet". Tracked so the placeholder
   // can say which page it is and that it is coming.
   const [painted, setPainted] = useState(false);
+  // What is currently drawn. A re-run of the render effect that would
+  // produce the same pixels is skipped: the list starting and stopping
+  // is not a reason to redraw the page.
+  const drawnKey = useRef<string | null>(null);
 
   const cssW = native ? native.width * renderScale : undefined;
   const cssH = native ? native.height * renderScale : undefined;
@@ -1812,6 +1816,8 @@ function PageCanvas({
       () => Math.abs(pageNumber - pageRef.current),
       async () => {
       if (cancelled) return;
+      const wantKey = `${pageNumber}@${renderScale.toFixed(4)}`;
+      if (drawnKey.current === wantKey) return;
       pdfPage = await doc.getPage(pageNumber);
       if (cancelled || !pdfPage) return;
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -1857,25 +1863,44 @@ function PageCanvas({
         scale: renderScale * pixelMultiplier,
       });
 
-      // Rendered straight to the visible canvas. The offscreen copy
-      // that used to sit in front of it doubled the allocation for
-      // every page, which during a fast scroll is the difference
-      // between tight and over budget.
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-      canvas.style.width = `${viewport.width / pixelMultiplier}px`;
-      canvas.style.height = `${viewport.height / pixelMultiplier}px`;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-      setPainted(false);
-      task = pdfPage.render({ canvasContext: ctx, viewport, canvas });
+      // Drawn offscreen, then swapped in. Resizing a canvas clears it,
+      // so rendering straight to the visible one blanks the page for
+      // the length of the render -- which on a zoom step is a flash on
+      // every page at once. Renders are serialised by the queue, so the
+      // extra allocation is one canvas at a time rather than one per
+      // mounted page, which is what made this too expensive before.
+      const offscreen = document.createElement("canvas");
+      offscreen.width = viewport.width;
+      offscreen.height = viewport.height;
+      const offCtx = offscreen.getContext("2d");
+      if (!offCtx) return;
+      task = pdfPage.render({
+        canvasContext: offCtx,
+        viewport,
+        canvas: offscreen,
+      });
       try {
         await task.promise;
       } catch (e) {
         if ((e as Error).name !== "RenderingCancelledException") throw e;
         return;
+      } finally {
+        if (cancelled) {
+          // Let the abandoned buffer go now rather than at GC's leisure.
+          offscreen.width = 0;
+          offscreen.height = 0;
+        }
       }
       if (cancelled) return;
+
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      canvas.style.width = `${viewport.width / pixelMultiplier}px`;
+      canvas.style.height = `${viewport.height / pixelMultiplier}px`;
+      canvas.getContext("2d")?.drawImage(offscreen, 0, 0);
+      offscreen.width = 0;
+      offscreen.height = 0;
+      drawnKey.current = wantKey;
       budget.set(budgetKey, canvas.width * canvas.height);
       setPainted(true);
 
@@ -1913,15 +1938,24 @@ function PageCanvas({
       // looking at any more.
       textLayerTask?.cancel();
       pdfPage?.cleanup();
-      budget.release(`page-${pageNumber}`);
-      // Drop the backing store now rather than waiting for GC, which
-      // is slow to reclaim off-heap canvas memory.
-      if (canvas.width > 0) {
+    };
+  }, [doc, pageNumber, renderScale, deferWork, queue, budget, pageRef]);
+
+  // Release the canvas when the page really goes away. Deliberately not
+  // in the render effect's cleanup: that runs whenever its inputs
+  // change, including when the list starts moving, and zeroing a canvas
+  // there made every visible page blink on every scroll.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const key = `page-${pageNumber}`;
+    return () => {
+      budget.release(key);
+      if (canvas && canvas.width > 0) {
         canvas.width = 0;
         canvas.height = 0;
       }
     };
-  }, [doc, pageNumber, renderScale, deferWork, queue, budget, pageRef]);
+  }, [pageNumber, budget]);
 
   // Capture the user's text selection. Listens at the document
   // level for `selectionchange` (debounced ~180ms) so we catch the
