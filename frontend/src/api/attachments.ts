@@ -149,11 +149,35 @@ export async function downloadItemPdfsZip(
   slug: string,
   itemIds: string[],
 ): Promise<{ skipped: number }> {
-  const qs = itemIds
-    .map((id) => `item=${encodeURIComponent(id)}`)
-    .join("&");
+  return downloadPdfsZip(
+    slug,
+    itemIds.map((id) => `item=${encodeURIComponent(id)}`).join("&"),
+  );
+}
+
+/**
+ * The PDFs of every item filed directly under one collection.
+ *
+ * The collection id goes to the server rather than being expanded into
+ * an id per item here: a folder of a few hundred documents would make a
+ * query string long enough to be refused.
+ */
+export async function downloadCollectionPdfsZip(
+  slug: string,
+  collectionId: string,
+): Promise<{ skipped: number }> {
+  return downloadPdfsZip(
+    slug,
+    `collection=${encodeURIComponent(collectionId)}`,
+  );
+}
+
+async function downloadPdfsZip(
+  slug: string,
+  query: string,
+): Promise<{ skipped: number }> {
   const res = await fetch(
-    `/api/spaces/${encodeURIComponent(slug)}/attachments-zip?${qs}`,
+    `/api/spaces/${encodeURIComponent(slug)}/attachments-zip?${query}`,
     { credentials: "include" },
   );
   if (!res.ok) {

@@ -1,6 +1,13 @@
 """Integration tests for collections + item membership."""
 
+import uuid
+
+import pytest
 from httpx import AsyncClient
+
+from shelf.config import settings
+
+from .helpers import login
 
 
 async def _login(client: AsyncClient, email: str = "alice@example.com") -> str:
@@ -344,3 +351,210 @@ async def test_other_users_cannot_see_collections(client: AsyncClient) -> None:
     # No GET endpoint, but the PATCH/DELETE/list path resolves the same way.
     r = await client.delete(f"/api/collections/{coll['id']}")
     assert r.status_code == 404
+
+
+async def test_collection_from_another_space_is_not_a_silent_empty_list(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale filter must say so rather than look like an empty space.
+
+    The library carried ?collection= across a space switch, so listing
+    the target filtered by a folder only the source had. The join
+    matched nothing and the response was 200 with no items, which reads
+    as "your copy never arrived".
+    """
+    monkeypatch.setattr(settings, "admin_emails", ["admin@example.com"])
+    await login(client, "admin@example.com")
+    source = (
+        await client.post("/api/spaces", json={"name": "Source", "slug": "src"})
+    ).json()["slug"]
+    target = (
+        await client.post("/api/spaces", json={"name": "Target", "slug": "tgt"})
+    ).json()["slug"]
+
+    coll = (
+        await client.post(
+            f"/api/spaces/{source}/collections", json={"name": "Drawings"}
+        )
+    ).json()["id"]
+    item_id = (
+        await client.post(
+            f"/api/spaces/{source}/items",
+            json={"item_type": "document", "data": {"title": "Plan"}},
+        )
+    ).json()["id"]
+    await client.put(
+        f"/api/items/{item_id}/collections", json={"collection_ids": [coll]}
+    )
+    await client.post(
+        f"/api/items/{item_id}/copy",
+        json={"target_slug": target, "include_attachments": False},
+    )
+
+    # The copy really is there.
+    plain = await client.get(f"/api/spaces/{target}/items")
+    assert len(plain.json()["items"]) == 1
+
+    # ...and the source's folder is not a filter this space accepts.
+    stale = await client.get(
+        f"/api/spaces/{target}/items", params={"collection": coll}
+    )
+    assert stale.status_code == 404, stale.text
+
+
+async def test_unknown_collection_id_is_404(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "admin_emails", ["admin@example.com"])
+    await login(client, "admin@example.com")
+    slug = (
+        await client.post("/api/spaces", json={"name": "S", "slug": "s-unknown"})
+    ).json()["slug"]
+    resp = await client.get(
+        f"/api/spaces/{slug}/items", params={"collection": str(uuid.uuid4())}
+    )
+    assert resp.status_code == 404
+
+
+async def test_an_inherited_collection_is_still_a_valid_filter(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The space check must not cost inheritance its folders.
+
+    A subscriber lists the parent's items and the parent's collections
+    come with them, so a collection id belonging to another space is
+    legitimate here -- it just has to be a space this one inherits.
+    """
+    monkeypatch.setattr(settings, "admin_emails", ["admin@example.com"])
+    await login(client, "admin@example.com")
+    parent = (
+        await client.post(
+            "/api/spaces", json={"name": "Standards", "slug": "std-src"}
+        )
+    ).json()["slug"]
+    child = (
+        await client.post(
+            "/api/spaces", json={"name": "Project", "slug": "proj-sub"}
+        )
+    ).json()["slug"]
+
+    coll = (
+        await client.post(
+            f"/api/spaces/{parent}/collections", json={"name": "Piping"}
+        )
+    ).json()["id"]
+    item_id = (
+        await client.post(
+            f"/api/spaces/{parent}/items",
+            json={"item_type": "document", "data": {"title": "Spec"}},
+        )
+    ).json()["id"]
+    await client.put(
+        f"/api/items/{item_id}/collections", json={"collection_ids": [coll]}
+    )
+
+    await client.patch(
+        f"/api/spaces/{parent}/settings", json={"subscribable": True}
+    )
+    sub = await client.post(
+        f"/api/spaces/{child}/inherits", json={"parent_slug": parent}
+    )
+    assert sub.status_code in (200, 201), sub.text
+
+    resp = await client.get(
+        f"/api/spaces/{child}/items", params={"collection": coll}
+    )
+    assert resp.status_code == 200, resp.text
+    assert [i["id"] for i in resp.json()["items"]] == [item_id]
+
+
+async def _sub(client, slug: str, name: str, parent: str | None = None) -> str:
+    body: dict = {"name": name}
+    if parent is not None:
+        body["parent_id"] = parent
+    r = await client.post(f"/api/spaces/{slug}/collections", json=body)
+    assert r.status_code == 201, r.text
+    return str(r.json()["id"])
+
+
+async def _doc(client, slug: str, title: str, colls: list[str]) -> str:
+    item_id = (
+        await client.post(
+            f"/api/spaces/{slug}/items",
+            json={"item_type": "document", "data": {"title": title}},
+        )
+    ).json()["id"]
+    r = await client.put(
+        f"/api/items/{item_id}/collections", json={"collection_ids": colls}
+    )
+    assert r.status_code == 200, r.text
+    return str(item_id)
+
+
+async def test_subcollection_scope_lists_the_tree_below(
+    client: AsyncClient,
+) -> None:
+    """The library shows a folder's own documents, then offers what is
+    filed under its subcollections below them -- two listings, so this
+    one reaches any depth but excludes the parent's own members."""
+    slug = await _login(client)
+    parent = await _sub(client, slug, "Parent")
+    child = await _sub(client, slug, "Child", parent)
+    grandchild = await _sub(client, slug, "Grandchild", child)
+    elsewhere = await _sub(client, slug, "Unrelated")
+
+    own = await _doc(client, slug, "Own", [parent])
+    deep = await _doc(client, slug, "Deep", [grandchild])
+    mid = await _doc(client, slug, "Mid", [child])
+    await _doc(client, slug, "Elsewhere", [elsewhere])
+
+    direct = await client.get(
+        f"/api/spaces/{slug}/items", params={"collection": parent}
+    )
+    assert [i["id"] for i in direct.json()["items"]] == [own]
+
+    subs = await client.get(
+        f"/api/spaces/{slug}/items",
+        params={"collection": parent, "collection_scope": "subcollections"},
+    )
+    assert sorted(i["id"] for i in subs.json()["items"]) == sorted([mid, deep])
+
+
+async def test_subcollection_scope_does_not_repeat_an_item(
+    client: AsyncClient,
+) -> None:
+    """Filed in two subcollections, and also in the parent.
+
+    Without EXISTS the join would return it once per subcollection, and
+    without the parent exclusion it would appear in both listings.
+    """
+    slug = await _login(client)
+    parent = await _sub(client, slug, "Parent")
+    a = await _sub(client, slug, "A", parent)
+    b = await _sub(client, slug, "B", parent)
+
+    both = await _doc(client, slug, "In both", [a, b])
+    everywhere = await _doc(client, slug, "In parent too", [parent, a])
+
+    subs = await client.get(
+        f"/api/spaces/{slug}/items",
+        params={"collection": parent, "collection_scope": "subcollections"},
+    )
+    ids = [i["id"] for i in subs.json()["items"]]
+    assert ids == [both]
+    assert subs.json()["total"] == 1
+    assert everywhere not in ids
+
+
+async def test_subcollection_scope_is_empty_without_children(
+    client: AsyncClient,
+) -> None:
+    slug = await _login(client)
+    leaf = await _sub(client, slug, "Leaf")
+    await _doc(client, slug, "Only doc", [leaf])
+    r = await client.get(
+        f"/api/spaces/{slug}/items",
+        params={"collection": leaf, "collection_scope": "subcollections"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["items"] == []

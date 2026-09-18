@@ -47,6 +47,10 @@ export default function SearchScopePopover({
   return (
     <div className="relative" ref={ref}>
       <button
+        // Without this it defaults to submit, and the landing page puts
+        // this popover inside its search form — so opening the filter
+        // submitted the search and navigated to the library instead.
+        type="button"
         onClick={() => setOpen((v) => !v)}
         aria-label="Search scope"
         title={

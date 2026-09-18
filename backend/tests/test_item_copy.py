@@ -275,3 +275,80 @@ async def test_copying_something_you_cannot_read_is_a_404(
         f"/api/items/{item_id}/copy", json={"target_slug": personal}
     )
     assert r.status_code == 404
+
+
+async def _collection(client: AsyncClient, slug: str, name: str) -> str:
+    r = await client.post(f"/api/spaces/{slug}/collections", json={"name": name})
+    assert r.status_code == 201, r.text
+    return str(r.json()["id"])
+
+
+async def test_copy_files_the_copy_under_a_target_collection(
+    client: AsyncClient, two_spaces: tuple[str, str, str]
+) -> None:
+    """The destination folder is chosen on the target's own tree.
+
+    Copying does not translate the source's collections, so without this
+    the copy arrives unfiled and has to be found and filed by hand.
+    """
+    _source, target, item_id = two_spaces
+    dest = await _collection(client, target, "Incoming")
+
+    r = await client.post(
+        f"/api/items/{item_id}/copy",
+        json={"target_slug": target, "target_collection_id": dest},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["collection_id"] == dest
+
+    listed = await client.get(
+        f"/api/spaces/{target}/items", params={"collection": dest}
+    )
+    assert [i["id"] for i in listed.json()["items"]] == [r.json()["item_id"]]
+
+
+async def test_copy_without_a_collection_lands_unfiled(
+    client: AsyncClient, two_spaces: tuple[str, str, str]
+) -> None:
+    """Omitting it keeps the behaviour copies had before it existed."""
+    _source, target, item_id = two_spaces
+    r = await client.post(
+        f"/api/items/{item_id}/copy", json={"target_slug": target}
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["collection_id"] is None
+
+    unfiled = await client.get(
+        f"/api/spaces/{target}/items", params={"collection": "unfiled"}
+    )
+    assert r.json()["item_id"] in [i["id"] for i in unfiled.json()["items"]]
+
+
+async def test_copy_rejects_a_collection_from_the_source_space(
+    client: AsyncClient, two_spaces: tuple[str, str, str]
+) -> None:
+    """A folder id only means something in the space that owns it."""
+    source, target, item_id = two_spaces
+    theirs = await _collection(client, source, "Source side")
+
+    r = await client.post(
+        f"/api/items/{item_id}/copy",
+        json={"target_slug": target, "target_collection_id": theirs},
+    )
+    assert r.status_code == 404, r.text
+
+
+async def test_a_refused_collection_copies_nothing(
+    client: AsyncClient, two_spaces: tuple[str, str, str]
+) -> None:
+    """The 404 aborts the copy rather than leaving it unfiled."""
+    source, target, item_id = two_spaces
+    theirs = await _collection(client, source, "Source side")
+
+    before = len((await client.get(f"/api/spaces/{target}/items")).json()["items"])
+    await client.post(
+        f"/api/items/{item_id}/copy",
+        json={"target_slug": target, "target_collection_id": theirs},
+    )
+    after = len((await client.get(f"/api/spaces/{target}/items")).json()["items"])
+    assert after == before

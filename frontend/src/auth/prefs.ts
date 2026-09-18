@@ -60,6 +60,20 @@ export const PREF_READER_FIT: PrefSpec<ReaderFit> = {
   default: "width",
 };
 
+/**
+ * Auto-expand the "In subcollections" section when the open collection
+ * holds fewer than this many documents of its own.
+ *
+ * A folder with a handful of items has room to show what is below it
+ * without the nested list burying anything; a full one does not. Zero
+ * turns the auto-expansion off and leaves the section always collapsed
+ * until clicked.
+ */
+export const PREF_SUBCOLLECTION_AUTO_EXPAND_BELOW: PrefSpec<number> = {
+  key: "subcollection_auto_expand_below",
+  default: 5,
+};
+
 export function getPref<T>(spec: PrefSpec<T>): T {
   if (typeof window === "undefined") return spec.default;
   const raw = window.localStorage.getItem(PREF_PREFIX + spec.key);

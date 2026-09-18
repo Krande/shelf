@@ -13,6 +13,39 @@ export interface PinchZoomState {
 const MIN_SCALE = 0.4;
 const MAX_SCALE = 5;
 
+// Wheel-zoom feel. The clamp is what separates a mouse notch from a
+// trackpad pinch: a notch saturates it and lands on a ~10% step
+// (exp(0.105)), a pinch's small deltas pass through untouched and stay
+// fine-grained.
+const WHEEL_CLAMP = 14;
+const WHEEL_SENSITIVITY = 0.0075;
+// Rough CSS pixels per unit for the non-pixel deltaModes.
+const LINE_HEIGHT = 16;
+const PAGE_HEIGHT = 800;
+
+/**
+ * How much one wheel event should multiply the zoom by.
+ *
+ * Exported for the test that pins the feel: a mouse notch is a ~10%
+ * step, and a trackpad pinch's much smaller deltas stay fine-grained
+ * rather than being dragged up to the same size.
+ */
+export function wheelScaleFactor(deltaY: number, deltaMode: number): number {
+  const perUnit =
+    deltaMode === 1 ? LINE_HEIGHT : deltaMode === 2 ? PAGE_HEIGHT : 1;
+  const dy = Math.max(-WHEEL_CLAMP, Math.min(WHEEL_CLAMP, deltaY * perUnit));
+  // Negative deltaY = spread fingers / wheel up = zoom in.
+  return Math.exp(-dy * WHEEL_SENSITIVITY);
+}
+
+/** Left + right padding of the scroll container, in CSS pixels. */
+function horizontalPadding(el: HTMLElement): number {
+  const style = window.getComputedStyle(el);
+  return (
+    (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0)
+  );
+}
+
 /**
  * Pinch-to-zoom hook for touch devices, ported from the webui's
  * version which already had real-world tuning. CSS-only — the
@@ -184,23 +217,31 @@ export function usePinchZoom(
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
         const rect = el!.getBoundingClientRect();
-        const x = e.clientX - rect.left + el!.scrollLeft;
         const y = e.clientY - rect.top + el!.scrollTop;
-        // Exponential scaling for a smooth pinch feel; negative
-        // deltaY = spread fingers = zoom in.
-        const factor = Math.exp(-e.deltaY * 0.01);
+
+        // A trackpad pinch arrives as a stream of small deltas; a mouse
+        // notch as one big one. wheelScaleFactor normalises the units
+        // and clamps, so a notch is a ~10% step instead of the 170% an
+        // unclamped exponential gave it.
+        const factor = wheelScaleFactor(e.deltaY, e.deltaMode);
         const newScale = Math.min(
           MAX_SCALE,
           Math.max(MIN_SCALE, s.scale * factor),
         );
         if (newScale === s.scale) return;
-        // Anchor the content point under the cursor — feels right
-        // and matches the two-finger-pinch midpoint logic above.
-        const cx = (x - s.translateX) / s.scale;
+
+        // Horizontally the page stays centred rather than following the
+        // cursor. The page is centred in its box at rest, and a wheel
+        // zoom that walks it sideways off the viewport is the thing
+        // every other PDF viewer avoids; there is only one page across,
+        // so there is nothing to the side worth anchoring on.
+        const contentWidth = el!.clientWidth - horizontalPadding(el!);
+        // Vertically the point under the cursor stays put, which is
+        // what makes zooming into a figure land on that figure.
         const cy = (y - s.translateY) / s.scale;
         setState({
           scale: newScale,
-          translateX: x - cx * newScale,
+          translateX: (contentWidth * (1 - newScale)) / 2,
           translateY: y - cy * newScale,
         });
         return;

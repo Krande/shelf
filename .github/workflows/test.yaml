@@ -4,13 +4,15 @@ name: Test
 # workflows so it reports its own required status check.
 #
 # The suite is not DB-free: conftest's `client` fixture TRUNCATEs the core
-# tables against a live Postgres, so a service container is started and the
-# Alembic migrations are applied before pytest runs. Tests that never request
-# `client` (JWT roundtrip, in-memory storage, PDF quality heuristics) skip the
-# DB entirely, but they share the same job.
+# tables against a live Postgres, so a service container is started. There is
+# no migrate step — conftest creates its own `<database>_test` and brings it to
+# head on first use, which is the same thing that keeps a local run off the
+# database `pixi run up` is serving. Tests that never request `client` (JWT
+# roundtrip, in-memory storage, PDF quality heuristics) skip the DB entirely,
+# but they share the same job.
 #
-# POSTGRES_USER=shelf is the database superuser here, which the trigram
-# migrations need — they issue CREATE EXTENSION pg_trgm.
+# POSTGRES_USER=shelf is the database superuser here, which conftest needs to
+# CREATE DATABASE and the trigram migrations need for CREATE EXTENSION pg_trgm.
 on:
   pull_request:
     branches: [main]
@@ -48,9 +50,6 @@ jobs:
       - uses: prefix-dev/setup-pixi@v0.10.1
         with:
           locked: true
-
-      - name: Apply migrations
-        run: pixi run alembic-up
 
       - run: pixi run test
 

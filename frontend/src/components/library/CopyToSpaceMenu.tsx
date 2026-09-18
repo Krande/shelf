@@ -16,6 +16,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, Loader2 } from "lucide-react";
 import { ApiError } from "@/api/client";
 import { copyItem, type CopyItemResult, type Item } from "@/api/items";
+import CopyDestination from "./CopyDestination";
 import { canEdit, fetchMySpaces, type Space } from "@/api/spaces";
 
 export default function CopyToSpaceMenu({
@@ -29,6 +30,7 @@ export default function CopyToSpaceMenu({
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [target, setTarget] = useState("");
+  const [collectionId, setCollectionId] = useState("");
   const [withFiles, setWithFiles] = useState(true);
   const [done, setDone] = useState<CopyItemResult | null>(null);
 
@@ -45,10 +47,14 @@ export default function CopyToSpaceMenu({
 
   const copy = useMutation({
     mutationFn: () =>
-      copyItem(item.id, target, { includeAttachments: withFiles }),
+      copyItem(item.id, target, {
+        includeAttachments: withFiles,
+        targetCollectionId: collectionId || undefined,
+      }),
     onSuccess: (result) => {
       setDone(result);
       setTarget("");
+      setCollectionId("");
       // The target space's listing has a new row in it.
       qc.invalidateQueries({ queryKey: ["items"] });
       qc.invalidateQueries({ queryKey: ["revisions"] });
@@ -108,7 +114,11 @@ export default function CopyToSpaceMenu({
           <>
             <select
               value={target}
-              onChange={(e) => setTarget(e.target.value)}
+              onChange={(e) => {
+                setTarget(e.target.value);
+                // The previous pick belongs to the previous space.
+                setCollectionId("");
+              }}
               aria-label="Space to copy into"
               disabled={spaces.isLoading || targets.length === 0}
               className="w-full rounded border px-2 py-1 text-xs disabled:opacity-50"
@@ -130,6 +140,12 @@ export default function CopyToSpaceMenu({
                 </option>
               ))}
             </select>
+
+            <CopyDestination
+              targetSlug={target}
+              value={collectionId}
+              onChange={setCollectionId}
+            />
 
             <label className="mt-2 flex items-center gap-2 text-xs">
               <input

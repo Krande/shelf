@@ -21,6 +21,7 @@ import {
   ChevronDown,
   ChevronRight,
   Download,
+  FolderClosed,
   Loader2,
   PanelLeftClose,
   PanelLeftOpen,
@@ -32,6 +33,11 @@ import {
   X,
 } from "lucide-react";
 import { canEdit, fetchMySpaces, type Space } from "@/api/spaces";
+import {
+  PREF_SUBCOLLECTION_AUTO_EXPAND_BELOW,
+  usePref,
+} from "@/auth/prefs";
+import { buildSubcollectionGroups } from "@/lib/subcollections";
 import {
   ALL_SEARCH_SCOPES,
   createItem,
@@ -63,14 +69,21 @@ import {
 import { itemTypeLabel, type ItemType } from "@/api/itemFields";
 import { useDebounce } from "@/hooks/useDebounce";
 import { useResizableWidth } from "@/hooks/useResizableWidth";
+import {
+  useColumnWidths,
+  type ColumnWidths,
+} from "@/hooks/useColumnWidths";
 import AppShell from "@/components/layout/AppShell";
 import ItemForm, {
   type ItemFormSubmission,
 } from "@/components/library/ItemForm";
 import ItemDetail from "@/components/library/ItemDetail";
 import TagChips from "@/components/library/TagChips";
-import CollectionRail from "@/components/library/CollectionRail";
+import CollectionRail, {
+  ITEM_DRAG_TYPE,
+} from "@/components/library/CollectionRail";
 import BulkAddToCollection from "@/components/library/BulkAddToCollection";
+import BulkCopyToSpace from "@/components/library/BulkCopyToSpace";
 import SearchScopePopover from "@/components/library/SearchScopePopover";
 import FulltextHitsRow from "@/components/library/FulltextHitsRow";
 
@@ -134,18 +147,64 @@ function primaryScopeMatch(
 }
 
 
+/**
+ * The grab strip on a column's right edge.
+ *
+ * Absolutely positioned so it costs the header no layout, and it stops
+ * its own events: every sortable column is a click-to-sort target, and
+ * taking hold of its edge is not a request to re-sort.
+ */
+function ColumnResizer({
+  columnKey,
+  columns,
+}: {
+  columnKey: string;
+  columns: ColumnWidths;
+}) {
+  return (
+    <span
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={`Resize column`}
+      tabIndex={0}
+      onPointerDown={columns.onPointerDown(columnKey)}
+      onKeyDown={columns.onKeyDown(columnKey)}
+      onClick={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => {
+        e.stopPropagation();
+        columns.onKeyDown(columnKey)({
+          key: "Home",
+          preventDefault: () => {},
+          stopPropagation: () => {},
+        } as React.KeyboardEvent);
+      }}
+      className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize select-none"
+      style={{
+        backgroundColor:
+          columns.resizing === columnKey
+            ? "var(--color-accent)"
+            : "transparent",
+      }}
+    />
+  );
+}
+
 function SortHeader({
   label,
   column,
   activeSort,
   direction,
   onClick,
+  columnKey,
+  columns,
 }: {
   label: string;
   column: ItemSort;
   activeSort: ItemSort;
   direction: SortDirection;
   onClick: (col: ItemSort) => void;
+  columnKey: string;
+  columns: ColumnWidths;
 }) {
   const active = activeSort === column;
   const Icon = active
@@ -156,21 +215,36 @@ function SortHeader({
   return (
     <th
       onClick={() => onClick(column)}
-      className="cursor-pointer select-none px-4 py-2 hover:opacity-80"
+      className="relative cursor-pointer select-none overflow-hidden px-4 py-2 hover:opacity-80"
+      style={{ width: columns.width(columnKey) }}
     >
-      <span className="inline-flex items-center gap-1">
-        {label}
+      <span className="flex min-w-0 items-center gap-1">
+        <span className="truncate">{label}</span>
         <Icon
-          className="h-3 w-3"
+          className="h-3 w-3 shrink-0"
           style={{
             color: active ? "var(--color-accent)" : "var(--color-text-muted)",
             opacity: active ? 1 : 0.5,
           }}
         />
       </span>
+      <ColumnResizer columnKey={columnKey} columns={columns} />
     </th>
   );
 }
+
+// Starting widths, near enough to what the auto layout produced that
+// turning the table fixed is not itself a visible change. Title has no
+// entry: it takes whatever is left, so the common case of a wide window
+// spends the extra space on the one column that benefits.
+const COLUMN_KEYS = ["title", "creator", "type", "tags", "updated"] as const;
+const COLUMN_DEFAULTS: Record<string, number> = {
+  title: 420,
+  creator: 200,
+  type: 140,
+  tags: 220,
+  updated: 180,
+};
 
 const RAIL_PREF_KEY = "shelf:rail-open";
 
@@ -463,6 +537,62 @@ export default function LibraryPage() {
     return () => observer.disconnect();
   }, [items.hasNextPage, items.isFetchingNextPage, items.fetchNextPage, flatItems.length]);
 
+  // What is filed under the open collection's subcollections, shown in
+  // a collapsible section below its own documents. A separate query
+  // rather than a widened filter: the two listings stay distinct, and
+  // nothing is fetched at all for a folder with no children.
+  const openCollection =
+    collectionParam && collectionParam !== "unfiled" ? collectionParam : null;
+  const hasSubcollections = useMemo(
+    () =>
+      !!openCollection &&
+      (collections.data ?? []).some((c) => c.parent_id === openCollection),
+    [collections.data, openCollection],
+  );
+  // Expanded by default when the folder holds little of its own — there
+  // is room to show what is below it, and an empty folder that only
+  // says "no items" while its subcollections hold the documents is the
+  // case this whole section exists for. The override is what a click
+  // sets, and it is dropped when the rail selection changes because the
+  // previous folder's expansion says nothing about this one.
+  const [autoExpandBelow] = usePref(PREF_SUBCOLLECTION_AUTO_EXPAND_BELOW);
+  const [subOpenOverride, setSubOpenOverride] = useState<boolean | null>(null);
+  useEffect(() => {
+    setSubOpenOverride(null);
+  }, [openCollection]);
+  const subOpen =
+    subOpenOverride ?? (itemsTotal ?? 0) < autoExpandBelow;
+
+  const subItemsQuery = useQuery({
+    queryKey: ["items", slug, "subcollections", openCollection, status],
+    queryFn: () =>
+      listItems(slug!, {
+        limit: ITEMS_PAGE_SIZE,
+        status,
+        collection: openCollection!,
+        collectionScope: "subcollections",
+      }),
+    enabled: !!slug && !!openCollection && hasSubcollections,
+  });
+  const subItems = subItemsQuery.data?.items ?? [];
+  const subTotal = subItemsQuery.data?.total ?? 0;
+
+  // Every item the page holds, wherever it is rendered. Id lookups go
+  // through this so a row from the subcollection section resolves like
+  // any other -- otherwise selecting one would re-fetch it by id and
+  // the "selection vanished from the list" cleanup would clear it.
+  const loadedItems = useMemo(
+    () => [...flatItems, ...subItems],
+    [flatItems, subItems],
+  );
+  // What "select all" and the bulk toolbar act on: the rows actually on
+  // screen. A collapsed section is not on screen, so its items are not
+  // swept into a bulk action nobody can see the scope of.
+  const selectableItems = useMemo(
+    () => (subOpen ? loadedItems : flatItems),
+    [subOpen, loadedItems, flatItems],
+  );
+
   // Compute which scope each item primarily matched in, so the
   // results can be grouped into "Title hits" / "Creator hits" / etc.
   // sections. Priority order matches user expectation: a hit in the
@@ -515,6 +645,8 @@ export default function LibraryPage() {
   // Width of the desktop detail pane. Null until someone drags it, so
   // the existing responsive width stays the default.
   const detailWidth = useResizableWidth("shelf.detailPanelWidth");
+  // Column widths, dragged from the header and remembered per browser.
+  const columns = useColumnWidths("shelf.libraryColumns", COLUMN_DEFAULTS);
 
   // Spaces including the ones this space inherits, purely to answer
   // "may I edit this item?" — the answer depends on the caller's role in
@@ -537,11 +669,11 @@ export default function LibraryPage() {
     enabled:
       !!selectedId &&
       !!items.data &&
-      !flatItems.some((i) => i.id === selectedId),
+      !loadedItems.some((i) => i.id === selectedId),
   });
 
   const selected =
-    flatItems.find((i) => i.id === selectedId) ??
+    loadedItems.find((i) => i.id === selectedId) ??
     (deepLinkedItem.data && deepLinkedItem.data.id === selectedId
       ? deepLinkedItem.data
       : null);
@@ -584,7 +716,7 @@ export default function LibraryPage() {
   // The table body, as data. Hoisted out of the JSX because arrow-key
   // navigation has to walk the rows in the order they're painted, and
   // two constructions of that order would drift apart.
-  const listEntries = useMemo(
+  const ownEntries = useMemo(
     () =>
       groupedItems
         ? ALL_SEARCH_SCOPES.filter((s) => groupedItems[s].length > 0).flatMap(
@@ -595,7 +727,12 @@ export default function LibraryPage() {
                 count: groupedItems[s].length,
               },
               ...groupedItems[s].flatMap((it) => {
-                const row = { kind: "row" as const, item: it, scope: s };
+                const row = {
+                  kind: "row" as const,
+                  item: it,
+                  scope: s,
+                  rowKey: it.id,
+                };
                 // Only the fulltext bucket gets the expansion. Other
                 // groups already display their match in-band (title /
                 // creators / etc.).
@@ -610,9 +747,60 @@ export default function LibraryPage() {
             kind: "row" as const,
             item: it,
             scope: null,
+            rowKey: it.id,
           })),
     [groupedItems, flatItems, expandedFulltextIds],
   );
+
+  // The subcollection tree, as the rail draws it. Built in lib so the
+  // pruning rules are testable without a rendered page.
+  const subGroups = useMemo(
+    () =>
+      openCollection
+        ? buildSubcollectionGroups(
+            openCollection,
+            collections.data ?? [],
+            subItems,
+          )
+        : [],
+    [collections.data, subItems, openCollection],
+  );
+
+  // The section, appended below the folder's own rows. Its rows are
+  // ordinary rows, so selection, ctrl+click and the arrow keys reach
+  // them without knowing they came from somewhere else.
+  const listEntries = useMemo(() => {
+    if (!hasSubcollections || subTotal === 0) return ownEntries;
+    return [
+      ...ownEntries,
+      { kind: "subheader" as const, count: subTotal, loaded: subItems.length },
+      ...(subOpen
+        ? subGroups.flatMap((g) => [
+            {
+              kind: "subgroup" as const,
+              collection: g.collection,
+              path: g.path,
+              count: g.items.length,
+            },
+            ...g.items.map((it) => ({
+              kind: "row" as const,
+              item: it,
+              scope: null,
+              // The same document can sit under two subcollections, so
+              // the item id alone is not unique within this listing.
+              rowKey: `${g.collection.id}:${it.id}`,
+            })),
+          ])
+        : []),
+    ];
+  }, [
+    ownEntries,
+    hasSubcollections,
+    subTotal,
+    subItems.length,
+    subGroups,
+    subOpen,
+  ]);
 
   /** Just the item rows, in painted order — what the arrow keys walk. */
   const navigableItems = useMemo(
@@ -623,7 +811,7 @@ export default function LibraryPage() {
 
   useEffect(() => {
     if (!items.data) return;
-    const present = new Set(flatItems.map((i) => i.id));
+    const present = new Set(loadedItems.map((i) => i.id));
     // Don't clear selectedId for deep-linked items that fell back to
     // the direct getItem fetch — they're legitimately not in the
     // current list page but still expected to remain selected.
@@ -718,6 +906,57 @@ export default function LibraryPage() {
       setSelectedId(item.id);
     },
   });
+
+  // Switching space drops the filters that are scoped to the space being
+  // left. A collection id means nothing in another space, and leaving it
+  // in the URL filters the new space's listing by a folder it does not
+  // have -- an empty library that looks like the items are missing. The
+  // selected item id goes for the same reason.
+  const switchSpace = useCallback(
+    (nextSlug: string) => {
+      setActiveSlug(nextSlug);
+      setCheckedIds(new Set());
+      // One write, rather than setSelectedId() plus a second navigation.
+      const next = new URLSearchParams(searchParams);
+      next.delete("collection");
+      next.delete("item");
+      setSearchParams(next, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
+
+  // Documents dragged from the table onto a folder in the rail.
+  // Additive, like the bulk "Add to collection" action: dropping into a
+  // folder files it there, it does not move it out of the others.
+  const fileIntoCollection = useMutation({
+    mutationFn: async ({
+      collectionId,
+      itemIds,
+    }: {
+      collectionId: string;
+      itemIds: string[];
+    }) => {
+      for (const id of itemIds) {
+        const it = loadedItems.find((i) => i.id === id);
+        // Already there, or dragged from a listing this page no longer
+        // holds — either way there is nothing to write.
+        if (!it || it.collection_ids.includes(collectionId)) continue;
+        await setItemCollections(id, [...it.collection_ids, collectionId]);
+      }
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["items", slug] });
+      qc.invalidateQueries({ queryKey: ["collections", slug] });
+    },
+    onError: (e: Error) => window.alert(`Could not file: ${e.message}`),
+  });
+
+  /** Ids this drag carries: the whole checked set when the dragged row
+   *  is part of it, otherwise just the row. Dragging an unchecked row
+   *  while a selection exists should move that row, not the selection. */
+  function dragPayload(itemId: string): string[] {
+    return checkedIds.has(itemId) ? [...checkedIds] : [itemId];
+  }
 
   // Ctrl/Cmd-click a row, or Enter on it, to open the PDF directly.
   // Selecting before navigating is what makes Back work: the selection
@@ -1014,11 +1253,11 @@ export default function LibraryPage() {
     // Only toggles across rows currently loaded — selecting "all"
     // when there are 5000 unloaded items would otherwise mean a
     // confusing "checked but not yet visible" state.
-    if (flatItems.length === 0) return;
-    if (checkedIds.size === flatItems.length) {
+    if (selectableItems.length === 0) return;
+    if (checkedIds.size === selectableItems.length) {
       setCheckedIds(new Set());
     } else {
-      setCheckedIds(new Set(flatItems.map((i) => i.id)));
+      setCheckedIds(new Set(selectableItems.map((i) => i.id)));
     }
   }
 
@@ -1053,7 +1292,8 @@ export default function LibraryPage() {
     filterTags.length > 0 ||
     !!collectionParam;
   const allChecked =
-    flatItems.length > 0 && checkedIds.size === flatItems.length;
+    selectableItems.length > 0 &&
+    checkedIds.size === selectableItems.length;
   const someChecked = checkedIds.size > 0 && !allChecked;
   const bulkBusy =
     bulkTrash.isPending || bulkRestore.isPending || bulkPermanent.isPending;
@@ -1189,6 +1429,9 @@ export default function LibraryPage() {
                 setRailOpen(false);
               }
             }}
+            onDropItems={(collectionId, itemIds) =>
+              fileIntoCollection.mutate({ collectionId, itemIds })
+            }
           />
         )}
 
@@ -1298,11 +1541,7 @@ export default function LibraryPage() {
               {spaces.data && spaces.data.length > 1 && (
                 <select
                   value={slug ?? ""}
-                  onChange={(e) => {
-                    setActiveSlug(e.target.value);
-                    setSelectedId(null);
-                    setCheckedIds(new Set());
-                  }}
+                  onChange={(e) => switchSpace(e.target.value)}
                   className="rounded border px-2 py-1 text-sm"
                   style={{
                     backgroundColor: "var(--color-surface)",
@@ -1481,8 +1720,12 @@ export default function LibraryPage() {
               {view === "library" ? (
                 <>
                   <BulkAddToCollection
-                    items={flatItems.filter((i) => checkedIds.has(i.id))}
+                    items={loadedItems.filter((i) => checkedIds.has(i.id))}
                     collections={collections.data ?? []}
+                    slug={slug}
+                  />
+                  <BulkCopyToSpace
+                    items={loadedItems.filter((i) => checkedIds.has(i.id))}
                     slug={slug}
                   />
                   <button
@@ -1544,7 +1787,11 @@ export default function LibraryPage() {
                   {(items.error as Error).message}
                 </p>
               )}
-              {!items.isLoading && itemsTotal === 0 && (
+              {/* subTotal, not just itemsTotal: a folder can hold nothing
+                  itself and still have documents below it, and telling
+                  someone "no items match" above a section listing them
+                  is worse than saying nothing. */}
+              {!items.isLoading && itemsTotal === 0 && subTotal === 0 && (
                 <p
                   className="p-6 text-sm"
                   style={{ color: "var(--color-text-muted)" }}
@@ -1556,8 +1803,11 @@ export default function LibraryPage() {
                     : "No items yet — click \"New item\" to add one."}
                 </p>
               )}
-              {flatItems.length > 0 && (
-                <table className="w-full text-sm">
+              {listEntries.length > 0 && (
+                <table
+                  className="w-full table-fixed text-sm"
+                  style={{ minWidth: columns.total([...COLUMN_KEYS]) + 32 }}
+                >
                   <thead
                     className="sticky top-0 border-b text-left text-xs uppercase tracking-wider"
                     style={{
@@ -1585,27 +1835,100 @@ export default function LibraryPage() {
                         activeSort={sort}
                         direction={direction}
                         onClick={applySort}
+                        columnKey="title"
+                        columns={columns}
                       />
-                      <th className="px-4 py-2">Creator</th>
+                      <th
+                        className="relative px-4 py-2"
+                        style={{ width: columns.width("creator") }}
+                      >
+                        Creator
+                        <ColumnResizer columnKey="creator" columns={columns} />
+                      </th>
                       <SortHeader
                         label="Type"
                         column="type"
                         activeSort={sort}
                         direction={direction}
                         onClick={applySort}
+                        columnKey="type"
+                        columns={columns}
                       />
-                      <th className="px-4 py-2">Tags</th>
+                      <th
+                        className="relative px-4 py-2"
+                        style={{ width: columns.width("tags") }}
+                      >
+                        Tags
+                        <ColumnResizer columnKey="tags" columns={columns} />
+                      </th>
                       <SortHeader
                         label={view === "trash" ? "Trashed" : "Updated"}
                         column="updated"
                         activeSort={sort}
                         direction={direction}
                         onClick={applySort}
+                        columnKey="updated"
+                        columns={columns}
                       />
+                      {/* Swallows whatever the sized columns do not
+                          use. Without it a fixed layout shares the
+                          surplus out proportionally and every column
+                          shifts when one is dragged. */}
+                      <th aria-hidden="true" />
                     </tr>
                   </thead>
                   <tbody ref={listRef}>
                     {listEntries.map((entry) => {
+                      if (entry.kind === "subheader") {
+                        return (
+                          <tr key="subcollections">
+                            <td colSpan={7} className="px-0 py-0">
+                              <button
+                                type="button"
+                                onClick={() => setSubOpenOverride(!subOpen)}
+                                aria-expanded={subOpen}
+                                className="flex w-full items-center gap-1.5 border-t px-3 py-2 text-left text-xs uppercase tracking-widest hover:opacity-80"
+                                style={{
+                                  borderColor: "var(--color-border)",
+                                  color: "var(--color-text-muted)",
+                                }}
+                              >
+                                {subOpen ? (
+                                  <ChevronDown className="h-3.5 w-3.5" />
+                                ) : (
+                                  <ChevronRight className="h-3.5 w-3.5" />
+                                )}
+                                In subcollections ({entry.count})
+                                {entry.loaded < entry.count && subOpen && (
+                                  <span className="normal-case tracking-normal">
+                                    — showing the first {entry.loaded}; open
+                                    the subcollection to see the rest
+                                  </span>
+                                )}
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      }
+                      if (entry.kind === "subgroup") {
+                        return (
+                          <tr key={`group-${entry.collection.id}`}>
+                            <td
+                              colSpan={7}
+                              className="px-3 py-1.5 pl-7 text-xs"
+                              style={{ color: "var(--color-text-muted)" }}
+                            >
+                              <span className="inline-flex items-center gap-1.5">
+                                <FolderClosed className="h-3.5 w-3.5 shrink-0" />
+                                {/* The whole path on one line, so a
+                                    nested folder says where it lives
+                                    without spending a row per level. */}
+                                {entry.path.join(" › ")} ({entry.count})
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      }
                       if (entry.kind === "header") {
                         return (
                           <tr
@@ -1618,7 +1941,7 @@ export default function LibraryPage() {
                             }}
                           >
                             <td
-                              colSpan={6}
+                              colSpan={7}
                               className="px-4 py-1.5 text-xs uppercase tracking-wider"
                               style={{ color: "var(--color-text-muted)" }}
                             >
@@ -1634,7 +1957,7 @@ export default function LibraryPage() {
                             key={`hits-${entry.itemId}`}
                             itemId={entry.itemId}
                             query={debouncedQuery}
-                            colSpan={6}
+                            colSpan={7}
                             onOpen={setSelectedId}
                           />
                         );
@@ -1646,8 +1969,18 @@ export default function LibraryPage() {
                       const isExpanded = expandedFulltextIds.has(it.id);
                       return (
                         <tr
-                          key={it.id}
+                          key={entry.rowKey ?? it.id}
                           data-item-row={it.id}
+                          draggable
+                          onDragStart={(e) => {
+                            e.dataTransfer.setData(
+                              ITEM_DRAG_TYPE,
+                              JSON.stringify(dragPayload(it.id)),
+                            );
+                            // Copy, not move: filing into a folder adds
+                            // a membership, it takes nothing away.
+                            e.dataTransfer.effectAllowed = "copy";
+                          }}
                           onClick={(e) => {
                             if (e.ctrlKey || e.metaKey) openInReader(it);
                             else setSelectedId(it.id);
@@ -1672,8 +2005,8 @@ export default function LibraryPage() {
                               className="cursor-pointer"
                             />
                           </td>
-                          <td className="px-4 py-2">
-                            <div className="flex items-center gap-1.5">
+                          <td className="overflow-hidden px-4 py-2">
+                            <div className="flex min-w-0 items-center gap-1.5">
                               {isFulltextRow ? (
                                 <button
                                   type="button"
@@ -1704,24 +2037,28 @@ export default function LibraryPage() {
                                 // their fulltext-group siblings.
                                 <span className="inline-block w-[18px]" />
                               )}
-                              <span title="Ctrl+click to open the PDF">
+                              <span
+                                className="truncate"
+                                title={itemTitle(it)}
+                              >
                                 {itemTitle(it)}
                               </span>
                             </div>
                           </td>
                           <td
-                            className="px-4 py-2 text-xs"
+                            className="truncate px-4 py-2 text-xs"
                             style={{ color: "var(--color-text-muted)" }}
+                            title={creatorSummary(it)}
                           >
                             {creatorSummary(it)}
                           </td>
                           <td
-                            className="px-4 py-2 text-xs"
+                            className="truncate px-4 py-2 text-xs"
                             style={{ color: "var(--color-text-muted)" }}
                           >
                             {itemTypeLabel(it.item_type)}
                           </td>
-                          <td className="px-4 py-2">
+                          <td className="overflow-hidden px-4 py-2">
                             <TagChips
                               tags={tagNamesById(it.tag_ids)}
                               max={3}
@@ -1730,7 +2067,7 @@ export default function LibraryPage() {
                             />
                           </td>
                           <td
-                            className="px-4 py-2 text-xs"
+                            className="truncate px-4 py-2 text-xs"
                             style={{ color: "var(--color-text-muted)" }}
                           >
                             {formatDate(
@@ -1739,6 +2076,7 @@ export default function LibraryPage() {
                                 : it.updated_at,
                             )}
                           </td>
+                          <td aria-hidden="true" />
                         </tr>
                       );
                     })}

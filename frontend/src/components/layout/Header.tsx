@@ -2,6 +2,7 @@ import { Link, useLocation } from "react-router";
 import { LibraryBig, Settings } from "lucide-react";
 import { type Me } from "@/api/me";
 import AccountMenu from "./AccountMenu";
+import ShortcutsHelp from "./ShortcutsHelp";
 
 // Admin is a tab inside Settings rather than its own nav entry — it
 // belongs with the other instance-level configuration, and keeping the
@@ -49,6 +50,9 @@ export default function Header({ user }: { user: Me }) {
               </Link>
             );
           })}
+          {/* Sits with the nav rather than by the account menu: it is
+              about the app, not about you. */}
+          <ShortcutsHelp />
         </nav>
       </div>
       <AccountMenu user={user} />

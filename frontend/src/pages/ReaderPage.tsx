@@ -7,7 +7,12 @@ import {
   useRef,
   useState,
 } from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router";
+import {
+  useLocation,
+  useNavigate,
+  useParams,
+  useSearchParams,
+} from "react-router";
 import {
   ArrowLeft,
   Bookmark,
@@ -101,6 +106,7 @@ export default function ReaderPage() {
   const auth = useAuth();
   const params = useParams<{ attachmentId: string }>();
   const [searchParams] = useSearchParams();
+  const location = useLocation();
   const nav = useNavigate();
 
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null);
@@ -341,11 +347,28 @@ export default function ReaderPage() {
   // ?page= writeback effect above (which uses history.replaceState
   // and so doesn't notify react-router). That's how this stays out
   // of a loop with manual scroll-driven page updates.
+  //
+  // Honoured once per navigation, tracked by location key. The effect
+  // also depends on layout state that changes long afterwards --
+  // opening or closing the find bar resizes the scroll container, which
+  // remounts the virtualizer and flips heightsReady -- and react-router
+  // never learns about the ?page= writeback above, since that uses
+  // replaceState. So its copy of the param stays frozen at whatever
+  // brought us here, and without this guard any later relayout would
+  // re-apply it: follow a link to page 40, close the find bar, and the
+  // reader would throw you back to the page the deep link named.
+  const handledPageNav = useRef<string | null>(null);
   useEffect(() => {
     if (mode !== "continuous") return;
     if (!heightsReady || numPages === 0) return;
-    const target = Number(searchParams.get("page") || 0);
+    const raw = searchParams.get("page");
+    const target = Number(raw || 0);
     if (!(target > 1 && target <= numPages)) return;
+    // Keyed on the navigation, not the value, so arriving at the same
+    // page twice from two different search hits still scrolls.
+    const nav = `${location.key}:${raw}`;
+    if (handledPageNav.current === nav) return;
+    handledPageNav.current = nav;
     setPage(target);
     // Defer past the first paint so the keyed ContinuousList has
     // mounted, the virtualizer has measured the container, and the
@@ -354,7 +377,7 @@ export default function ReaderPage() {
       continuousRef.current?.scrollToPage(target);
     }, 50);
     return () => clearTimeout(t);
-  }, [mode, heightsReady, numPages, searchParams]);
+  }, [mode, heightsReady, numPages, searchParams, location.key]);
 
   // Per-page base render scale. Default is fit-to-width (renders the
   // page to fill the container's inner width); "page" mode clamps
@@ -968,7 +991,11 @@ export default function ReaderPage() {
                 jumpToMatch(currentMatch + (e.shiftKey ? -1 : 1));
               } else if (e.key === "Escape") {
                 e.preventDefault();
+                // Clear as well as close, like the X does. A query left
+                // behind keeps its highlights on the page with no
+                // visible control left to clear them.
                 setFindOpen(false);
+                setFindInput("");
               }
             }}
             placeholder="Find in PDF…"
@@ -1543,6 +1570,9 @@ function PageCanvas({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const textLayerRef = useRef<HTMLDivElement>(null);
   const [textLayerVersion, setTextLayerVersion] = useState(0);
+  // Which match this page last scrolled to, so a re-render does not
+  // scroll to it again.
+  const lastScrolledTo = useRef<string | null>(null);
 
   const cssW = native ? native.width * renderScale : undefined;
   const cssH = native ? native.height * renderScale : undefined;
@@ -1768,7 +1798,13 @@ function PageCanvas({
       .forEach((el) => el.remove());
 
     const needle = findQuery.trim();
-    if (!needle || textLayerVersion === 0) return;
+    if (!needle || textLayerVersion === 0) {
+      // Nothing highlighted, so the next match to be drawn is worth
+      // scrolling to even if it is the one we scrolled to last time --
+      // searching the same word again should still take you there.
+      lastScrolledTo.current = null;
+      return;
+    }
 
     const lowerNeedle = needle.toLowerCase();
     const spans = Array.from(
@@ -1831,7 +1867,15 @@ function PageCanvas({
       }
     }
 
-    if (currentEl) {
+    // Only when the target actually moved. This effect also re-runs
+    // whenever the text layer is rebuilt, which happens on any change
+    // of render scale -- and closing the find bar resizes the scroll
+    // container, so it re-rendered every page and then scrolled back to
+    // the match the user had just finished with. Escaping out of a
+    // search should leave you where you are reading.
+    const target = `${needle}:${currentOccurrence}`;
+    if (currentEl && lastScrolledTo.current !== target) {
+      lastScrolledTo.current = target;
       currentEl.scrollIntoView({ behavior: "smooth", block: "center" });
     }
     // pinchScaleRef is read inside the loop above. Listing it here

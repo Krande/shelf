@@ -99,6 +99,9 @@ export function listItems(
     sort?: ItemSort;
     direction?: SortDirection;
     collection?: string;
+    /** "subcollections" lists what is filed below `collection` instead
+     *  of in it. Omitted means the collection's own items. */
+    collectionScope?: "direct" | "subcollections";
     scope?: SearchScope[];
     revisions?: RevisionFilter;
   } = {},
@@ -128,6 +131,9 @@ export function listItems(
     for (const s of opts.scope) params.append("scope", s);
   }
   if (opts.collection) params.set("collection", opts.collection);
+  if (opts.collectionScope && opts.collectionScope !== "direct") {
+    params.set("collection_scope", opts.collectionScope);
+  }
   // Only when overriding: "pinned" is the server default and sending it
   // would put a redundant param in every URL and every query key.
   if (opts.revisions === "all") params.set("revisions", "all");
@@ -179,6 +185,8 @@ export interface CopyItemResult {
   space_id: string;
   space_slug: string;
   attachments_copied: number;
+  /** Collection the copy was filed under, null if left unfiled. */
+  collection_id: string | null;
   linked_to_standard: boolean;
 }
 
@@ -195,13 +203,17 @@ export interface CopyItemResult {
 export function copyItem(
   id: string,
   targetSlug: string,
-  opts: { includeAttachments?: boolean } = {},
+  opts: { includeAttachments?: boolean; targetCollectionId?: string } = {},
 ): Promise<CopyItemResult> {
   return apiFetch<CopyItemResult>(`/api/items/${encodeURIComponent(id)}/copy`, {
     method: "POST",
     body: JSON.stringify({
       target_slug: targetSlug,
       include_attachments: opts.includeAttachments ?? true,
+      // Omitted rather than null when unset, so the copy lands unfiled.
+      ...(opts.targetCollectionId
+        ? { target_collection_id: opts.targetCollectionId }
+        : {}),
     }),
   });
 }
