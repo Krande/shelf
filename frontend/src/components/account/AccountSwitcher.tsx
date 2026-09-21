@@ -20,7 +20,8 @@ import { Check, LogOut, Plus, UserPlus, Users } from "lucide-react";
 import { startLinkAccount, switchAccount } from "@/api/accounts";
 import { apiFetch, logout } from "@/api/client";
 import type { Me } from "@/api/me";
-import { fetchProviders, providerLabel } from "@/api/providers";
+import { providerLabel } from "@/api/providers";
+import { useLinkProviders } from "@/components/account/useLinkProviders";
 import { goToLogin, reloadAsNewAccount } from "@/lib/navigation";
 
 export default function AccountSwitcher({
@@ -45,8 +46,6 @@ export default function AccountSwitcher({
   showManageLink?: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  const [providers, setProviders] = useState<string[]>([]);
-  const [devLogin, setDevLogin] = useState(false);
   const [devEmail, setDevEmail] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -54,17 +53,10 @@ export default function AccountSwitcher({
 
   // Fetched on first open only — the header renders this on every page
   // and nobody needs the provider list until they look.
-  useEffect(() => {
-    if (!open || providers.length > 0 || devLogin) return;
-    fetchProviders()
-      .then((r) => {
-        setProviders(r.providers);
-        setDevLogin(r.dev_login);
-      })
-      .catch(() => {
-        /* switching still works without it */
-      });
-  }, [open, providers.length, devLogin]);
+  const { devLogin, preferredProvider, otherProviders } = useLinkProviders(
+    user,
+    open,
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -117,25 +109,6 @@ export default function AccountSwitcher({
     goToLogin();
   }
 
-  /**
-   * The provider "Switch user" should jump straight to.
-   *
-   * Prefer the one the active account actually signed in with, so someone
-   * on Entra lands on Entra's account picker rather than a menu asking
-   * which provider they meant. Falls back to the only configured provider
-   * when the account has no identity yet (a dev-login user on an instance
-   * that does have OIDC). Undefined means we can't tell — several
-   * providers and no signal — and the link to Settings is the honest
-   * answer instead of guessing.
-   */
-  const activeAccount = user.accounts.find((a) => a.id === user.id);
-  const preferredProvider =
-    activeAccount?.idps.find((idp) => providers.includes(idp)) ??
-    (providers.length === 1 ? providers[0] : undefined);
-
-  // Providers that still need their own "Add …" row. The preferred one is
-  // already reachable through "Switch user", so listing it twice is noise.
-  const otherProviders = providers.filter((p) => p !== preferredProvider);
   const canAdd = otherProviders.length > 0 || devLogin;
 
   return (

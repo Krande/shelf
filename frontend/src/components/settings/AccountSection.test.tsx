@@ -16,15 +16,28 @@ vi.mock("@/lib/navigation", () => ({
 }));
 vi.mock("@/api/accounts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/api/accounts")>()),
+  startLinkAccount: vi.fn(),
+  switchAccount: vi.fn(async () => undefined),
   unlinkAccount: vi.fn(async () => ({ active_user_id: "someone" })),
 }));
 
-import { unlinkAccount } from "@/api/accounts";
+import { startLinkAccount, switchAccount, unlinkAccount } from "@/api/accounts";
 import { goToLogin, reloadAsNewAccount } from "@/lib/navigation";
+
+/** A Me whose active account signed in with Entra. */
+function entraUser() {
+  const me = makeMeWithTwoAccounts();
+  return {
+    ...me,
+    accounts: me.accounts.map((a) =>
+      a.id === me.id ? { ...a, idps: ["entra"] } : a,
+    ),
+  };
+}
 
 beforeEach(() => {
   mockFetch({
-    "/auth/providers": { body: { providers: [], dev_login: false } },
+    "/auth/providers": { body: { providers: ["entra"], dev_login: false } },
     "/auth/logout": { body: { status: "ok" } },
   });
 });
@@ -51,6 +64,44 @@ describe("linked accounts", () => {
     expect(within(list).getByText("Ada")).toBeInTheDocument();
     expect(within(list).getByText("Grace")).toBeInTheDocument();
     expect(within(list).getByText("active")).toBeInTheDocument();
+  });
+
+  it("offers Make active only on the accounts that are not active", () => {
+    renderWithProviders(<AccountSection user={makeMeWithTwoAccounts()} />);
+    const rows = screen.getAllByRole("listitem");
+    expect(
+      within(rows[0]).queryByRole("button", { name: /make active/i }),
+    ).toBeNull();
+    expect(
+      within(rows[1]).getByRole("button", { name: /make active/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("switches the active account and reloads under it", async () => {
+    renderWithProviders(<AccountSection user={makeMeWithTwoAccounts()} />);
+    await userEvent.click(
+      screen.getByRole("button", { name: /make active/i }),
+    );
+
+    await waitFor(() =>
+      expect(switchAccount).toHaveBeenCalledWith(
+        "22222222-2222-2222-2222-222222222222",
+      ),
+    );
+    // A router navigate would leave TanStack caches holding the previous
+    // account's data — this has to be a full reload.
+    await waitFor(() => expect(reloadAsNewAccount).toHaveBeenCalled());
+  });
+
+  it("surfaces a failed switch instead of reloading", async () => {
+    vi.mocked(switchAccount).mockRejectedValueOnce(new Error("Forbidden"));
+    renderWithProviders(<AccountSection user={makeMeWithTwoAccounts()} />);
+    await userEvent.click(
+      screen.getByRole("button", { name: /make active/i }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Forbidden");
+    expect(reloadAsNewAccount).not.toHaveBeenCalled();
   });
 
   it("unlinks an account and reloads under whoever is left", async () => {
@@ -83,32 +134,76 @@ describe("linked accounts", () => {
     await userEvent.click(screen.getByRole("button", { name: /unlink/i }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Forbidden");
   });
+
+  it("offers the other providers as add-account shortcuts", async () => {
+    mockFetch({
+      "/auth/providers": {
+        body: { providers: ["authentik", "entra"], dev_login: false },
+      },
+    });
+    renderWithProviders(<AccountSection user={entraUser()} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: /add authentik account/i }),
+    );
+    expect(startLinkAccount).toHaveBeenCalledWith("authentik");
+    // Entra is the one "Switch user" already goes to — no duplicate row.
+    expect(
+      screen.queryByRole("button", { name: /add entra account/i }),
+    ).toBeNull();
+  });
+});
+
+describe("switch user", () => {
+  it("goes straight to the provider's sign-in page, not an account list", async () => {
+    renderWithProviders(<AccountSection user={makeMeWithTwoAccounts()} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: /^switch user$/i }),
+    );
+
+    expect(startLinkAccount).toHaveBeenCalledWith("entra");
+    // Picking an already-linked identity is the row buttons' job.
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(switchAccount).not.toHaveBeenCalled();
+  });
+
+  it("prefers the provider the active account signed in with", async () => {
+    mockFetch({
+      "/auth/providers": {
+        body: { providers: ["authentik", "entra"], dev_login: false },
+      },
+    });
+    renderWithProviders(<AccountSection user={entraUser()} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: /^switch user$/i }),
+    );
+    expect(startLinkAccount).toHaveBeenCalledWith("entra");
+  });
+
+  it("offers one button per provider when nothing says which to use", async () => {
+    mockFetch({
+      "/auth/providers": {
+        body: { providers: ["authentik", "entra"], dev_login: false },
+      },
+    });
+    // makeMe's account has no idps, so neither provider is preferred.
+    renderWithProviders(<AccountSection user={makeMe()} />);
+    expect(
+      await screen.findByRole("button", { name: /switch authentik user/i }),
+    ).toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: /switch entra user/i }),
+    );
+    expect(startLinkAccount).toHaveBeenCalledWith("entra");
+  });
 });
 
 describe("actions", () => {
-  it("offers Switch user next to Sign out", () => {
+  it("offers Switch user next to Sign out", async () => {
     renderWithProviders(<AccountSection user={makeMe()} />);
     expect(
-      screen.getByRole("button", { name: /switch user/i }),
+      await screen.findByRole("button", { name: /switch user/i }),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /sign out/i })).toBeInTheDocument();
-  });
-
-  it("opens the switcher popover from Switch user", async () => {
-    renderWithProviders(<AccountSection user={makeMeWithTwoAccounts()} />);
-    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: /switch user/i }));
-    expect(screen.getByRole("menu")).toBeInTheDocument();
-  });
-
-  it("does not repeat sign-out or a self-link inside that popover", async () => {
-    renderWithProviders(<AccountSection user={makeMeWithTwoAccounts()} />);
-    await userEvent.click(screen.getByRole("button", { name: /switch user/i }));
-    const menu = screen.getByRole("menu");
-    expect(within(menu).queryByRole("menuitem", { name: /sign out/i })).toBeNull();
-    expect(
-      within(menu).queryByRole("menuitem", { name: /switch user/i }),
-    ).toBeNull();
   });
 
   it("signs out and returns to login", async () => {
