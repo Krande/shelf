@@ -2,6 +2,15 @@
 
 
 
+## v0.9.1 (2026-09-21)
+
+### Fix
+
+* fix(account): send Settings&#39;s &#34;Switch user&#34; to the provider, not a list (#11)
+
+Co-authored-by: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`902a573`](https://github.com/Krande/shelf/commit/902a573ede1e0afc0c6b8dfe2155b07d066769b9))
+
+
 ## v0.9.0 (2026-09-18)
 
 ### Feature
