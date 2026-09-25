@@ -2,6 +2,15 @@
 
 
 
+## v0.10.0 (2026-09-25)
+
+### Feature
+
+* feat(search): search every space you can read, with a session-return and title-alignment fix (#12)
+
+Co-authored-by: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`f2347d2`](https://github.com/Krande/shelf/commit/f2347d25df4e6bf7b2409e995e00fe5d7cc94389))
+
+
 ## v0.9.1 (2026-09-21)
 
 ### Fix
