@@ -55,8 +55,8 @@ OCR_TIMEOUT_SECONDS = int(os.environ.get("SHELF_OCR_TIMEOUT_SECONDS", "1800"))
 OCR_JOBS = int(os.environ.get("SHELF_OCR_JOBS", "2"))
 
 # Path to the ocrmypdf CLI. Resolved at import so we fail fast if
-# the container is mis-built (pip install puts it on PATH; if it
-# isn't there, every OCR job would fail with the same error).
+# the container is mis-built (pixi.lock's `ocr` feature puts it on PATH;
+# if it isn't there, every OCR job would fail with the same error).
 OCRMYPDF_BIN = shutil.which("ocrmypdf") or "ocrmypdf"
 
 # How often the cancel-poll loop checks the DB for a cancel signal
