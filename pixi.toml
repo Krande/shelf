@@ -49,6 +49,9 @@ itsdangerous = "*"
 pypdf = "*"
 nats-py = "*"
 # PyMuPDF powers the outline worker's font-heuristic heading detection.
+# conda-forge's build exposes it as `fitz` only, not the newer `pymupdf`
+# name the PyPI wheel also answers to — which is what shelf's workers import,
+# and what the images assert on so a rename can't reach a pod unnoticed.
 pymupdf = "*"
 
 [pypi-dependencies]
