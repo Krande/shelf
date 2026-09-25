@@ -10,16 +10,22 @@ subscribes to without holding a copy. Inherited rows are read-only —
 `require_space_role` refuses the writes — and carry `is_inherited` so the
 SPA can say where they came from. Writes still address one space: a
 create lands in the space named in the URL, never in an inherited one.
+
+`/api/me/items` is the other way to read: one search across every space
+the caller can reach, for the landing page, where the question is "where
+is that document" rather than "what is in this library". Both share
+`_parse_search`, so a query means the same thing in either.
 """
 
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import Select, case, cast, func, or_, select
+from sqlalchemy import ColumnElement, Select, case, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 from sqlalchemy.types import String
@@ -29,6 +35,7 @@ from ..auth.spaces import (
     SPACE_ROLE_EDITOR,
     SPACE_ROLE_VIEWER,
     item_source_space_ids,
+    readable_item_space_ids,
     require_space_role,
 )
 from ..db import get_session
@@ -267,6 +274,92 @@ class SearchScope(StrEnum):
     fulltext = "fulltext"
 
 
+@dataclass(frozen=True)
+class _Search:
+    """A parsed `?q=` + `?scope=` pair, ready to bolt onto a select().
+
+    `where` ORs together the enabled field matches; `rank` sorts title
+    hits above creator hits above body-text hits, so a query like "002"
+    that matches hundreds of PDF bodies doesn't bury the handful of
+    title hits past the first page. `matches_nothing` is the one case
+    that isn't a filter: every scope switched off, which by definition
+    matches nothing and is cheaper to answer than to ask.
+
+    Shared by the per-space listing and the cross-space search below, so
+    the two can't drift into disagreeing about what a query means.
+    """
+
+    where: ColumnElement[bool] | None = None
+    rank: ColumnElement[int] | None = None
+    matches_nothing: bool = False
+
+
+def _parse_search(q: str | None, scope: list[SearchScope] | None) -> _Search:
+    """Build the search predicate for `q`, narrowed to `scope`.
+
+    Case-insensitive substring match across the selected metadata
+    fields. Creators are a JSONB array of objects, so we cast to text and
+    ilike the result — that matches first/last/`name` without a
+    normalised people table. The `fulltext` scope bolts on an EXISTS
+    against the per-page text the extraction worker fills, so a PDF body
+    match surfaces the parent item alongside metadata hits.
+    """
+    if not q or not q.strip():
+        return _Search()
+
+    enabled = set(scope) if scope else set(SearchScope)
+    cleaned = q.strip()
+    needle = f"%{cleaned}%"
+    title_clause = Item.data["title"].astext.ilike(needle)
+    creators_clause = cast(Item.data["creators"], String).ilike(needle)
+    abstract_clause = Item.data["abstractNote"].astext.ilike(needle)
+    extra_clause = Item.data["extra"].astext.ilike(needle)
+
+    clauses = []
+    if SearchScope.title_ in enabled:
+        clauses.append(title_clause)
+    if SearchScope.creators in enabled:
+        clauses.append(creators_clause)
+    if SearchScope.abstract in enabled:
+        clauses.append(abstract_clause)
+    if SearchScope.extra in enabled:
+        clauses.append(extra_clause)
+    if SearchScope.fulltext in enabled:
+        # Case-insensitive substring match, exactly like the reader's
+        # in-PDF Ctrl-F find tool — a search for "Test" picks up
+        # "Testing", "Latest", etc. The lexeme-based tsvector approach
+        # stems those substrings away, which surprised users (an item
+        # shows up under Ctrl-F but not in the library search). The same
+        # matcher powers /fulltext-hits so the listing and the expansion
+        # always agree.
+        text_needle = f"%{_escape_ilike(cleaned)}%"
+        clauses.append(
+            select(AttachmentPage.attachment_id)
+            .join(Attachment, Attachment.id == AttachmentPage.attachment_id)
+            .where(
+                Attachment.item_id == Item.id,
+                AttachmentPage.text.ilike(text_needle, escape="\\"),
+            )
+            .exists()
+        )
+
+    if not clauses:
+        return _Search(matches_nothing=True)
+    return _Search(
+        where=or_(*clauses),
+        # Lower number = higher priority. Mirrors the order the SPA
+        # already uses to bucket results into "Title hits" / "Creator
+        # hits" / etc. sections.
+        rank=case(
+            (title_clause, 0),
+            (creators_clause, 1),
+            (abstract_clause, 2),
+            (extra_clause, 3),
+            else_=4,
+        ),
+    )
+
+
 async def _resolve_space(
     db: AsyncSession,
     user: User,
@@ -350,75 +443,14 @@ async def list_items(
         stmt = stmt.where(Item.deleted_at.is_not(None))
     # `all` skips the deleted_at predicate entirely.
 
-    # Scope-priority ranking. When q is set, items with a title hit
-    # come before items whose only match is in creators / abstract /
-    # extra, and fulltext-only matches go last. Otherwise a query
-    # like "002" (which matches hundreds of PDF bodies) buries the
-    # handful of title hits past the first page and the user never
-    # sees them. Built outside the q block so it's None when no
-    # search is active.
-    scope_rank = None
-    if q and q.strip():
-        # Case-insensitive substring match across selected metadata
-        # fields. Creators are a JSONB array of objects, so we cast
-        # to text and ilike the result — works for first/last/`name`
-        # without a normalised people table. The `fulltext` scope
-        # bolts on an EXISTS join against attachments.tsv (filled by
-        # the extraction worker) so a PDF body match surfaces the
-        # parent item alongside metadata hits.
-        enabled = set(scope) if scope else set(SearchScope)
-        cleaned = q.strip()
-        needle = f"%{cleaned}%"
-        clauses = []
-        title_clause = Item.data["title"].astext.ilike(needle)
-        creators_clause = cast(Item.data["creators"], String).ilike(needle)
-        abstract_clause = Item.data["abstractNote"].astext.ilike(needle)
-        extra_clause = Item.data["extra"].astext.ilike(needle)
-        if SearchScope.title_ in enabled:
-            clauses.append(title_clause)
-        if SearchScope.creators in enabled:
-            clauses.append(creators_clause)
-        if SearchScope.abstract in enabled:
-            clauses.append(abstract_clause)
-        if SearchScope.extra in enabled:
-            clauses.append(extra_clause)
-        if SearchScope.fulltext in enabled:
-            # Case-insensitive substring match, exactly like the
-            # reader's in-PDF Ctrl-F find tool — a search for "Test"
-            # picks up "Testing", "Latest", etc. The lexeme-based
-            # tsvector approach stems away these substrings, which
-            # surprised users (an item shows up under Ctrl-F but not
-            # in the library search). The same matcher powers
-            # /fulltext-hits so the listing and the expansion always
-            # agree.
-            text_needle = f"%{_escape_ilike(cleaned)}%"
-            clauses.append(
-                select(AttachmentPage.attachment_id)
-                .join(
-                    Attachment,
-                    Attachment.id == AttachmentPage.attachment_id,
-                )
-                .where(
-                    Attachment.item_id == Item.id,
-                    AttachmentPage.text.ilike(text_needle, escape="\\"),
-                )
-                .exists()
-            )
-        if clauses:
-            stmt = stmt.where(or_(*clauses))
-            # Lower number = higher priority. Mirrors the order the
-            # SPA already uses to bucket results into "Title hits" /
-            # "Creator hits" / etc. sections.
-            scope_rank = case(
-                (title_clause, 0),
-                (creators_clause, 1),
-                (abstract_clause, 2),
-                (extra_clause, 3),
-                else_=4,
-            )
-        else:
-            # All scopes disabled — by definition no matches.
-            return {"items": [], "total": 0}
+    search = _parse_search(q, scope)
+    if search.matches_nothing:
+        # Every scope switched off — no matches by definition.
+        return {"items": [], "total": 0}
+    if search.where is not None:
+        stmt = stmt.where(search.where)
+    scope_rank = search.rank
+
     if tag:
         # AND across multiple ?tag= params: each tag must be present.
         # Tags are matched by name (case-insensitive via the CITEXT
@@ -539,6 +571,110 @@ async def list_items(
     items = await _attach_collection_ids(
         db, list(result.scalars().all()), home_space_id=space.id
     )
+    return {"items": items, "total": total}
+
+
+@router.get("/api/me/items", response_model=ListItemsResponse)
+async def search_my_items(
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    q: Annotated[str | None, Query(max_length=200)] = None,
+    space: Annotated[list[str] | None, Query()] = None,
+    status_: Annotated[ItemStatus, Query(alias="status")] = ItemStatus.active,
+    sort: Annotated[ItemSort, Query()] = ItemSort.updated,
+    direction: Annotated[SortDirection, Query()] = SortDirection.desc,
+    scope: Annotated[list[SearchScope] | None, Query()] = None,
+) -> dict[str, Any]:
+    """Search every space the caller can read, in one query.
+
+    The per-space listing answers "what is in this library"; this answers
+    "where is that document", which is the landing page's question and
+    has no one space to ask it of. The scope is the same set
+    `/api/me/spaces?include_inherited=true` reports: spaces owned, spaces
+    shared with the caller, and the spaces those subscribe to.
+
+    **One row per item, however many ways the caller can reach it.** A
+    standard in a shared Standards space that their personal shelf also
+    subscribes to is reachable twice, and searching each space separately
+    would report it twice. Items live in exactly one space, so a single
+    query bounded by the readable set can't double-count — which is the
+    main reason this is one endpoint rather than a fan-out in the client.
+
+    `space=<slug>` narrows to the named spaces and is repeatable, so the
+    UI can offer the set as checkboxes and filter one out. It selects on
+    where an item *lives*, not on which of the caller's spaces can reach
+    it: the inherited spaces are listed separately in the same set, so
+    unchecking one removes exactly its items and nothing else. A slug the
+    caller can't read is a 404 rather than a silent drop: a filter that
+    quietly matches nothing reads as "no results" and hides the mistake.
+
+    Two deliberate omissions against the per-space listing. Pinned
+    standard revisions are a property of a space's library — which
+    edition *this project* builds to — so a search that spans spaces has
+    no pin to apply and shows every revision. And `is_inherited` is
+    always false here: it means "reached from the space you asked about",
+    and this route asks about all of them. `space_id` still says where
+    each item lives.
+    """
+    sources: Select[tuple[uuid.UUID]] | list[uuid.UUID] = readable_item_space_ids(
+        user.id
+    )
+    if space is not None:
+        wanted = [s.strip() for s in space if s.strip()]
+        if not wanted:
+            # Every space filtered out — the space-filter twin of "every
+            # scope switched off", and the same answer.
+            return {"items": [], "total": 0}
+        rows = (
+            await db.execute(
+                select(Space.id, Space.slug).where(
+                    Space.slug.in_(wanted),
+                    Space.id.in_(readable_item_space_ids(user.id)),
+                )
+            )
+        ).all()
+        found = {slug for _id, slug in rows}
+        missing = [s for s in wanted if s not in found]
+        if missing:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                f"No such space: {', '.join(sorted(missing))}",
+            )
+        sources = [space_id for space_id, _slug in rows]
+
+    stmt = select(Item).where(Item.space_id.in_(sources))
+
+    if status_ is ItemStatus.active:
+        stmt = stmt.where(Item.deleted_at.is_(None))
+    elif status_ is ItemStatus.trashed:
+        stmt = stmt.where(Item.deleted_at.is_not(None))
+
+    search = _parse_search(q, scope)
+    if search.matches_nothing:
+        return {"items": [], "total": 0}
+    if search.where is not None:
+        stmt = stmt.where(search.where)
+
+    sort_columns = {
+        ItemSort.updated: Item.updated_at,
+        ItemSort.created: Item.created_at,
+        ItemSort.title_: Item.data["title"].astext,
+        ItemSort.type_: Item.item_type,
+    }
+    primary = sort_columns[sort]
+    primary = primary.asc() if direction is SortDirection.asc else primary.desc()
+    if search.rank is not None:
+        stmt = stmt.order_by(search.rank, primary, Item.id)
+    else:
+        stmt = stmt.order_by(primary, Item.id)
+
+    count_stmt = select(func.count()).select_from(stmt.order_by(None).subquery())
+    total = (await db.execute(count_stmt)).scalar_one()
+
+    result = await db.execute(stmt.limit(limit).offset(offset))
+    items = await _attach_collection_ids(db, list(result.scalars().all()))
     return {"items": items, "total": total}
 
 

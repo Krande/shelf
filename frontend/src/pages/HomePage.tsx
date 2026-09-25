@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { useNavigate } from "react-router";
-import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import {
   BookOpen,
   Check,
@@ -17,7 +17,7 @@ import {
   ALL_SEARCH_SCOPES,
   fetchFulltextHits,
   type FulltextHitsAttachment,
-  listItems,
+  searchMyItems,
   SEARCH_SCOPE_LABELS,
   type Item,
   type SearchScope,
@@ -25,6 +25,7 @@ import {
 import { listAttachments } from "@/api/attachments";
 import { fetchMySpaces } from "@/api/spaces";
 import SearchScopePopover from "@/components/library/SearchScopePopover";
+import SearchSpacePopover from "@/components/library/SearchSpacePopover";
 import ShortcutsHelp from "@/components/layout/ShortcutsHelp";
 
 /**
@@ -39,11 +40,20 @@ import ShortcutsHelp from "@/components/layout/ShortcutsHelp";
  * inspect. Info on each row still opens the item's detail panel in
  * /library, and Shift does the same from the keyboard. Title-only scope
  * keeps the query cheap so the dropdown feels instant.
+ *
+ * The search spans **every space the user can read**, not just their own
+ * shelf: the question here is "where is that document", and the answer is
+ * often in a space someone shared or one their shelf subscribes to. It is
+ * one request (`searchMyItems`) rather than one per space, which is also
+ * what keeps a document reachable two ways from being listed twice. The
+ * space popover beside the field takes libraries back out of the search —
+ * a ten-thousand-document Standards space is noise when you are after a
+ * project drawing. Rows say which space they came from when it isn't the
+ * user's own shelf.
  */
 export default function HomePage() {
   const auth = useAuth();
   const nav = useNavigate();
-  const qc = useQueryClient();
   const [q, setQ] = useState("");
   // Same semantics as LibraryPage: empty array = "narrowed past
   // every scope" (zero results), full array = "no scope= param,
@@ -58,15 +68,40 @@ export default function HomePage() {
     [scope],
   );
 
+  // Every space this search can cover: the user's own shelf, spaces
+  // shared with them, and the ones those subscribe to. Same query key
+  // LibraryPage uses for the wider list, so the two share a cache —
+  // and deliberately not ["spaces"], which feeds the space switcher and
+  // must stay a list of places you can *work*.
   const spaces = useQuery({
-    queryKey: ["spaces"],
-    queryFn: () => fetchMySpaces(),
+    queryKey: ["spaces", "with-inherited"],
+    queryFn: () => fetchMySpaces({ includeInherited: true }),
   });
+  const allSpaces = useMemo(() => spaces.data ?? [], [spaces.data]);
   const personal = useMemo(
-    () => spaces.data?.find((s) => s.is_personal) ?? spaces.data?.[0] ?? null,
-    [spaces.data],
+    () => allSpaces.find((s) => s.is_personal) ?? allSpaces[0] ?? null,
+    [allSpaces],
   );
-  const slug = personal?.slug ?? null;
+  // null = "not narrowed", which is different from "every slug selected":
+  // it survives a space being added or unshared while the page is open,
+  // and keeps `space=` off the query until the user actually filters.
+  const [spaceFilter, setSpaceFilter] = useState<string[] | null>(null);
+  const selectedSpaces = useMemo(
+    () => spaceFilter ?? allSpaces.map((s) => s.slug),
+    [spaceFilter, allSpaces],
+  );
+  // Sent to the API only once narrowed. Sorted into space-list order by
+  // the popover, so the query key is stable across click orders.
+  const spacesParam = spaceFilter === null ? undefined : selectedSpaces;
+  const spaceNames = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const s of allSpaces) m.set(s.id, s.name);
+    return m;
+  }, [allSpaces]);
+
+  // Enough spaces are loaded to search, and the user hasn't filtered
+  // every one of them out.
+  const canSearch = allSpaces.length > 0 && selectedSpaces.length > 0;
 
   // Live title-only suggestions. No debounce — the title-scope query
   // hits the JSONB title via ilike with a small limit, and the
@@ -74,16 +109,17 @@ export default function HomePage() {
   // Trimmed query under 2 chars is skipped to avoid full-table scans.
   const trimmed = q.trim();
   const suggestions = useQuery({
-    queryKey: ["home-suggest", slug, trimmed],
+    queryKey: ["home-suggest", spacesParam ?? "all", trimmed],
     queryFn: () =>
-      listItems(slug!, {
+      searchMyItems({
         q: trimmed,
+        spaces: spacesParam,
         scope: ["title"],
         limit: 8,
         sort: "updated",
         direction: "desc",
       }),
-    enabled: !!slug && trimmed.length >= 2,
+    enabled: canSearch && trimmed.length >= 2,
     staleTime: 30_000,
   });
 
@@ -111,16 +147,23 @@ export default function HomePage() {
   }, [trimmed]);
   const scopeCounts = useQueries({
     queries: COUNT_SCOPES.map((s) => ({
-      queryKey: ["home-scope", slug, debouncedQ, s, PER_SCOPE_LIMIT],
+      queryKey: [
+        "home-scope",
+        spacesParam ?? "all",
+        debouncedQ,
+        s,
+        PER_SCOPE_LIMIT,
+      ],
       queryFn: () =>
-        listItems(slug!, {
+        searchMyItems({
           q: debouncedQ,
+          spaces: spacesParam,
           scope: [s],
           limit: PER_SCOPE_LIMIT,
           sort: "updated" as const,
           direction: "desc" as const,
         }),
-      enabled: !!slug && debouncedQ.length >= 2,
+      enabled: canSearch && debouncedQ.length >= 2,
       staleTime: 30_000,
     })),
   });
@@ -173,6 +216,16 @@ export default function HomePage() {
 
   if (auth.status !== "authenticated") return null;
 
+  /**
+   * The library is one space at a time, so a cross-space search can only
+   * hand it a space when the filter names exactly one. Otherwise it opens
+   * where it always does — the personal shelf — and the dropdown stays
+   * the place the wider result set lives.
+   */
+  function spaceParam(): string | null {
+    return selectedSpaces.length === 1 ? selectedSpaces[0] : null;
+  }
+
   function onSubmit(e: FormEvent) {
     e.preventDefault();
     if (!trimmed) {
@@ -181,6 +234,8 @@ export default function HomePage() {
     }
     const params = new URLSearchParams();
     params.set("q", trimmed);
+    const one = spaceParam();
+    if (one) params.set("space", one);
     if (narrowed) {
       if (scope.length === 0) {
         // Sentinel kept in lock-step with LibraryPage's
@@ -362,32 +417,17 @@ export default function HomePage() {
   }, [items, sections, expandedFulltextIds, hitsByItemId]);
 
   function jumpToScope(s: SearchScope) {
-    // Pre-seed the library's infinite-query cache from the scope
-    // probe we already ran here, so /library renders the matches the
-    // user just clicked through to without a fresh round-trip. Keep
-    // the key shape in lock-step with LibraryPage's useInfiniteQuery
-    // — drift here silently degrades to a refetch.
-    const idx = COUNT_SCOPES.indexOf(s);
-    const data = idx >= 0 ? scopeCounts[idx].data : null;
-    if (slug && data) {
-      qc.setQueryData(
-        [
-          "items",
-          slug,
-          "active",       // status
-          "updated",      // sort
-          "desc",         // direction
-          trimmed,        // debouncedQuery.trim()
-          [] as string[], // filterTags
-          null,           // collectionParam
-          [s],            // searchScope
-        ],
-        { pageParams: [0], pages: [data] },
-      );
-    }
+    // This used to pre-seed the library's infinite-query cache from the
+    // probe already run here, saving a round trip. It can't any more: the
+    // probe spans every readable space and the cache it would seed
+    // belongs to a single-space listing, so the library would render
+    // other spaces' items as if they were its own. A refetch on arrival
+    // is the honest trade.
     const params = new URLSearchParams();
     params.set("q", trimmed);
     params.append("scope", s);
+    const one = spaceParam();
+    if (one) params.set("space", one);
     nav(`/library?${params.toString()}`);
   }
 
@@ -502,7 +542,7 @@ export default function HomePage() {
               onChange={(e) => setQ(e.target.value)}
               onKeyDown={onInputKeyDown}
               autoFocus
-              placeholder="Search your library…"
+              placeholder="Search your spaces…"
               className="flex-1 bg-transparent text-sm outline-none"
               style={{ color: "var(--color-text)" }}
               aria-autocomplete="list"
@@ -517,9 +557,31 @@ export default function HomePage() {
                 return `home-suggest-${en.item.id}`;
               })()}
             />
+            {allSpaces.length > 1 && (
+              <SearchSpacePopover
+                spaces={allSpaces}
+                selected={selectedSpaces}
+                onChange={(next) =>
+                  // Back to null — "not narrowed" — when everything is
+                  // selected again, so the query drops `space=` instead of
+                  // pinning today's space list into every request.
+                  setSpaceFilter(
+                    next.length === allSpaces.length ? null : next,
+                  )
+                }
+              />
+            )}
             <SearchScopePopover scope={scope} onChange={setScope} />
           </div>
         </form>
+        {canSearch === false && allSpaces.length > 0 && (
+          <p
+            className="mt-3 text-xs"
+            style={{ color: "var(--color-text-muted)" }}
+          >
+            Every space is filtered out — nothing to search.
+          </p>
+        )}
         {showDropdown &&
           (() => {
             // Renders a single suggestion row. flatIndex is the row's
@@ -550,7 +612,17 @@ export default function HomePage() {
                 0,
                 4,
               );
-              const subtitle = [creators, date].filter(Boolean).join(" · ");
+              // Which library this came out of, when it isn't the user's
+              // own shelf. Results now span every readable space, and
+              // "ACME 1234" means something different depending on whether
+              // it sits in Standards or in a project someone shared.
+              const from =
+                personal && item.space_id !== personal.id
+                  ? spaceNames.get(item.space_id)
+                  : null;
+              const subtitle = [creators, date, from]
+                .filter(Boolean)
+                .join(" · ");
               const active = flatIndex === activeIndex;
               const isExpanded =
                 isFulltext && expandedFulltextIds.has(item.id);

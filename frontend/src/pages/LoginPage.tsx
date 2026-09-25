@@ -1,13 +1,19 @@
 import { type FormEvent, useEffect, useState } from "react";
-import { Navigate } from "react-router";
+import { Navigate, useSearchParams } from "react-router";
 import { LogIn } from "lucide-react";
 import { apiFetch } from "@/api/client";
 import { fetchProviders, providerLabel } from "@/api/providers";
 import { startLogin, useAuth } from "@/auth/session";
+import { safeReturnTo } from "@/auth/returnTo";
 import { hardNavigate } from "@/lib/navigation";
 
 export default function LoginPage() {
   const auth = useAuth();
+  // Where a guard bounced the user from — a reader page and its ?page=,
+  // typically. Validated rather than trusted: it lands in a redirect, and
+  // an off-site value there would be an open redirect.
+  const [searchParams] = useSearchParams();
+  const next = safeReturnTo(searchParams.get("next"));
   const [providers, setProviders] = useState<string[] | null>(null);
   const [devLogin, setDevLogin] = useState(false);
   const [devEmail, setDevEmail] = useState("dev@localhost");
@@ -35,14 +41,15 @@ export default function LoginPage() {
       // Full reload rather than a router navigate: the session cookie is
       // set on this response, and a reload is the simplest way to make
       // every cached query re-run with it attached.
-      hardNavigate("/library");
+      hardNavigate(next ?? "/library");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setBusy(false);
     }
   }
 
-  if (auth.status === "authenticated") return <Navigate to="/library" replace />;
+  if (auth.status === "authenticated")
+    return <Navigate to={next ?? "/library"} replace />;
 
   return (
     <div className="flex h-screen items-center justify-center px-4">
@@ -60,7 +67,9 @@ export default function LoginPage() {
           className="mb-6 text-sm"
           style={{ color: "var(--color-text-muted)" }}
         >
-          Sign in to continue.
+          {next
+            ? "Your session has ended. Sign in to pick up where you left off."
+            : "Sign in to continue."}
         </p>
         {error && (
           <p className="mb-4 text-sm text-red-600" role="alert">
@@ -82,7 +91,7 @@ export default function LoginPage() {
           {providers?.map((p) => (
             <button
               key={p}
-              onClick={() => startLogin(p)}
+              onClick={() => startLogin(p, next)}
               className="flex items-center justify-center gap-2 rounded px-4 py-2 text-sm font-medium text-white hover:opacity-90"
               style={{ backgroundColor: "var(--color-accent)" }}
             >

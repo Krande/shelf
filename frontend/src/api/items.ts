@@ -143,6 +143,67 @@ export function listItems(
   );
 }
 
+/**
+ * Search every space the caller can read, in one request.
+ *
+ * The per-space listing answers "what is in this library"; this answers
+ * "where is that document", which is the landing page's question and has
+ * no single space to ask it of. The scope is what
+ * `fetchMySpaces({ includeInherited: true })` lists: spaces you own,
+ * spaces shared with you, and the ones those subscribe to.
+ *
+ * Each item comes back once however many of those reach it — a standard
+ * in a shared Standards space your own shelf also subscribes to included.
+ * That's the reason this is one endpoint and not a per-space fan-out in
+ * here: searching each space separately is what produces the duplicate.
+ *
+ * `spaces` narrows by slug, selecting on where an item *lives*. Inherited
+ * spaces are listed on their own in that same set, so leaving one out
+ * removes exactly its items. An empty array means "every space filtered
+ * out" and returns nothing, mirroring how `scope: []` means "no fields".
+ */
+export function searchMyItems(
+  opts: {
+    limit?: number;
+    offset?: number;
+    q?: string;
+    spaces?: string[];
+    status?: ItemStatus;
+    sort?: ItemSort;
+    direction?: SortDirection;
+    scope?: SearchScope[];
+  } = {},
+): Promise<ListItemsResponse> {
+  const params = new URLSearchParams();
+  if (opts.limit != null) params.set("limit", String(opts.limit));
+  if (opts.offset != null) params.set("offset", String(opts.offset));
+  if (opts.q && opts.q.trim()) params.set("q", opts.q.trim());
+  if (opts.status && opts.status !== "active") params.set("status", opts.status);
+  if (opts.sort && opts.sort !== "updated") params.set("sort", opts.sort);
+  if (opts.direction && opts.direction !== "desc") {
+    params.set("direction", opts.direction);
+  }
+  if (
+    opts.scope &&
+    opts.scope.length > 0 &&
+    opts.scope.length < ALL_SEARCH_SCOPES.length
+  ) {
+    for (const s of opts.scope) params.append("scope", s);
+  }
+  if (opts.spaces) {
+    if (opts.spaces.length === 0) {
+      // A single empty value, so "nothing selected" survives the trip as
+      // a filter rather than vanishing into "no space= param at all",
+      // which the server would read as "all of them".
+      params.append("space", "");
+    } else {
+      for (const s of opts.spaces) params.append("space", s);
+    }
+  }
+  const qs = params.toString();
+  return apiFetch<ListItemsResponse>(`/api/me/items${qs ? `?${qs}` : ""}`);
+}
+
 export function getItem(id: string): Promise<Item> {
   return apiFetch<Item>(`/api/items/${encodeURIComponent(id)}`);
 }

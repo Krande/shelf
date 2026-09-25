@@ -327,8 +327,21 @@ export default function LibraryPage() {
     [spaces.data],
   );
 
+  // ?space=<slug> opens the library on a space other than the personal
+  // one — how the landing page hands over a search it ran against a
+  // single space, so "see all" shows the results the dropdown just did
+  // rather than silently switching libraries. Only honoured while the
+  // user hasn't picked a space in the switcher, which is a deliberate
+  // action and outranks the URL that got them here. Ignored when it names
+  // a space they can't work in, so a stale link degrades to their shelf.
+  const spaceParam = searchParams.get("space");
+  const requestedSpace = useMemo<Space | null>(
+    () => spaces.data?.find((s) => s.slug === spaceParam) ?? null,
+    [spaces.data, spaceParam],
+  );
+
   const [activeSlug, setActiveSlug] = useState<string | null>(null);
-  const slug = activeSlug ?? personal?.slug ?? null;
+  const slug = activeSlug ?? requestedSpace?.slug ?? personal?.slug ?? null;
 
   // A space shared read-only. Hiding the write controls is cosmetic —
   // the API returns 403 either way — but offering a button that always
@@ -2020,7 +2033,7 @@ export default function LibraryPage() {
                                       : "Show PDF hits"
                                   }
                                   aria-expanded={isExpanded}
-                                  className="rounded p-0.5 hover:opacity-70"
+                                  className="shrink-0 rounded p-0.5 hover:opacity-70"
                                   style={{
                                     color: "var(--color-text-muted)",
                                   }}
@@ -2035,10 +2048,19 @@ export default function LibraryPage() {
                                 // Fixed-width spacer so titles in
                                 // non-fulltext groups still align with
                                 // their fulltext-group siblings.
-                                <span className="inline-block w-[18px]" />
+                                //
+                                // `shrink-0` is what makes it hold that
+                                // width. Without it the spacer is just
+                                // another flex item, so a title too long
+                                // for the column shrinks it — by a share
+                                // of the overflow, which means every row
+                                // gives up a different amount and the
+                                // column of titles starts at a different
+                                // x on each line.
+                                <span className="inline-block w-[18px] shrink-0" />
                               )}
                               <span
-                                className="truncate"
+                                className="min-w-0 truncate"
                                 title={itemTitle(it)}
                               >
                                 {itemTitle(it)}
