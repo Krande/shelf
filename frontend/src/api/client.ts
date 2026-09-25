@@ -8,11 +8,15 @@
  * need `credentials: "include"` to keep the cookie attached on
  * cross-fetch.
  *
- * On 401, callers can decide whether to redirect to login or to surface
- * the error in the UI. The default `apiFetch` throws ApiError; pages
- * that gate on auth state listen for status === 401 and bounce to the
- * configured OIDC provider via /auth/login/{provider}.
+ * Every 401 means the same thing here — no session, or one that has
+ * expired (see the backend's `auth/deps.py`) — so `apiFetch` reports it
+ * to `auth/expiry` as well as throwing. That is what turns a page full
+ * of "Unauthorized" errors into a trip to /login and back: see
+ * `useAuth` and ProtectedRoute. Callers still get the ApiError and can
+ * render it, for the moment before the redirect takes over.
  */
+
+import { markSessionExpired } from "@/auth/expiry";
 
 export class ApiError extends Error {
   status: number;
@@ -41,6 +45,7 @@ export async function apiFetch<T>(
   });
 
   if (!res.ok) {
+    if (res.status === 401) markSessionExpired();
     let body: unknown = null;
     try {
       body = await res.json();

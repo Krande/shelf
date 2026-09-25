@@ -17,7 +17,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -50,6 +50,38 @@ router = APIRouter(tags=["auth"])
 # SessionMiddleware, already mounted for PKCE/state) carries the intent to
 # link rather than replace. Popped by the callback.
 _LINK_INTENT = "shelf_link_intent"
+
+# Same store, carrying where to send the browser once the callback lands.
+# The SPA sets it when a guard bounced the user off a page — an expired
+# session mid-document, typically — and the point of the round trip is
+# that they come back to that page rather than to the library.
+_NEXT_TARGET = "shelf_next"
+
+# Longest `next` we'll carry. A cap only: the value goes into the
+# handshake cookie, and that has a size limit of its own.
+_MAX_NEXT_LENGTH = 2048
+
+
+def safe_next(value: str | None) -> str | None:
+    r"""Accept only same-origin, absolute-path redirect targets.
+
+    `next` ends up in a `Location` header, so anything that a browser
+    reads as having its own host — `//evil.example`, or `/\evil.example`,
+    which several browsers normalise to the same thing — has to be
+    rejected, or this is an open redirect. Control characters go too: they
+    are the usual way of smuggling one past a check like this.
+    """
+    if not value:
+        return None
+    if len(value) > _MAX_NEXT_LENGTH:
+        return None
+    if not value.startswith("/"):
+        return None
+    if value.startswith("//") or value.startswith("/\\"):
+        return None
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in value):
+        return None
+    return value
 
 
 def _set_session_cookie(response: Response, token: str, *, max_age: int) -> None:
@@ -84,10 +116,21 @@ async def list_providers() -> ProviderListResponse:
 
 
 @router.get("/auth/login/{provider}")
-async def login(provider: str, request: Request) -> Response:
+async def login(
+    provider: str,
+    request: Request,
+    next: Annotated[
+        str | None, Query(description="Same-origin path to return to after login")
+    ] = None,
+) -> Response:
     if not is_known_provider(provider):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown OIDC provider")
     request.session.pop(_LINK_INTENT, None)
+    target = safe_next(next)
+    if target is None:
+        request.session.pop(_NEXT_TARGET, None)
+    else:
+        request.session[_NEXT_TARGET] = target
     client = oauth.create_client(provider)
     redirect_uri = f"{settings.public_base_url.rstrip('/')}/auth/callback/{provider}"
     response: Response = await client.authorize_redirect(request, redirect_uri)
@@ -114,6 +157,10 @@ async def link(
     read_session(session_token)  # 401 if there's nothing to link to
 
     request.session[_LINK_INTENT] = True
+    # Linking deliberately lands back on "/": the active account may have
+    # changed, and everything cached under the old one has to go. Drop any
+    # target a previous login attempt left behind.
+    request.session.pop(_NEXT_TARGET, None)
     client = oauth.create_client(provider)
     redirect_uri = f"{settings.public_base_url.rstrip('/')}/auth/callback/{provider}"
 
@@ -137,6 +184,10 @@ async def callback(
     if not is_known_provider(provider):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown OIDC provider")
     linking = bool(request.session.pop(_LINK_INTENT, False))
+    # Re-validated on the way out as well as in: the handshake cookie is
+    # the client's, so the value crossing back is not more trustworthy
+    # than the one that arrived.
+    next_target = safe_next(request.session.pop(_NEXT_TARGET, None))
     client = oauth.create_client(provider)
 
     # The provider can decline instead of returning a code — the user
@@ -211,7 +262,9 @@ async def callback(
         account_ids=(*existing, user.id),
         expires_at=expires_at,
     )
-    redirect = RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
+    redirect = RedirectResponse(
+        url=next_target or "/", status_code=status.HTTP_303_SEE_OTHER
+    )
     _set_session_cookie(redirect, new_token, max_age=_remaining(expires_at))
     return redirect
 
