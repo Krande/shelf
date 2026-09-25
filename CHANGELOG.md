@@ -2,6 +2,15 @@
 
 
 
+## v0.10.1 (2026-09-25)
+
+### Fix
+
+* fix(deps): build the images from pixi.lock, the one place versions are decided (#13)
+
+Co-authored-by: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`36055ee`](https://github.com/Krande/shelf/commit/36055eecc719fc5dd6c5adbf99837e2091f46afc))
+
+
 ## v0.10.0 (2026-09-25)
 
 ### Feature
