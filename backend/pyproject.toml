@@ -1,6 +1,6 @@
 [project]
 name = "shelf"
-version = "0.10.1"
+version = "0.10.2"
 description = "Web library and document management server"
 requires-python = ">=3.12"
 # No dependency list, by design: pixi.toml and pixi.lock decide every package

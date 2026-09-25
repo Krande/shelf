@@ -2,6 +2,15 @@
 
 
 
+## v0.10.2 (2026-09-25)
+
+### Fix
+
+* fix(image): restore the system CA bundle, and drop 455 MB while there (#14)
+
+Co-authored-by: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`806208a`](https://github.com/Krande/shelf/commit/806208ab7c59dc4491231b77911c22f06bc2fa29))
+
+
 ## v0.10.1 (2026-09-25)
 
 ### Fix
