@@ -3,16 +3,11 @@ name = "shelf-migrate"
 version = "0.0.0"
 description = "One-shot Zotero (MariaDB + Garage S3) → Shelf (Postgres + Garage S3) importer."
 requires-python = ">=3.12"
-dependencies = [
-    "shelf",
-    "aiomysql>=0.2",
-    "obstore>=0.9",
-    "pydantic>=2",
-    "pydantic-settings>=2",
-    "sqlalchemy>=2.0",
-    "asyncpg>=0.30",
-    "beautifulsoup4>=4.12",
-]
+# Empty for the same reason as backend/pyproject.toml: pixi.toml and pixi.lock
+# are where versions are decided. The importer's own needs — aiomysql and
+# beautifulsoup4 on top of the base set — live in pixi.toml's `dev` feature,
+# which is also the only environment that installs this package.
+dependencies = []
 
 [build-system]
 requires = ["hatchling"]

@@ -3,60 +3,23 @@ name = "shelf"
 version = "0.10.0"
 description = "Web library and document management server"
 requires-python = ">=3.12"
-dependencies = [
-    "fastapi>=0.115",
-    "uvicorn[standard]>=0.30",
-    "sqlalchemy>=2.0",
-    "asyncpg>=0.30",
-    "alembic>=1.18",
-    "pydantic>=2",
-    "pydantic-settings>=2",
-    "authlib>=1.3",
-    "joserfc>=1.0",
-    "httpx>=0.27",
-    "python-multipart>=0.0.10",
-    "obstore>=0.9",
-    "itsdangerous>=2.2",
-    "pypdf>=5.0",
-    "nats-py>=2.6",
-    # PyMuPDF powers the outline worker (font-heuristic heading
-    # detection + set_toc) on the CPU pod. ~30 MB wheel, no native
-    # GPU deps, so safe to keep in the base install.
-    "pymupdf",
-]
-
-[project.optional-dependencies]
-# CPU-tier OCR engine. Split into its own extra because ocrmypdf
-# pins pypdfium2>=5.0 while marker-pdf (in the [gpu] extra) pulls
-# in pdftext, which transitively pins pypdfium2==4.30.0 — the two
-# can't coexist in one environment. Each image installs only the
-# extras it actually runs:
+# No dependency list, by design: pixi.toml and pixi.lock decide every package
+# version for this project, local and in the images alike. Duplicating the
+# list here is how the two drifted apart in the first place — the images
+# resolved these specs from PyPI at build time while CI ran the lockfile, so a
+# dependency could change under production without a single test noticing. It
+# did: see the greenlet note in pixi.toml's `[dependencies]`.
 #
-#   CPU image  →  pip install '.[ocr]'
-#   GPU image  →  pip install '.[gpu]'
-ocr = [
-    # ocrmypdf 17 introduced the positional ocr() signature the
-    # Phase B worker uses. 16.x would still work but we've moved on.
-    "ocrmypdf>=17.0",
-]
-
-# GPU-only ML deps. shelf.worker.olmocr_runner lazy-imports these
-# inside its entry point so importing the worker module on the CPU
-# pod stays free.
+# What used to be the `[ocr]` and `[gpu]` extras are pixi features of the same
+# names. They exist because ocrmypdf pins pypdfium2>=5.0 while marker-pdf (via
+# olmocr) pins ==4.30.0, so the two OCR tiers cannot share an environment —
+# `[environments]` in pixi.toml keeps them apart and each image installs one.
 #
-# Outline generation is no longer here — it runs on the CPU pod
-# (shelf.worker.outline) using the PyMuPDF font heuristic, which
-# needs no GPU. The GPU pod only does the OCR itself; once the
-# OCR'd PDF is uploaded the workflow chains an outline job that any
-# CPU worker picks up.
-gpu = [
-    # olmOCR-2 (Qwen2.5-VL-7B) — high-quality OCR for complex docs.
-    "olmocr",
-    "transformers",
-    "accelerate",
-    "compressed-tensors",
-    "bitsandbytes",
-]
+# Installing this package with pip alone therefore gets you the code and no
+# dependencies. That is a deliberate trade: shelf is a deployed application,
+# not a library anyone pip-installs, and the one place versions are decided is
+# worth more than pip-installability.
+dependencies = []
 
 [build-system]
 requires = ["hatchling"]
@@ -93,8 +56,8 @@ module = "authlib.*"
 ignore_missing_imports = true
 
 # The GPU worker's ML stack plus PyMuPDF. torch / transformers / olmocr live
-# in the `[gpu]` extra and are deliberately absent from the default (and CI)
-# environment — shelf.worker.olmocr_runner lazy-imports them inside its entry
+# in pixi.toml's `gpu` feature and are deliberately absent from the default
+# (and CI) environment — shelf.worker.olmocr_runner lazy-imports them inside its entry
 # points precisely so the CPU image never installs them. fitz (PyMuPDF) *is*
 # installed but ships no py.typed marker. Neither case is something a type
 # annotation here can resolve, so the imports are exempted rather than left to

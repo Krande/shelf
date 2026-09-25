@@ -4,10 +4,11 @@ name: Typecheck
 # workflows so it reports its own required status check.
 #
 # The GPU worker's ML imports (torch, transformers, olmocr) are absent from
-# this environment by design — they live in the `[gpu]` extra and are
-# lazy-imported inside the runner's entry points. pyproject.toml exempts those
-# modules from the missing-stub error, so this job checks the code that
-# actually ships in the CPU image without needing a multi-GB CUDA install.
+# this environment by design — they live in pixi.toml's `gpu` feature, which
+# only the `gpu` environment installs, and are lazy-imported inside the
+# runner's entry points. pyproject.toml exempts those modules from the
+# missing-stub error, so this job checks the code that actually ships in the
+# CPU image without needing a multi-GB CUDA install.
 on:
   pull_request:
     branches: [main]

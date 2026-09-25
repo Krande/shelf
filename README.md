@@ -16,7 +16,7 @@ I wanted a reference manager I could run on my own hardware, that kept the PDFs 
 - Bulk select, bulk add-to-collection, and a ZIP download that serves each document's current best version.
 - Spaces as the unit of ownership and sharing, so the schema doesn't need reworking if more than one person ever uses an instance.
 - OIDC login against any compliant provider, plus scoped API tokens for scripts.
-- One Docker image (API + built SPA), and a Helm chart if you're on Kubernetes.
+- One Docker image (API + built SPA), and a Helm chart if you're on Kubernetes. The image installs the locked pixi environment, so what CI tested is what runs.
 
 ## Quick start (local dev)
 
@@ -26,6 +26,23 @@ Requires [pixi](https://pixi.sh) and Docker.
 pixi install
 pixi run up                  # everything, in one terminal
 ```
+
+### Dependencies
+
+`pixi.toml` and `pixi.lock` decide every package version — locally, in CI, and
+in the container images, which install the locked `prod` (or `gpu`) environment
+rather than resolving anything of their own. Packages come from conda-forge
+unless they aren't published there; each `[pypi-dependencies]` entry in
+`pixi.toml` says which case it is. Neither `pyproject.toml` lists runtime
+dependencies: they hold build metadata only, and a `pip install .` of this
+repo deliberately installs no dependencies.
+
+To change a dependency: edit `pixi.toml`, run `pixi lock`, commit the lockfile
+with it. CI installs with `--locked` and fails on a stale lock, which is the
+point — a dependency release cannot reach production without a diff someone
+reviewed. It once did: SQLAlchemy 2.1.0 moved greenlet behind an extra, the
+images resolved it from PyPI at build time, and every pod died on startup with
+CI green on the lockfile's 2.0.49 throughout.
 
 `up` starts Postgres + Redis + Gotenberg + an object store and waits on their healthchecks, applies migrations, installs the frontend's `node_modules` if they're missing, then runs the backend (`:8000`) and the vite dev server (`:5173`) side by side with prefixed output. Ctrl-C stops both servers; the containers stay up so the next `up` is quick. `pixi run dev-down` stops those when you're done.
 

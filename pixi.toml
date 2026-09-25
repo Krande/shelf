@@ -3,15 +3,40 @@ name = "shelf"
 channels = ["conda-forge"]
 platforms = ["linux-64", "osx-arm64", "win-64"]
 
+# ── Dependencies ─────────────────────────────────────────────────────────────
+#
+# **This file and pixi.lock decide every package version, everywhere.** The
+# container images install the locked `prod` environment rather than resolving
+# their own set, so what CI tests is what ships. Neither pyproject.toml lists
+# runtime dependencies any more: they carry build metadata, and the versions
+# live here.
+#
+# That split is not academic. While the images ran `pip install .` against
+# unpinned specs, SQLAlchemy 2.1.0 landed on PyPI, moved greenlet behind an
+# extra, and every pod died on `import sqlalchemy.ext.asyncio` — with CI green
+# throughout, because CI runs this lockfile and conda-forge had not built 2.1.
+#
+# Packages come from conda-forge unless there is a reason they cannot; each
+# `[pypi-dependencies]` entry below says what its reason is.
+#
+# Base dependencies belong to every environment, so what is here is what the
+# API and the worker need to *run*. Tooling goes in `[feature.dev]`.
+
 [dependencies]
 python = ">=3.12,<3.13"
-# Node version is pinned here so local dev (pixi run frontend-*) and the
-# Docker build stage agree. Bump in lockstep with the FROM line in the
-# top-level Dockerfile.
-nodejs = ">=22,<23"
 fastapi = ">=0.115"
-uvicorn = "*"
+# `uvicorn-standard`, not bare `uvicorn`: it is conda-forge's spelling of
+# PyPI's `uvicorn[standard]`, which is what the image installed before this
+# file became the source of versions. It pulls uvloop, httptools and the
+# websockets support — dropping those would have quietly made production
+# slower on every request.
+uvicorn-standard = "*"
 sqlalchemy = ">=2.0"
+# SQLAlchemy 2.1 stopped installing greenlet, and every engine in shelf is
+# async — without it `import sqlalchemy.ext.asyncio` raises, which is exactly
+# how the pods above died. Named as a package of its own because conda-forge
+# ships no `[asyncio]` extra to ask for.
+greenlet = "*"
 asyncpg = "*"
 alembic = "*"
 pydantic = ">=2"
@@ -23,37 +48,134 @@ python-multipart = "*"
 itsdangerous = "*"
 pypdf = "*"
 nats-py = "*"
+# PyMuPDF powers the outline worker's font-heuristic heading detection.
+pymupdf = "*"
+
+[pypi-dependencies]
+# The app itself. Editable so a source edit is live in the pixi env; the
+# images copy `backend/` to the same path the lock records, so the same entry
+# serves both.
+shelf = { path = "./backend", editable = true }
+# Object store client, not published on conda-forge.
+obstore = "*"
+
+# ── Tooling ──────────────────────────────────────────────────────────────────
+# Tests, linters, the frontend toolchain, and the one-shot importer. In the
+# `default` environment, deliberately absent from `prod` — none of it belongs
+# in a runtime image.
+
+[feature.dev.dependencies]
+# Node major is pinned here so local dev (pixi run frontend-*) and the SPA
+# build stage agree. Bump in lockstep with the FROM line in the Dockerfile.
+nodejs = ">=22,<23"
 pytest = "*"
 pytest-asyncio = "*"
 ruff = "*"
 mypy = "*"
 hatchling = "*"
+beautifulsoup4 = "*"
 
-[pypi-dependencies]
-shelf = { path = "./backend", editable = true }
+[feature.dev.pypi-dependencies]
+# Nothing imports arq any more — the queue is NATS JetStream — so it is here
+# rather than in the runtime set, where it would be shipped unused. It never
+# reached the images anyway, since the old pyproject.toml didn't list it.
+# A candidate for deletion outright.
+arq = "*"
 shelf-migrate = { path = "./migrate", editable = true }
 # The CLI ships its own pixi-build manifest so it can be installed on its
 # own (`pixi global install shelf-cli --git … --subdirectory cli`); this
-# entry is just so a checkout has `shelf` on PATH without a second step.
+# entry is just so a checkout has `shelf` on PATH without a second step. Its
+# own pyproject keeps its dependency list, since that install has no access
+# to this workspace's lock.
 shelf-cli = { path = "./cli", editable = true }
-arq = "*"
-obstore = "*"
+# Only the legacy Zotero importer needs a MySQL driver, and conda-forge has
+# no aiomysql.
 aiomysql = "*"
-beautifulsoup4 = "*"
-# Force PyPI resolution: conda-forge only has 14.2 which is
-# incompatible with the pikepdf pulled in elsewhere. Floor at 17
-# because the worker uses the 17.x positional ocr() signature.
-ocrmypdf = ">=17.0"
 
-# Phase B (OCR worker). Tesseract + ghostscript come from conda-forge
-# (linux only — Mac/Win pixi envs don't run the worker locally; the
-# binaries land via apt in the container). The Python package itself
-# is pulled from PyPI everywhere because conda-forge's ocrmypdf is
-# pinned to an older pikepdf API that breaks with current pikepdf.
-[target.linux-64.dependencies]
+# ── CPU OCR tier (Phase B) ───────────────────────────────────────────────────
+# ocrmypdf and the binaries it shells out to. Linux-only for the binaries:
+# Mac and Windows pixi envs don't run the worker, and this is what the image
+# installs instead of an apt layer.
+
+[feature.ocr.target.linux-64.dependencies]
 tesseract = "*"
 ghostscript = "*"
 pngquant = "*"
+qpdf = "*"
+# Optional for ocrmypdf, but it improves scan quality cheaply.
+unpaper = "*"
+
+[feature.ocr.pypi-dependencies]
+# Forced to PyPI: conda-forge only has 14.2, which is incompatible with the
+# pikepdf pulled in elsewhere. Floor at 17 because the worker uses the 17.x
+# positional ocr() signature.
+ocrmypdf = ">=17.0"
+
+# ── Environments ─────────────────────────────────────────────────────────────
+#
+# `default` is a developer's env: runtime, tooling and the OCR tier.
+# `prod` is what the container image installs — the same runtime and OCR
+# packages with nothing to test or lint with.
+#
+# One solve group, so the two resolve to *identical* versions. That is the
+# point of this arrangement: a version CI has not run cannot reach a pod.
+
+# ── GPU OCR tier (olmOCR / Qwen2.5-VL-7B) ────────────────────────────────────
+# linux-64 only: these are CUDA wheels and the tier runs on one host with an
+# NVIDIA card, so there is nothing to solve for Mac or Windows.
+
+[feature.gpu]
+platforms = ["linux-64"]
+
+[feature.gpu.dependencies]
+# The binaries olmOCR and pikepdf shell out to. Same packages the CPU tier
+# uses, minus ocrmypdf — see the solve-group note below for why the Python
+# side cannot be shared.
+poppler = "*"
+tesseract = "*"
+ghostscript = "*"
+unpaper = "*"
+pngquant = "*"
+qpdf = "*"
+
+[feature.gpu.pypi-options]
+# PyTorch's own index, which is where the cu124 builds live. None of this is on
+# conda-forge in a cu124 flavour.
+extra-index-urls = ["https://download.pytorch.org/whl/cu124"]
+
+[feature.gpu.pypi-dependencies]
+# torch<2.7 keeps Pascal (sm_61) in the default cu124 wheel — the 2.7 release
+# line dropped sm_61 from stock builds. Operators on Turing or newer can lift
+# this; on Pascal cards it is load-bearing.
+torch = "<2.7"
+torchvision = "<0.22"
+# olmOCR-2 (Qwen2.5-VL-7B) — high-quality OCR for complex documents.
+# shelf.worker.olmocr_runner lazy-imports these inside its entry point, so
+# importing the worker module on the CPU tier stays free of them.
+olmocr = "*"
+transformers = "*"
+accelerate = "*"
+compressed-tensors = "*"
+bitsandbytes = "*"
+
+# ── Environments ─────────────────────────────────────────────────────────────
+#
+# `default` is a developer's env: runtime, tooling and the OCR tier.
+# `prod` is what the CPU image installs — the same runtime and OCR packages
+# with nothing to test or lint with. `gpu` is the GPU worker image.
+#
+# default and prod share a solve group, so the two resolve to *identical*
+# versions. That is the point of this arrangement: a version CI has not run
+# cannot reach a pod.
+#
+# gpu gets its own group because it cannot share one: ocrmypdf pins
+# pypdfium2>=5.0 while marker-pdf, which olmocr pulls in, pins ==4.30.0. That
+# is also why the two tiers are separate images rather than one.
+
+[environments]
+default = { features = ["dev", "ocr"], solve-group = "shelf" }
+prod = { features = ["ocr"], solve-group = "shelf" }
+gpu = { features = ["gpu"], solve-group = "gpu" }
 
 # ── Local dev ────────────────────────────────────────────────────────────────
 

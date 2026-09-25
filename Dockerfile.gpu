@@ -12,75 +12,60 @@
 #
 # The GPU pod consumes the same JetStream stream the CPU worker
 # subscribes to; different durables and subjects, no overlap.
+#
+# Packages come from pixi.lock's `gpu` environment, like every other image
+# here — see the header of pixi.toml for why that is not negotiable. The
+# CUDA wheels are the one thing in this project fetched from an index other
+# than conda-forge, because no conda-forge build carries cu124.
 
+# ── Stage 1: install the locked gpu environment ───────────────────────────────
+FROM ghcr.io/prefix-dev/pixi:0.78.0-bookworm AS build
+
+WORKDIR /app
+COPY pixi.toml pixi.lock ./
+COPY backend ./backend
+# `--locked` validates the whole manifest, so the other path dependencies have
+# to be readable even though the gpu environment installs neither.
+COPY migrate ./migrate
+COPY cli ./cli
+RUN pixi install --locked --environment gpu
+
+# ── Stage 2: runtime on the CUDA base ────────────────────────────────────────
+#
 # 12.6.3 is the latest stable tag in the cu12 series long-lived on
 # Docker Hub — 12.4.0 was already retired. Pascal (sm_60/sm_61) is
 # still supported in 12.x; only Maxwell sm_50/sm_52 was dropped on
 # the way to CUDA 13. cu124 PyTorch wheels run forward-compatibly
-# on a 12.6 runtime. Ubuntu 24.04 ships python3.12 in the default
-# repos which we need for shelf's `requires-python = ">=3.12"`.
+# on a 12.6 runtime.
 FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
     DEBIAN_FRONTEND=noninteractive \
     HF_HOME=/app/.cache/huggingface
 
-WORKDIR /app
-
-# Python 3.12 ships in Ubuntu 24.04 default repos. Plus the system
-# libs that pikepdf / pymupdf and the (optional) Tesseract OCR path
-# need.
+# The only apt left, and not dependency management: ca-certificates for the
+# base image's own TLS trust, and libgomp for the OpenMP runtime the CUDA
+# wheels expect from the system rather than bundling. Python, poppler,
+# tesseract, ghostscript and the rest arrive in the locked environment below.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        python3.12 \
-        python3.12-venv \
-        ca-certificates \
-        libgomp1 \
-        # OCR system deps — the GPU worker can also process Tesseract
-        # jobs if the operator opts in via
-        # SHELF_WORKER_CONSUMERS=ocr,ocr-gpu.
-        tesseract-ocr \
-        tesseract-ocr-eng \
-        ghostscript \
-        unpaper \
-        pngquant \
-        poppler-utils \
-        qpdf \
+    && apt-get install -y --no-install-recommends ca-certificates libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install the application + the [gpu] extras, which pulls in
-# olmocr + transformers + accelerate + bitsandbytes + pymupdf
-# alongside the standard worker deps.
-COPY backend/pyproject.toml ./
-COPY backend/src ./src
-COPY backend/alembic ./alembic
-COPY backend/alembic.ini ./
+# Copied to the same absolute path it was built at: a conda environment has
+# that prefix compiled into its scripts and libraries.
+COPY --from=build /app/.pixi/envs/gpu /app/.pixi/envs/gpu
+COPY --from=build /app/backend /app/backend
 
-# uv (Astral's Rust-based pip replacement) instead of pip: dramatically
-# faster + much lower memory usage during dep resolution. pip's
-# resolver was OOM-killing the build on memory-constrained hosts
-# (the GPU dep set is heavy: torch + transformers + olmocr + marker
-# all pull in their own pinned graphs). uv resolves the same set in
-# seconds with a fraction of the memory.
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+# Activation by ENV, not by an entrypoint script: this image's command is
+# overridden at the deployment level (pixi.toml's `gpu-run` task, and the chart
+# for in-cluster pods), and a wrapper would not run for those.
+ENV PATH=/app/.pixi/envs/gpu/bin:$PATH
+# Normally set by conda-forge's tesseract activation hook, which nothing
+# activates here.
+ENV TESSDATA_PREFIX=/app/.pixi/envs/gpu/share/tessdata
 
-# Build into /opt/venv. Single-purpose container, but a venv keeps
-# us out of PEP 668's externally-managed-environment territory and
-# makes the install set easy to bind-mount for debugging.
-ENV VIRTUAL_ENV=/opt/venv
-ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
-RUN uv venv --python 3.12 ${VIRTUAL_ENV}
-
-# torch<2.7 keeps Pascal (sm_61) in the default cu124 wheel — the
-# 2.7 release line dropped sm_61 from stock builds. Operators on
-# Turing or newer can lift this; on Pascal cards it's load-bearing.
-RUN uv pip install \
-        --extra-index-url https://download.pytorch.org/whl/cu124 \
-        'torch<2.7' 'torchvision<0.22' \
-    && uv pip install '.[gpu]'
+WORKDIR /app/backend
 
 # Image tag is stamped at build time so the worker can surface "I am
 # running sha-XXXXX" in the same way the CPU image does.
@@ -98,6 +83,13 @@ RUN mkdir -p ${HF_HOME} \
     && useradd -r -u 1000 shelf \
     && chown -R 1000:1000 /app
 USER 1000
+
+# Fail the build rather than a GPU pod: the worker imports, torch is the cu124
+# build, and the binaries olmOCR shells out to are on PATH. torch.cuda is not
+# checked — there is no GPU in a build container.
+RUN python -c "import shelf.worker, torch, sys; sys.exit(0 if torch.version.cuda.startswith('12') else 1)" \
+ && pdftoppm -v \
+ && tesseract --list-langs 2>&1 | grep -qx eng
 
 # The worker process. SHELF_WORKER_CONSUMERS picks which JetStream
 # subject(s) this pod consumes; default to ocr-gpu so the GPU image
