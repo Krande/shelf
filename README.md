@@ -10,7 +10,7 @@ I wanted a reference manager I could run on my own hardware, that kept the PDFs 
 
 - Items with type-specific metadata (JSONB, so item types change without a migration), nested collections, tags, notes, creators.
 - An in-browser PDF reader with annotations, a generated outline, and pinch-zoom. Highlights are linkable — **Copy link** on one gives a URL that opens the document at that passage and rings it.
-- Search over item metadata and the text extracted from each PDF page, using Postgres `tsvector` + GIN with trigram indexes for fuzzy title matching. No separate search service.
+- Search over item metadata and the text extracted from each PDF page, using Postgres `tsvector` + GIN with trigram indexes for fuzzy title matching. No separate search service. The landing page searches every space you can read at once — your own shelf, spaces shared with you, and the ones those subscribe to — listing each document once no matter how many of those reach it, with a filter for taking a noisy library back out.
 - Background OCR and text extraction: Tesseract (via `ocrmypdf`) on CPU, and optionally [olmOCR](https://github.com/allenai/olmocr) on a GPU host for scans Tesseract mangles. Originals are kept; OCR output becomes a new version you can switch between.
 - Export to BibTeX, CSL-JSON, and Zotero RDF — the last optionally bundled as a ZIP with the files, in the layout Zotero's own translator produces.
 - Bulk select, bulk add-to-collection, and a ZIP download that serves each document's current best version.
