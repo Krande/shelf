@@ -28,7 +28,28 @@ COPY backend ./backend
 # to be readable even though the gpu environment installs neither.
 COPY migrate ./migrate
 COPY cli ./cli
-RUN pixi install --locked --environment gpu
+RUN --mount=type=cache,target=/root/.cache/rattler,sharing=locked \
+    pixi install --locked --environment gpu
+
+# Which Tesseract languages to keep — see the same ARG in the CPU Dockerfile.
+# conda-forge ships all 125 models at 340 MB, which matters more here than
+# anywhere: this image is already large enough that CI cannot build it.
+ARG TESSERACT_LANGS="eng osd"
+
+# Strip what a runtime has no use for, before the COPY that carries the
+# environment into the final image. `configs/`, `tessconfigs/` and `pdf.ttf`
+# stay: tesseract's PDF renderer reads all three.
+RUN set -eu; \
+    env_dir=/app/.pixi/envs/gpu; \
+    keep=""; \
+    for lang in ${TESSERACT_LANGS}; do keep="${keep} -not -name ${lang}.traineddata"; done; \
+    find "${env_dir}/share/tessdata" -maxdepth 1 -name '*.traineddata' ${keep} -delete; \
+    rm -rf "${env_dir}/include" \
+           "${env_dir}/share/doc" \
+           "${env_dir}/share/man" \
+           "${env_dir}/share/info" \
+           "${env_dir}/share/gir-1.0"; \
+    find "${env_dir}" -name '*.a' -delete
 
 # ── Stage 2: runtime on the CUDA base ────────────────────────────────────────
 #
@@ -64,6 +85,13 @@ ENV PATH=/app/.pixi/envs/gpu/bin:$PATH
 # Normally set by conda-forge's tesseract activation hook, which nothing
 # activates here.
 ENV TESSDATA_PREFIX=/app/.pixi/envs/gpu/share/tessdata
+# conda's OpenSSL bakes its CA path to the build prefix; the environment is
+# copied to that same path above, so this is belt and braces rather than a
+# requirement — but it means a future move fails visibly instead of turning
+# into unverifiable TLS at runtime. Distinct from the system trust store that
+# the apt ca-certificates above provides for non-Python clients.
+ENV SSL_CERT_FILE=/app/.pixi/envs/gpu/ssl/cacert.pem \
+    SSL_CERT_DIR=/app/.pixi/envs/gpu/ssl/certs
 
 WORKDIR /app/backend
 
@@ -89,7 +117,10 @@ USER 1000
 # checked — there is no GPU in a build container.
 RUN python -c "import shelf.worker, torch, sys; sys.exit(0 if torch.version.cuda.startswith('12') else 1)" \
  && pdftoppm -v \
- && tesseract --list-langs 2>&1 | grep -qx eng
+ && tesseract --list-langs 2>&1 | grep -qx eng \
+ && test -f /app/.pixi/envs/gpu/share/tessdata/pdf.ttf \
+ && test -s /etc/ssl/certs/ca-certificates.crt \
+ && test -s "$SSL_CERT_FILE"
 
 # The worker process. SHELF_WORKER_CONSUMERS picks which JetStream
 # subject(s) this pod consumes; default to ocr-gpu so the GPU image

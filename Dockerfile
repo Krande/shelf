@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+
 # ── Stage 1: build the SPA ───────────────────────────────────────────────────
 # Keep this in lockstep with `nodejs = ">=22,<23"` in pixi.toml's `dev`
 # feature so local pixi runs and the container build agree on Node major.
@@ -40,7 +42,34 @@ COPY backend ./backend
 # alone would do; copying the directories keeps the COPY lines honest.
 COPY migrate ./migrate
 COPY cli ./cli
-RUN pixi install --locked --environment prod
+RUN --mount=type=cache,target=/root/.cache/rattler,sharing=locked \
+    pixi install --locked --environment prod
+
+# Which Tesseract languages to keep. conda-forge's tesseract ships all 125
+# models — 340 MB, where the apt package this replaced installed English alone
+# at 4 MB. The rest are deleted here rather than carried into the runtime
+# layer; add a language by listing it (and rebuilding), e.g. "eng osd deu".
+# `osd` is orientation-and-script detection, which ocrmypdf uses to fix rotated
+# scans, so it earns its 11 MB.
+ARG TESSERACT_LANGS="eng osd"
+
+# Strip what a runtime has no use for, before the COPY that carries the
+# environment into the final image. Headers, static libraries, documentation
+# and GObject introspection XML are build-time artefacts; everything removed
+# here is inert at runtime, and `configs/`, `tessconfigs/` and `pdf.ttf` are
+# deliberately kept — tesseract's PDF renderer, which is how ocrmypdf produces
+# a searchable file, reads all three.
+RUN set -eu; \
+    env_dir=/app/.pixi/envs/prod; \
+    keep=""; \
+    for lang in ${TESSERACT_LANGS}; do keep="${keep} -not -name ${lang}.traineddata"; done; \
+    find "${env_dir}/share/tessdata" -maxdepth 1 -name '*.traineddata' ${keep} -delete; \
+    rm -rf "${env_dir}/include" \
+           "${env_dir}/share/doc" \
+           "${env_dir}/share/man" \
+           "${env_dir}/share/info" \
+           "${env_dir}/share/gir-1.0"; \
+    find "${env_dir}" -name '*.a' -delete
 
 # ── Stage 3: runtime ─────────────────────────────────────────────────────────
 FROM debian:bookworm-slim
@@ -57,7 +86,10 @@ ENV SHELF_IMAGE_TAG=${DOCKER_IMAGE_TAG}
 
 # The environment is copied to the same absolute path it was built at: a conda
 # environment has that prefix compiled into scripts and shared-library headers,
-# so moving it elsewhere breaks binaries in ways that surface much later.
+# so moving it elsewhere breaks things that surface much later. OpenSSL is the
+# one to know about — it bakes OPENSSLDIR to the build prefix, so an env copied
+# to a different path silently loses its CA bundle and every TLS verification
+# from Python starts failing.
 COPY --from=build /app/.pixi/envs/prod /app/.pixi/envs/prod
 COPY --from=build /app/backend /app/backend
 COPY --from=frontend /app/dist /app/frontend
@@ -72,6 +104,27 @@ ENV PATH=/app/.pixi/envs/prod/bin:$PATH
 # activates here. ocrmypdf shells out to tesseract, and tesseract without this
 # finds no language data at all.
 ENV TESSDATA_PREFIX=/app/.pixi/envs/prod/share/tessdata
+# Belt and braces for the OPENSSLDIR coupling described above: named
+# explicitly, so a future move of the environment fails visibly at build time
+# instead of turning into unverifiable TLS at runtime.
+ENV SSL_CERT_FILE=/app/.pixi/envs/prod/ssl/cacert.pem \
+    SSL_CERT_DIR=/app/.pixi/envs/prod/ssl/certs
+
+# The system trust store, which is *not* the same thing as the one above.
+#
+# Python reads the environment's own bundle; everything else in the pod reads
+# /etc/ssl/certs/ca-certificates.crt. The old runtime base (python:3.12-slim)
+# shipped that file, debian:bookworm-slim does not, and dropping it broke every
+# non-Python TLS client — the injected vault-env sidecar is Go, so it failed
+# Vault login with "certificate signed by unknown authority" while the API's own
+# HTTPS worked fine.
+#
+# Sourced from the conda-forge ca-certificates package already in the locked
+# environment rather than from apt: same Mozilla root set, one trust store for
+# the whole image, and no unpinned package in an image whose entire point is
+# that pixi.lock decides what is in it.
+RUN mkdir -p /etc/ssl/certs \
+    && cp /app/.pixi/envs/prod/ssl/cacert.pem /etc/ssl/certs/ca-certificates.crt
 
 # WORKDIR is backend/ so the chart's bare `alembic upgrade head` finds
 # alembic.ini beside it, exactly as it did when that directory was the image
@@ -82,15 +135,29 @@ RUN useradd -r -u 1000 shelf
 USER 1000
 
 # Fail the build, not a pod at 3am, if the environment cannot actually run what
-# the chart asks of it: the app imports, the async engine has its greenlet, and
-# the OCR binaries are present with English language data.
+# the chart asks of it: the app imports, the async engine has its greenlet, the
+# OCR binaries are present with the language data they were pruned to, and both
+# trust stores are in place — the system one because a missing
+# ca-certificates.crt is invisible until a Go sidecar tries to speak TLS.
+#
+# Every dependency is imported by name, not just the ones on shelf.main's path,
+# because a conda-forge package can differ from its PyPI namesake in what it
+# exposes: conda-forge's pymupdf provides `fitz` and not `pymupdf`, so a module
+# that imports the modern name would fail only when its consumer first ran.
 RUN python -c "import shelf.main, shelf.worker.extract, sqlalchemy.ext.asyncio" \
+ && python -c "import fastapi, uvicorn, sqlalchemy, asyncpg, alembic, pydantic, \
+pydantic_settings, authlib, joserfc, httpx, multipart, itsdangerous, pypdf, \
+nats, fitz, obstore, greenlet, ocrmypdf" \
  && alembic --help > /dev/null \
  && gs --version > /dev/null \
  && qpdf --version > /dev/null \
  && unpaper --version > /dev/null \
  && ocrmypdf --version > /dev/null \
- && tesseract --list-langs 2>&1 | grep -qx eng
+ && tesseract --list-langs 2>&1 | grep -qx eng \
+ && test -f /app/.pixi/envs/prod/share/tessdata/pdf.ttf \
+ && test -s /etc/ssl/certs/ca-certificates.crt \
+ && test -s "$SSL_CERT_FILE" \
+ && python -c "import ssl; ssl.create_default_context().load_default_certs()"
 
 EXPOSE 8000
 
