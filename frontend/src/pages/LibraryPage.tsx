@@ -2033,7 +2033,7 @@ export default function LibraryPage() {
                                       : "Show PDF hits"
                                   }
                                   aria-expanded={isExpanded}
-                                  className="rounded p-0.5 hover:opacity-70"
+                                  className="shrink-0 rounded p-0.5 hover:opacity-70"
                                   style={{
                                     color: "var(--color-text-muted)",
                                   }}
@@ -2048,10 +2048,19 @@ export default function LibraryPage() {
                                 // Fixed-width spacer so titles in
                                 // non-fulltext groups still align with
                                 // their fulltext-group siblings.
-                                <span className="inline-block w-[18px]" />
+                                //
+                                // `shrink-0` is what makes it hold that
+                                // width. Without it the spacer is just
+                                // another flex item, so a title too long
+                                // for the column shrinks it — by a share
+                                // of the overflow, which means every row
+                                // gives up a different amount and the
+                                // column of titles starts at a different
+                                // x on each line.
+                                <span className="inline-block w-[18px] shrink-0" />
                               )}
                               <span
-                                className="truncate"
+                                className="min-w-0 truncate"
                                 title={itemTitle(it)}
                               >
                                 {itemTitle(it)}
