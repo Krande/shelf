@@ -21,16 +21,15 @@ client; making the namespaces explicit keeps each path honest.
 import hashlib
 import uuid
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import RedirectResponse
 from obstore import put_async
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import cast, delete, or_, select
+from sqlalchemy import ColumnElement, delete, func, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.types import String
 
 from ..auth.spaces import (
     SPACE_ROLE_EDITOR,
@@ -44,6 +43,7 @@ from ..db import get_session
 from ..models import (
     ApiToken,
     Attachment,
+    AttachmentPage,
     Collection,
     Item,
     ItemCollection,
@@ -53,6 +53,7 @@ from ..models import (
 )
 from ..services import extraction, storage
 from ..services.storage import attachment_storage_key
+from .items import _SNIPPET_PAD, SearchScope, _escape_ilike, _parse_search
 from .standards import LinkRevisionRequest, item_revisions, upsert_revision
 
 router = APIRouter(tags=["v1"], prefix="/api/v1")
@@ -187,6 +188,30 @@ async def _effective_allowed_collection_ids(
     )
     rows = await db.execute(select(walk.c.id))
     return {row[0] for row in rows.all()}
+
+
+async def _collection_subtree(
+    db: AsyncSession, root: uuid.UUID
+) -> set[uuid.UUID]:
+    """`root` and every collection nested below it. UNION rather than
+    UNION ALL for the same reason as above: it terminates on a cycle."""
+    base = (
+        select(Collection.id)
+        .where(Collection.id == root)
+        .cte(name="subtree", recursive=True)
+    )
+    walk = base.union(
+        select(Collection.id).where(Collection.parent_id == base.c.id)
+    )
+    return {row[0] for row in (await db.execute(select(walk.c.id))).all()}
+
+
+def _filed_in(collection_ids: set[uuid.UUID]) -> ColumnElement[bool]:
+    return Item.id.in_(
+        select(ItemCollection.item_id).where(
+            ItemCollection.collection_id.in_(collection_ids)
+        )
+    )
 
 
 async def _enforce_collection_scope(
@@ -1380,13 +1405,155 @@ async def _link_collections(
 # ── search ────────────────────────────────────────────────────────────────
 
 
-@router.get("/search", response_model=list[ItemSummary])
+class PageHit(BaseModel):
+    """One PDF page whose text contains the query.
+
+    `snippet` is plain text rather than the SPA's `<mark>` HTML: the
+    callers of this surface are terminals and scripts, and making each
+    of them strip tags back out is how a highlight ends up wrong.
+    `highlight` is the match's [start, end) within `snippet`.
+    `page_number` is 1-based, as the reader's `?page=` and a PDF
+    viewer's `#page=` both expect.
+    """
+
+    attachment_id: uuid.UUID
+    filename: str
+    page_number: int
+    snippet: str
+    highlight: tuple[int, int]
+
+
+class SearchResult(ItemSummary):
+    """An item search row, plus its body-text hits when `?hits=` asked
+    for them. Both stay null otherwise, so a caller that never asks
+    sees the same shape it always has."""
+
+    page_hits: list[PageHit] | None = None
+    page_hit_count: int | None = None
+
+
+def _plain_snippet(text: str, needle: str) -> tuple[str, tuple[int, int]] | None:
+    """The first match of `needle` in `text` with some context either
+    side, whitespace collapsed so a page's line breaks don't wreck a
+    one-line result row. None when Python's case folding disagrees
+    with Postgres' ILIKE on a match, which is rare and not worth a row
+    with nothing to highlight."""
+    idx = text.lower().find(needle.lower())
+    if idx == -1:
+        return None
+    start = max(0, idx - _SNIPPET_PAD)
+    end = min(len(text), idx + len(needle) + _SNIPPET_PAD)
+    raw_pre, raw_post = text[start:idx], text[idx + len(needle) : end]
+
+    pre = " ".join(raw_pre.split())
+    # Collapsing drops the edge whitespace too; put one space back where
+    # the match was separated from its neighbours, or "the load" reads
+    # as "theload".
+    if pre and raw_pre[-1].isspace():
+        pre += " "
+    if start > 0:
+        pre = "…" + pre
+    hit = " ".join(text[idx : idx + len(needle)].split())
+    post = " ".join(raw_post.split())
+    if post and raw_post[0].isspace():
+        post = " " + post
+    if end < len(text):
+        post += "…"
+    return pre + hit + post, (len(pre), len(pre) + len(hit))
+
+
+async def _page_hits(
+    db: AsyncSession,
+    item_ids: list[uuid.UUID],
+    q: str,
+    *,
+    per_item: int | None,
+) -> dict[uuid.UUID, tuple[int, list[dict[str, object]]]]:
+    """Body-text hits for many items in one query: `{item_id: (total,
+    first per_item hits)}`.
+
+    One round trip for a whole result page, rather than one per item
+    the way the SPA's expand-on-click works — a terminal list shows
+    every row's first hit at once, so it would otherwise ask fifty
+    times per keystroke. The window functions keep the cap in Postgres,
+    so a 2,000-page manual matching "the" ships three pages of text,
+    not two thousand.
+
+    Same ILIKE matcher as `_parse_search`'s fulltext scope, so an item
+    listed as a body match always has at least one hit here.
+    """
+    if not item_ids:
+        return {}
+    needle = f"%{_escape_ilike(q)}%"
+    order = (Attachment.created_at, Attachment.id, AttachmentPage.page_number)
+    ranked = (
+        select(
+            Attachment.item_id,
+            AttachmentPage.attachment_id,
+            Attachment.filename,
+            AttachmentPage.page_number,
+            AttachmentPage.text,
+            func.row_number()
+            .over(partition_by=Attachment.item_id, order_by=order)
+            .label("rn"),
+            func.count().over(partition_by=Attachment.item_id).label("total"),
+        )
+        .join(Attachment, Attachment.id == AttachmentPage.attachment_id)
+        .where(
+            Attachment.item_id.in_(item_ids),
+            AttachmentPage.text.ilike(needle, escape="\\"),
+        )
+        .subquery()
+    )
+    stmt = select(ranked).order_by(ranked.c.item_id, ranked.c.rn)
+    if per_item is not None:
+        stmt = stmt.where(ranked.c.rn <= per_item)
+
+    out: dict[uuid.UUID, tuple[int, list[dict[str, object]]]] = {}
+    for row in (await db.execute(stmt)).all():
+        _, hits = out.setdefault(row.item_id, (row.total, []))
+        found = _plain_snippet(row.text, q)
+        if found is None:
+            continue
+        snippet, highlight = found
+        hits.append(
+            {
+                "attachment_id": row.attachment_id,
+                "filename": row.filename,
+                "page_number": row.page_number,
+                "snippet": snippet,
+                "highlight": highlight,
+            }
+        )
+    return out
+
+
+@router.get("/search", response_model=list[SearchResult])
 async def search(
     auth: Annotated[TokenAuth, Depends(require_scope("search"))],
     db: Annotated[AsyncSession, Depends(get_session)],
     q: Annotated[str | None, Query(max_length=200)] = None,
+    scope: Annotated[list[SearchScope] | None, Query()] = None,
+    hits: Annotated[
+        int,
+        Query(
+            ge=0,
+            le=50,
+            description="Attach up to this many PDF-page hits to each row.",
+        ),
+    ] = 0,
     tag: Annotated[list[str] | None, Query()] = None,
+    space: Annotated[
+        list[str] | None,
+        Query(description="Only items living in these spaces (slugs; repeatable)."),
+    ] = None,
     collection: Annotated[uuid.UUID | None, Query()] = None,
+    collection_scope: Annotated[
+        Literal["direct", "subtree"],
+        Query(
+            description="`subtree` includes items filed anywhere below `collection`."
+        ),
+    ] = "direct",
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[dict[str, object]]:
@@ -1397,6 +1564,18 @@ async def search(
     token acting as a user that can't find what the user can find is a
     confusing thing to debug. Narrowed further when the token carries a
     space or collection allow-list.
+
+    `q` and `scope` mean exactly what they mean on the landing page —
+    the parsing is shared — so PDF body text is searched unless `scope`
+    narrows it away, and title hits rank above body hits.
+
+    `space` and `collection` narrow where to look, which is how the
+    CLI's browser searches "in this folder": `collection_scope=subtree`
+    takes in every collection below the named one as well.
+
+    `hits=N` attaches each row's first N matching pages (`page_hits`)
+    and how many there are in all (`page_hit_count`), in one extra query
+    for the whole page of results. `/items/{id}/hits` has the rest.
     """
     # Read-only, and never touches trash.
     spaces = await _token_space_ids(db, auth, writable=False)
@@ -1406,18 +1585,11 @@ async def search(
     stmt = select(Item).where(
         Item.space_id.in_(spaces), Item.deleted_at.is_(None)
     )
-    if q and q.strip():
-        # Mirror the SPA search across title / abstract / creators /
-        # extra — see api/items.list_items for the rationale.
-        needle = f"%{q.strip()}%"
-        stmt = stmt.where(
-            or_(
-                Item.data["title"].astext.ilike(needle),
-                Item.data["abstractNote"].astext.ilike(needle),
-                Item.data["extra"].astext.ilike(needle),
-                cast(Item.data["creators"], String).ilike(needle),
-            )
-        )
+    parsed = _parse_search(q, scope)
+    if parsed.matches_nothing:
+        return []
+    if parsed.where is not None:
+        stmt = stmt.where(parsed.where)
     if tag:
         for t in tag:
             if t.strip():
@@ -1425,30 +1597,92 @@ async def search(
                     Item.data.cast(JSONB).contains({"tags": [t.strip()]})
                 )
 
-    if collection is not None:
-        stmt = stmt.join(
-            ItemCollection, ItemCollection.item_id == Item.id
-        ).where(ItemCollection.collection_id == collection)
+    if space is not None:
+        wanted = {s.strip() for s in space if s.strip()}
+        named = (
+            await db.execute(
+                select(Space.slug, Space.id).where(
+                    Space.slug.in_(wanted), Space.id.in_(spaces)
+                )
+            )
+        ).all()
+        space_ids: dict[str, uuid.UUID] = {slug: sid for slug, sid in named}
+        missing = sorted(wanted - space_ids.keys())
+        if missing:
+            # A 404, as on /api/me/items: a filter that quietly matches
+            # nothing reads as "no results" and hides the typo.
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, f"No such space: {', '.join(missing)}"
+            )
+        stmt = stmt.where(Item.space_id.in_(space_ids.values()))
 
+    # Membership is tested with IN (subquery) rather than a join, so an
+    # item filed in two matching collections is still one row — a join
+    # returned it twice, and the duplicate counted against `limit`.
     allowed = await _effective_allowed_collection_ids(db, auth.token)
-    if allowed is not None:
-        # Token-scoped: items must be in at least one allowed collection.
-        # Composes with the optional ?collection= filter — if the explicit
-        # collection isn't in the token's effective allow-list (which may
-        # include descendants), the result is empty by design.
-        if collection is None:
-            stmt = stmt.join(
-                ItemCollection, ItemCollection.item_id == Item.id
-            ).where(ItemCollection.collection_id.in_(allowed))
-        elif collection not in allowed:
+    if collection is not None:
+        # If the explicit collection isn't in the token's effective
+        # allow-list (which may include descendants), the result is
+        # empty by design.
+        if allowed is not None and collection not in allowed:
             return []
-        # Else: we already joined with the explicit collection filter,
-        # which is sufficient.
+        members: set[uuid.UUID] = (
+            await _collection_subtree(db, collection)
+            if collection_scope == "subtree"
+            else {collection}
+        )
+        if allowed is not None:
+            members &= allowed
+        stmt = stmt.where(_filed_in(members))
+    elif allowed is not None:
+        # Token-scoped: items must be in at least one allowed collection.
+        stmt = stmt.where(_filed_in(allowed))
 
-    stmt = stmt.order_by(Item.updated_at.desc()).limit(limit).offset(offset)
+    if parsed.rank is not None:
+        stmt = stmt.order_by(parsed.rank, Item.updated_at.desc(), Item.id)
+    else:
+        stmt = stmt.order_by(Item.updated_at.desc(), Item.id)
+    stmt = stmt.limit(limit).offset(offset)
 
     rows = (await db.execute(stmt)).scalars().unique().all()
-    return await _hydrate_collection_ids(db, list(rows))
+    results = await _hydrate_collection_ids(db, list(rows))
+
+    wants_body = scope is None or SearchScope.fulltext in scope
+    if hits and q and q.strip() and wants_body:
+        found = await _page_hits(
+            db, [it.id for it in rows], q.strip(), per_item=hits
+        )
+        for item, result in zip(rows, results, strict=True):
+            total, page_hits = found.get(item.id, (0, []))
+            result["page_hits"] = page_hits
+            result["page_hit_count"] = total
+    return results
+
+
+@router.get(
+    "/items/{item_id}/hits",
+    response_model=list[PageHit],
+    summary="Every PDF page of an item that contains the query",
+)
+async def item_page_hits(
+    item_id: uuid.UUID,
+    auth: Annotated[TokenAuth, Depends(require_scope("search"))],
+    db: Annotated[AsyncSession, Depends(get_session)],
+    q: Annotated[str, Query(min_length=1, max_length=200)],
+) -> list[dict[str, object]]:
+    """The rest of what `/search?hits=N` cut short, for one item.
+
+    The token twin of the SPA's `/fulltext-hits`, with plain-text
+    snippets: same matcher, so the two always agree on which pages
+    match.
+    """
+    item = await _resolve_owned_item(db, auth, item_id)
+    await _enforce_collection_scope(db, auth, item)
+    cleaned = q.strip()
+    if not cleaned:
+        return []
+    found = await _page_hits(db, [item.id], cleaned, per_item=None)
+    return found.get(item.id, (0, []))[1]
 
 
 # ── attachment listing ────────────────────────────────────────────────────

@@ -77,6 +77,9 @@ ruff = "*"
 mypy = "*"
 hatchling = "*"
 beautifulsoup4 = "*"
+# The CLI's `shelf browse`. Listed here so it comes from conda-forge; the
+# editable shelf-cli entry below would otherwise pull it from PyPI.
+textual = ">=8.2.8,<9"
 
 [feature.dev.pypi-dependencies]
 # Nothing imports arq any more — the queue is NATS JetStream — so it is here
