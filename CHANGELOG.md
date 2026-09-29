@@ -2,6 +2,13 @@
 
 
 
+## v0.11.0 (2026-09-29)
+
+### Feature
+
+* feat(cli): search PDF text and browse hits in a terminal UI (#16) ([`8c3cae9`](https://github.com/Krande/shelf/commit/8c3cae9654c92ad83a2504d5e6648fbb5d533c33))
+
+
 ## v0.10.2 (2026-09-25)
 
 ### Fix
