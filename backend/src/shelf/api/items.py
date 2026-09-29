@@ -25,7 +25,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import ColumnElement, Select, case, cast, func, or_, select
+from sqlalchemy import ColumnElement, Select, and_, case, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 from sqlalchemy.types import String
@@ -297,33 +297,58 @@ class _Search:
 def _parse_search(q: str | None, scope: list[SearchScope] | None) -> _Search:
     """Build the search predicate for `q`, narrowed to `scope`.
 
-    Case-insensitive substring match across the selected metadata
-    fields. Creators are a JSONB array of objects, so we cast to text and
-    ilike the result — that matches first/last/`name` without a
-    normalised people table. The `fulltext` scope bolts on an EXISTS
-    against the per-page text the extraction worker fills, so a PDF body
-    match surfaces the parent item alongside metadata hits.
+    Metadata is matched **word by word**: every whitespace-separated
+    word of `q` has to occur, case-insensitively, somewhere in the
+    selected fields — not necessarily in the same field, nor next to the
+    others. That is what someone typing two words expects, and it is what
+    lets `EN 1993` find a title written `EN1993` or `EN-1993`. A single
+    substring of the whole query found neither. Each word is a literal
+    substring: `%` and `_` in it are escaped rather than wildcards.
+
+    Creators are a JSONB array of objects, so we cast to text and ilike
+    the result — that matches first/last/`name` without a normalised
+    people table.
+
+    The `fulltext` scope bolts on an EXISTS against the per-page text the
+    extraction worker fills, so a PDF body match surfaces the parent item
+    alongside metadata hits. It stays a match of the whole phrase: that is
+    what the reader's find tool and the per-page hit snippets look for, and
+    the listing has to agree with them about which pages match.
     """
     if not q or not q.strip():
         return _Search()
 
     enabled = set(scope) if scope else set(SearchScope)
     cleaned = q.strip()
-    needle = f"%{cleaned}%"
-    title_clause = Item.data["title"].astext.ilike(needle)
-    creators_clause = cast(Item.data["creators"], String).ilike(needle)
-    abstract_clause = Item.data["abstractNote"].astext.ilike(needle)
-    extra_clause = Item.data["extra"].astext.ilike(needle)
+    words = [f"%{_escape_ilike(w)}%" for w in cleaned.split()]
+
+    fields: dict[SearchScope, ColumnElement[str]] = {
+        SearchScope.title_: Item.data["title"].astext,
+        SearchScope.creators: cast(Item.data["creators"], String),
+        SearchScope.abstract: Item.data["abstractNote"].astext,
+        SearchScope.extra: Item.data["extra"].astext,
+    }
+
+    def every_word_in(field: ColumnElement[str]) -> ColumnElement[bool]:
+        return and_(*(field.ilike(w, escape="\\") for w in words))
+
+    title_clause = every_word_in(fields[SearchScope.title_])
+    creators_clause = every_word_in(fields[SearchScope.creators])
+    abstract_clause = every_word_in(fields[SearchScope.abstract])
+    extra_clause = every_word_in(fields[SearchScope.extra])
 
     clauses = []
-    if SearchScope.title_ in enabled:
-        clauses.append(title_clause)
-    if SearchScope.creators in enabled:
-        clauses.append(creators_clause)
-    if SearchScope.abstract in enabled:
-        clauses.append(abstract_clause)
-    if SearchScope.extra in enabled:
-        clauses.append(extra_clause)
+    searched = [field for s, field in fields.items() if s in enabled]
+    if searched:
+        # Each word somewhere among the searched fields.
+        clauses.append(
+            and_(
+                *(
+                    or_(*(field.ilike(w, escape="\\") for field in searched))
+                    for w in words
+                )
+            )
+        )
     if SearchScope.fulltext in enabled:
         # Case-insensitive substring match, exactly like the reader's
         # in-PDF Ctrl-F find tool — a search for "Test" picks up
@@ -349,7 +374,9 @@ def _parse_search(q: str | None, scope: list[SearchScope] | None) -> _Search:
         where=or_(*clauses),
         # Lower number = higher priority. Mirrors the order the SPA
         # already uses to bucket results into "Title hits" / "Creator
-        # hits" / etc. sections.
+        # hits" / etc. sections. A field ranks when it holds every word
+        # itself; an item whose words are spread across fields sorts
+        # with the body hits.
         rank=case(
             (title_clause, 0),
             (creators_clause, 1),
