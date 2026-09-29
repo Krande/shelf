@@ -2,6 +2,13 @@
 
 
 
+## v0.11.1 (2026-09-29)
+
+### Fix
+
+* fix(search): match metadata word by word (#17) ([`4379565`](https://github.com/Krande/shelf/commit/4379565c90b291574f9139f74f56cfa8495d0b08))
+
+
 ## v0.11.0 (2026-09-29)
 
 ### Feature
