@@ -16,11 +16,18 @@ Usage:
     shelf profiles push ./profiles/ --dry-run      # say what would happen
     shelf profiles pull <id> -o widgets.json       # capture what's there
     shelf search "widgets"
+    shelf search "load case" --scope fulltext --hits 5
+    shelf browse "load case"                       # interactive
+    shelf open <attachment-id> --page 12           # local PDF, at page 12
+    shelf open <attachment-id> --page 12 --web     # the shelf reader
 
 Env used:
     SHELF_API_BASE_URL   instance to talk to, e.g. https://shelf.example.com
     SHELF_API_TOKEN      bearer token, minted under Settings -> API tokens
     SHELF_CLI_TOML       path to shelf.toml (default: ./shelf.toml)
+    SHELF_PDF_VIEWER     command template for local PDFs, e.g.
+                         'SumatraPDF.exe -page {page} "{path}"'
+    SHELF_CACHE_DIR      where downloaded PDFs are kept
 """
 
 from __future__ import annotations
@@ -32,7 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from .client import ApiError, ShelfClient
-from .config import ConfigError, resolve
+from .config import Config, ConfigError, resolve
 from .profiles import ProfileError, discover, dump, load, push
 
 
@@ -55,7 +62,7 @@ def _parse_set(pairs: list[str] | None) -> dict[str, Any]:
     return out
 
 
-def _client(args: argparse.Namespace) -> ShelfClient:
+def _config(args: argparse.Namespace) -> Config:
     cfg = resolve(
         base_url=args.api_base,
         token=args.token,
@@ -63,6 +70,11 @@ def _client(args: argparse.Namespace) -> ShelfClient:
         config_path=args.config,
     )
     args._space = cfg.space
+    return cfg
+
+
+def _client(args: argparse.Namespace) -> ShelfClient:
+    cfg = _config(args)
     return ShelfClient(cfg.base_url, cfg.token)
 
 
@@ -142,7 +154,50 @@ def cmd_items_create(args: argparse.Namespace) -> int:
 
 def cmd_search(args: argparse.Namespace) -> int:
     with _client(args) as client:
-        _emit(client.search(args.query, limit=args.limit))
+        _emit(
+            client.search(
+                args.query,
+                limit=args.limit,
+                offset=args.offset,
+                scope=args.scope,
+                hits=args.hits,
+                space=args.in_space,
+                collection=args.collection,
+                subtree=args.subtree,
+            )
+        )
+    return 0
+
+
+def cmd_browse(args: argparse.Namespace) -> int:
+    # Imported here so Textual's import cost lands on this command only.
+    from .tui import run
+
+    run(_config(args), " ".join(args.query))
+    return 0
+
+
+def cmd_open(args: argparse.Namespace) -> int:
+    """Open one attachment at a page — the TUI's two actions, scriptable."""
+    from . import opener
+
+    cfg = _config(args)
+    if args.web:
+        print(opener.open_web(cfg.base_url, args.attachment_id, args.page, args.find))
+        return 0
+    with ShelfClient(cfg.base_url, cfg.token) as client:
+        # Cosmetic — the cache is keyed by id — but it's what the browser
+        # tab shows, and search output carries it to pass along.
+        filename = args.filename or f"{args.attachment_id}.pdf"
+        path = opener.fetch(client, args.attachment_id, filename, refresh=args.refresh)
+    opened = opener.open_local(path, args.page, viewer=cfg.pdf_viewer, query=args.find)
+    print(path)
+    if not opened.at_page:
+        print(
+            f"note: opened with the {opened.how}, which takes no page — go to p.{args.page}. "
+            "Set [viewer] pdf in shelf.toml to use a viewer that does.",
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -273,10 +328,55 @@ def build_parser() -> argparse.ArgumentParser:
     pull_cmd.add_argument("-o", "--output", help="write here instead of stdout")
     pull_cmd.set_defaults(func=cmd_profiles_pull)
 
-    search = sub.add_parser("search", help="search items the token can read")
+    search = sub.add_parser(
+        "search",
+        help="search items the token can read, PDF text included",
+    )
     search.add_argument("query", nargs="?")
     search.add_argument("--limit", type=int, default=50)
+    search.add_argument("--offset", type=int, default=0)
+    search.add_argument(
+        "--scope",
+        action="append",
+        choices=["title", "creators", "abstract", "extra", "fulltext"],
+        help="search only these fields; repeatable. Default: all of them",
+    )
+    search.add_argument(
+        "--hits",
+        type=int,
+        default=0,
+        metavar="N",
+        help="include each result's first N matching PDF pages (max 50)",
+    )
+    # `--space` would collide with the config-default space `_client`
+    # reads off args, which means "where to write", not "where to look".
+    search.add_argument("--in-space", metavar="SLUG", help="only items living in this space")
+    search.add_argument("--collection", metavar="ID", help="only items filed in this collection")
+    search.add_argument(
+        "--subtree",
+        action="store_true",
+        help="with --collection: include every collection nested below it",
+    )
     search.set_defaults(func=cmd_search)
+
+    browse = sub.add_parser(
+        "browse", help="interactive search: browse hits, open them in shelf or locally"
+    )
+    browse.add_argument("query", nargs="*", help="start with this search")
+    browse.set_defaults(func=cmd_browse)
+
+    open_cmd = sub.add_parser("open", help="open an attachment at a page")
+    open_cmd.add_argument("attachment_id")
+    open_cmd.add_argument("--page", type=int, default=1)
+    open_cmd.add_argument("--find", help="search term to highlight, where the viewer can")
+    open_cmd.add_argument(
+        "--web", action="store_true", help="open in the shelf reader instead of locally"
+    )
+    open_cmd.add_argument("--filename", help="name for the cached copy")
+    open_cmd.add_argument(
+        "--refresh", action="store_true", help="download again even if cached"
+    )
+    open_cmd.set_defaults(func=cmd_open)
 
     return parser
 

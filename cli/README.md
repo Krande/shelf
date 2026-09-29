@@ -36,6 +36,70 @@ export SHELF_API_TOKEN=shelf_…
 shelf whoami
 ```
 
+## Searching and browsing
+
+`shelf search` finds what the landing page finds — titles, creators,
+abstracts and **PDF body text**, title hits first:
+
+```sh
+shelf search "load case"                        # JSON, one row per document
+shelf search "load case" --scope fulltext --hits 5   # + each row's first 5 matching pages
+```
+
+`shelf browse` is the same search as a terminal UI. Type to search; each
+document is listed with the PDF pages it matched underneath.
+
+| key     | does                                                    |
+|---------|---------------------------------------------------------|
+| `↓` `↑` | move between the search box and the results            |
+| `enter` | open the highlighted page in the shelf reader          |
+| `o`     | open the PDF locally at that page (`O` re-downloads)   |
+| `space` | show every matching page of a document, or fold it up  |
+| `c`     | spaces & collections sidebar (shown by default when wide) |
+| `→` `←` | in the sidebar: open / close a branch, step in / out   |
+| `backspace` | from the results: up one level (collection → space → all) |
+| `/`     | back to the search box · `esc` clears it · `q` quits   |
+
+Picking a space or collection in the sidebar makes it where searches
+look. With an empty search box a collection lists what is filed directly
+in it, like opening a folder; type a query and it searches everything
+nested below it too. The same narrowing is on the plain command:
+
+```sh
+shelf search "load case" --in-space standards
+shelf search "load case" --collection <id> --subtree
+```
+
+Opening a web hit needs the `search` scope; opening locally needs
+`download` too. `shelf open <attachment-id> --page N [--web]` does either
+from a script.
+
+### Opening a PDF at a page
+
+No operating system has a general way to open a file *at a page* —
+every viewer spells it differently. What several agree on is the
+`#page=N` fragment on a URL, which Chrome, Edge, Firefox and their
+relatives honour on a local file. So by default `o` downloads the PDF
+once into a cache (`%LOCALAPPDATA%\shelf\pdf`, or `~/.cache/shelf/pdf`)
+and opens `file:///…#page=N` in your **default browser**.
+
+To use a dedicated viewer instead, give a command template in
+`shelf.toml` (or `SHELF_PDF_VIEWER`):
+
+```toml
+[viewer]
+pdf = 'SumatraPDF.exe -page {page} "{path}"'   # Windows: quote {path} yourself
+# pdf = "okular -p {page} {path}"              # Linux: each word is one argument
+# pdf = "evince -i {page} {path}"
+# pdf = "zathura -P {page} {path}"
+```
+
+On Linux, a browser installed as a snap or flatpak may not be allowed to
+read hidden directories like `~/.cache`; point `SHELF_CACHE_DIR` at a
+visible one (e.g. `~/Documents/shelf-cache`) if the PDF doesn't load.
+macOS has no browser lookup yet, so there it opens in the default PDF
+app and tells you the page.
+
 ## Setting fields on a document
 
 ```sh

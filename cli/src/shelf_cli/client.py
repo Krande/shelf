@@ -155,14 +155,155 @@ class ShelfClient:
 
     # ── search ───────────────────────────────────────────────────────────
 
-    def search(self, q: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
-        params: dict[str, Any] = {"limit": limit}
-        if q:
-            params["q"] = q
-        return list(self._request("GET", "/api/v1/search", params=params))
+    def search(
+        self,
+        q: str | None = None,
+        limit: int = 50,
+        *,
+        offset: int = 0,
+        scope: list[str] | None = None,
+        hits: int = 0,
+        space: str | None = None,
+        collection: str | None = None,
+        subtree: bool = False,
+    ) -> list[dict[str, Any]]:
+        return list(
+            self._request(
+                "GET",
+                "/api/v1/search",
+                params=_search_params(q, limit, offset, scope, hits, space, collection, subtree),
+            )
+        )
+
+    def item_hits(self, item_id: str | uuid.UUID, q: str) -> list[dict[str, Any]]:
+        """Every PDF page of one item that contains `q`."""
+        return list(
+            self._request("GET", f"/api/v1/items/{item_id}/hits", params={"q": q})
+        )
 
     def collections(self) -> list[dict[str, Any]]:
         return list(self._request("GET", "/api/v1/collections"))
+
+    # ── download ─────────────────────────────────────────────────────────
+
+    def download(self, attachment_id: str | uuid.UUID, dest: Path) -> Path:
+        """Write an attachment's bytes to `dest`, via a `.part` file so an
+        interrupted download never looks like a finished one.
+
+        The API answers with a redirect to a presigned bucket URL, which
+        is followed by hand rather than by the client: the presigned URL
+        carries its own signature, and a bucket that happens to sit on the
+        API's host would be sent our bearer token too and refuse the
+        request for carrying two kinds of auth.
+        """
+        path = f"/api/v1/download/{attachment_id}"
+        response = self._client.get(path, follow_redirects=False)
+        if response.status_code >= 400:
+            raise ApiError(response.status_code, _detail(response), "GET", path)
+        url = response.headers.get("location") if response.is_redirect else None
+        if not url:
+            raise ApiError(response.status_code, "no download location", "GET", path)
+
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        part = dest.with_name(dest.name + ".part")
+        with httpx.stream("GET", url, timeout=self._client.timeout, follow_redirects=True) as r:
+            if r.status_code >= 400:
+                raise ApiError(r.status_code, r.reason_phrase, "GET", "<presigned>")
+            with part.open("wb") as fh:
+                for chunk in r.iter_bytes(1 << 16):
+                    fh.write(chunk)
+        part.replace(dest)
+        return dest
+
+
+class AsyncShelfClient:
+    """The read-only slice of the API the terminal browser needs, async.
+
+    Async so a search superseded by the next keystroke is *cancelled* —
+    its connection freed for the one that replaced it — rather than left
+    to finish in a thread and be thrown away. One instance per session,
+    so every request after the first reuses a warm keep-alive connection.
+    """
+
+    def __init__(self, base_url: str, token: str, *, timeout: float = 30.0) -> None:
+        self.base_url = base_url.rstrip("/")
+        self._client = httpx.AsyncClient(
+            base_url=self.base_url,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=timeout,
+            follow_redirects=True,
+        )
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+        response = await self._client.request(method, path, **kwargs)
+        if response.status_code >= 400:
+            raise ApiError(response.status_code, _detail(response), method, path)
+        return response.json() if response.content else None
+
+    async def search(
+        self,
+        q: str | None = None,
+        limit: int = 50,
+        *,
+        offset: int = 0,
+        scope: list[str] | None = None,
+        hits: int = 0,
+        space: str | None = None,
+        collection: str | None = None,
+        subtree: bool = False,
+    ) -> list[dict[str, Any]]:
+        return list(
+            await self._request(
+                "GET",
+                "/api/v1/search",
+                params=_search_params(q, limit, offset, scope, hits, space, collection, subtree),
+            )
+        )
+
+    async def item_hits(self, item_id: str, q: str) -> list[dict[str, Any]]:
+        return list(
+            await self._request("GET", f"/api/v1/items/{item_id}/hits", params={"q": q})
+        )
+
+    async def list_attachments(self, item_id: str) -> list[dict[str, Any]]:
+        return list(await self._request("GET", f"/api/v1/items/{item_id}/attachments"))
+
+    async def spaces(self) -> list[dict[str, Any]]:
+        return list(await self._request("GET", "/api/v1/spaces"))
+
+    async def collections(self) -> list[dict[str, Any]]:
+        return list(await self._request("GET", "/api/v1/collections"))
+
+
+def _search_params(
+    q: str | None,
+    limit: int,
+    offset: int,
+    scope: list[str] | None,
+    hits: int,
+    space: str | None = None,
+    collection: str | None = None,
+    subtree: bool = False,
+) -> list[tuple[str, str | int]]:
+    # A list of pairs, since `scope` repeats.
+    params: list[tuple[str, str | int]] = [("limit", limit)]
+    if offset:
+        params.append(("offset", offset))
+    if q:
+        params.append(("q", q))
+    params.extend(("scope", s) for s in scope or [])
+    if hits:
+        params.append(("hits", hits))
+    if space:
+        params.append(("space", space))
+    if collection:
+        params.append(("collection", collection))
+        if subtree:
+            params.append(("collection_scope", "subtree"))
+    return params
 
 
 def _detail(response: httpx.Response) -> str:

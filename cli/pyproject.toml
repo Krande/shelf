@@ -10,6 +10,8 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.27",
+    # `shelf browse` only; imported lazily, so other commands don't pay for it.
+    "textual>=8",
 ]
 
 [project.optional-dependencies]
@@ -58,3 +60,4 @@ hatchling = "*"
 [tool.pixi.package.run-dependencies]
 python = ">=3.12"
 httpx = ">=0.27"
+textual = ">=8"

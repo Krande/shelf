@@ -24,6 +24,7 @@ DEFAULT_CONFIG_FILE = "shelf.toml"
 ENV_BASE_URL = "SHELF_API_BASE_URL"
 ENV_TOKEN = "SHELF_API_TOKEN"
 ENV_CONFIG = "SHELF_CLI_TOML"
+ENV_PDF_VIEWER = "SHELF_PDF_VIEWER"
 
 
 class ConfigError(RuntimeError):
@@ -37,6 +38,10 @@ class Config:
     # Default space for commands that don't name one. None means "let the
     # server pick", which it does by taking the caller's oldest writable space.
     space: str | None = None
+    # `[viewer] pdf` — a command template for opening a local PDF at a
+    # page, e.g. 'SumatraPDF.exe -page {page} "{path}"'. None means "the
+    # default browser at #page=N"; see `opener.py`.
+    pdf_viewer: str | None = None
 
 
 def load_file(path: str | None) -> dict:
@@ -82,8 +87,11 @@ def resolve(
             f"on purpose, so a committed config can't leak it."
         )
 
+    viewer = cfg.get("viewer", {}) if isinstance(cfg.get("viewer"), dict) else {}
+
     return Config(
         base_url=str(resolved_base).rstrip("/"),
         token=str(resolved_token),
         space=space or instance.get("space"),
+        pdf_viewer=os.environ.get(ENV_PDF_VIEWER) or viewer.get("pdf"),
     )
