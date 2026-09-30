@@ -16,6 +16,20 @@ export interface ProfileDraft {
   description: string;
   /** null: inherit. */
   columns: ColumnKey[] | null;
+  /** Only with `identity`: the name and slug as edited. */
+  name?: string;
+  slug?: string;
+}
+
+/** A space's name and slug, edited in the same dialog as its profile. */
+export interface ProfileIdentity {
+  name: string;
+  slug: string;
+  /** Renaming is its own permission — the owner, or an instance admin
+   *  for a shared space — separate from editing the profile. */
+  editable: boolean;
+  /** A personal space's slug is fixed. */
+  slugFixed: boolean;
 }
 
 /**
@@ -35,6 +49,9 @@ export default function ProfileModal({
   inherited,
   preferTypes,
   readOnly,
+  identity,
+  saving,
+  error,
   onClose,
   onSave,
 }: {
@@ -46,13 +63,25 @@ export default function ProfileModal({
   inherited: ResolvedProfile;
   /** Item types on screen; their fields are offered first. */
   preferTypes: string[];
-  /** Shown, not editable — an inherited collection seen by a reader. */
+  /** The description and columns are shown, not editable — an inherited
+   *  collection seen by a reader. */
   readOnly?: boolean;
+  /** A space's name and slug, shown above its profile. */
+  identity?: ProfileIdentity;
+  saving?: boolean;
+  /** Why the last save failed; the dialog stays open to fix it. */
+  error?: string | null;
   onClose: () => void;
   onSave: (draft: ProfileDraft) => void;
 }) {
   const [desc, setDesc] = useState(description ?? "");
   const [own, setOwn] = useState<ColumnKey[] | null>(columns);
+  const [name, setName] = useState(identity?.name ?? "");
+  const [slug, setSlug] = useState(identity?.slug ?? "");
+  const slugChanged =
+    !!identity && !identity.slugFixed && slug.trim() !== identity.slug;
+  const canSave = !readOnly || !!identity?.editable;
+  const nameMissing = !!identity?.editable && !name.trim();
   // Drag-to-reorder: the row being dragged, and the gap it would drop
   // into (0 = before the first row, own.length = after the last). The
   // arrow buttons stay for keyboards and for one-step nudges.
@@ -101,13 +130,58 @@ export default function ProfileModal({
         </div>
 
         <div className="space-y-5 p-4">
+          {identity && (
+            <section className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <label className="mb-1 block text-sm font-medium" htmlFor="profile-name">
+                  Name
+                </label>
+                <input
+                  id="profile-name"
+                  autoFocus={identity.editable}
+                  required
+                  readOnly={!identity.editable}
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  className="w-full rounded border px-2 py-1.5 text-sm read-only:opacity-60"
+                  style={inputStyle}
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-sm font-medium" htmlFor="profile-slug">
+                  Slug
+                </label>
+                <input
+                  id="profile-slug"
+                  readOnly={!identity.editable || identity.slugFixed}
+                  value={slug}
+                  onChange={(e) => setSlug(e.target.value)}
+                  className="w-full rounded border px-2 py-1.5 text-sm read-only:opacity-60"
+                  style={inputStyle}
+                />
+              </div>
+              <p
+                className="text-xs sm:col-span-2"
+                style={{ color: slugChanged ? "rgb(217 119 6)" : "var(--color-text-muted)" }}
+              >
+                {!identity.editable
+                  ? "Only the space's owner can rename it."
+                  : identity.slugFixed
+                    ? "A personal space's slug is fixed, but you can call it whatever you like."
+                    : slugChanged
+                      ? "Changing the slug changes this space's URL. Links people already have will stop working — nothing else breaks."
+                      : "The slug is what appears in URLs."}
+              </p>
+            </section>
+          )}
+
           <section>
             <label className="mb-1 block text-sm font-medium" htmlFor="profile-desc">
               Description
             </label>
             <textarea
               id="profile-desc"
-              autoFocus={!readOnly}
+              autoFocus={!readOnly && !identity?.editable}
               readOnly={readOnly}
               value={desc}
               onChange={(e) => setDesc(e.target.value)}
@@ -284,22 +358,34 @@ export default function ProfileModal({
           className="flex items-center justify-end gap-2 border-t px-4 py-3"
           style={{ borderColor: "var(--color-border)" }}
         >
+          {error && (
+            <p className="mr-auto text-xs text-red-600" role="alert">
+              {error}
+            </p>
+          )}
           <button
             type="button"
             onClick={onClose}
             className="rounded px-3 py-1.5 text-sm hover:opacity-70"
             style={{ color: "var(--color-text-muted)" }}
           >
-            {readOnly ? "Close" : "Cancel"}
+            {canSave ? "Cancel" : "Close"}
           </button>
-          {!readOnly && (
+          {canSave && (
             <button
               type="button"
-              onClick={() => onSave({ description: desc, columns: own })}
-              className="rounded px-3 py-1.5 text-sm font-medium text-white"
+              disabled={saving || nameMissing}
+              onClick={() =>
+                onSave({
+                  description: desc,
+                  columns: own,
+                  ...(identity ? { name: name.trim(), slug: slug.trim() } : {}),
+                })
+              }
+              className="rounded px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
               style={{ backgroundColor: "var(--color-accent)" }}
             >
-              Save
+              {saving ? "Saving…" : "Save"}
             </button>
           )}
         </div>
@@ -307,6 +393,12 @@ export default function ProfileModal({
     </div>
   );
 }
+
+const inputStyle = {
+  backgroundColor: "var(--color-surface)",
+  borderColor: "var(--color-border)",
+  color: "var(--color-text)",
+};
 
 /** A column's name, with the item types it belongs to when another
  *  field shares that name (a standard's Pages vs an article's). */
