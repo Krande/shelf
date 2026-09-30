@@ -6,6 +6,7 @@ defined alongside the action they authorise.
 """
 
 import uuid
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Annotated, Literal
 
@@ -43,6 +44,23 @@ class ApiTokenCreate(BaseModel):
     expires_at: datetime | None = None
 
 
+class ApiTokenUpdate(BaseModel):
+    """Everything about a token except its secret.
+
+    A field left out stays as it is. For the two allow-lists and
+    `expires_at`, an explicit null clears the restriction — so "left out"
+    and "null" mean different things, and the route reads
+    `model_fields_set` to tell them apart.
+    """
+
+    name: str | None = None
+    scopes: list[Scope] | None = None
+    allowed_space_ids: list[uuid.UUID] | None = None
+    allowed_collection_ids: list[uuid.UUID] | None = None
+    include_descendants: bool | None = None
+    expires_at: datetime | None = None
+
+
 class ApiTokenResponse(BaseModel):
     """Redacted view used by GET /api/me/tokens."""
 
@@ -64,6 +82,100 @@ class ApiTokenCreated(ApiTokenResponse):
     """Same as the redacted view, plus the one-time plaintext."""
 
     plaintext: str
+
+
+def _check_name(raw: str) -> str:
+    name = raw.strip()
+    if not name:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Name required")
+    return name
+
+
+def _check_scopes(scopes: Sequence[str]) -> None:
+    if not scopes:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "At least one scope is required (upload / search / download)",
+        )
+    bad = [s for s in scopes if s not in _VALID_SCOPES]
+    if bad:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Unknown scope(s): {', '.join(bad)}",
+        )
+    operator_only = [s for s in scopes if s in _OPERATOR_ONLY_SCOPES]
+    if operator_only:
+        # Defence in depth: even though operator-only scopes aren't in
+        # _VALID_SCOPES (so the previous check already rejects them),
+        # the explicit message saves a round trip the day someone
+        # widens _VALID_SCOPES and forgets to update this gate.
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Scope(s) reserved for operator provisioning: "
+            f"{', '.join(operator_only)}",
+        )
+
+
+async def _check_spaces(
+    db: AsyncSession, user: User, space_ids: list[uuid.UUID] | None
+) -> None:
+    if space_ids is None:
+        return
+    if not space_ids:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "allowed_space_ids is empty — drop the field for access to "
+            "every space you can reach",
+        )
+    # Each one has to be a space the minter can already read, so a
+    # token can never be minted into somewhere its owner can't go.
+    # Inherited spaces count: reading a subscribed Standards space
+    # from a script is a real thing to want.
+    reachable = {
+        sid
+        for sid in (
+            await db.execute(
+                select(Space.id).where(
+                    Space.id.in_(readable_item_space_ids(user.id))
+                )
+            )
+        ).scalars().all()
+    }
+    for sid in space_ids:
+        if sid not in reachable:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"Space {sid} is not one you can access",
+            )
+
+
+async def _check_collections(
+    db: AsyncSession, user: User, collection_ids: list[uuid.UUID] | None
+) -> None:
+    if collection_ids is None:
+        return
+    # Empty list would mean "no collections" — silently treat that
+    # as a configuration error rather than minting a useless token.
+    if not collection_ids:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "allowed_collection_ids is empty — drop the field for unrestricted access",
+        )
+    for cid in collection_ids:
+        coll = await db.get(Collection, cid)
+        if coll is None:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"Unknown collection {cid}",
+            )
+        # Confirm access via the space. A token can only ever be
+        # scoped to collections the minter can already reach.
+        space = await db.get(Space, coll.space_id)
+        if space is None or (await effective_role(db, space, user.id))[0] is None:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"Collection {cid} is not one you can access",
+            )
 
 
 @router.get("/api/me/tokens", response_model=list[ApiTokenResponse])
@@ -89,85 +201,10 @@ async def create_token(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> ApiTokenCreated:
-    name = payload.name.strip()
-    if not name:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Name required")
-
-    if not payload.scopes:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            "At least one scope is required (upload / search / download)",
-        )
-    bad = [s for s in payload.scopes if s not in _VALID_SCOPES]
-    if bad:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            f"Unknown scope(s): {', '.join(bad)}",
-        )
-    operator_only = [s for s in payload.scopes if s in _OPERATOR_ONLY_SCOPES]
-    if operator_only:
-        # Defence in depth: even though operator-only scopes aren't in
-        # _VALID_SCOPES (so the previous check already rejects them),
-        # the explicit message saves a round trip the day someone
-        # widens _VALID_SCOPES and forgets to update this gate.
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            f"Scope(s) reserved for operator provisioning: "
-            f"{', '.join(operator_only)}",
-        )
-
-    if payload.allowed_space_ids is not None:
-        if not payload.allowed_space_ids:
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST,
-                "allowed_space_ids is empty — drop the field for access to "
-                "every space you can reach",
-            )
-        # Each one has to be a space the minter can already read, so a
-        # token can never be minted into somewhere its owner can't go.
-        # Inherited spaces count: reading a subscribed Standards space
-        # from a script is a real thing to want.
-        reachable = {
-            sid
-            for sid in (
-                await db.execute(
-                    select(Space.id).where(
-                        Space.id.in_(readable_item_space_ids(user.id))
-                    )
-                )
-            ).scalars().all()
-        }
-        for sid in payload.allowed_space_ids:
-            if sid not in reachable:
-                raise HTTPException(
-                    status.HTTP_400_BAD_REQUEST,
-                    f"Space {sid} is not one you can access",
-                )
-
-    if payload.allowed_collection_ids is not None:
-        # Empty list would mean "no collections" — silently treat that
-        # as a configuration error rather than minting a useless token.
-        if not payload.allowed_collection_ids:
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST,
-                "allowed_collection_ids is empty — drop the field for unrestricted access",
-            )
-        # Every collection must belong to the calling user.
-        for cid in payload.allowed_collection_ids:
-            coll = await db.get(Collection, cid)
-            if coll is None:
-                raise HTTPException(
-                    status.HTTP_400_BAD_REQUEST,
-                    f"Unknown collection {cid}",
-                )
-            # Confirm access via the space. A token can only ever be
-            # scoped to collections the minter can already reach.
-            space = await db.get(Space, coll.space_id)
-            if space is None or (await effective_role(db, space, user.id))[0] is None:
-                raise HTTPException(
-                    status.HTTP_400_BAD_REQUEST,
-                    f"Collection {cid} is not one you can access",
-                )
+    name = _check_name(payload.name)
+    _check_scopes(payload.scopes)
+    await _check_spaces(db, user, payload.allowed_space_ids)
+    await _check_collections(db, user, payload.allowed_collection_ids)
 
     minted = mint()
     token = ApiToken(
@@ -210,6 +247,54 @@ async def create_token(
         created_at=token.created_at,
         plaintext=minted.plaintext,
     )
+
+
+@router.patch("/api/me/tokens/{token_id}", response_model=ApiTokenResponse)
+async def update_token(
+    token_id: uuid.UUID,
+    payload: ApiTokenUpdate,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+) -> ApiToken:
+    """Change a token's name, scopes, reach or expiry in place.
+
+    The secret stays the same, so scripts and shelf.toml setups holding
+    it keep working; only what it may do changes. Every value is checked
+    exactly as it is at mint time — a token can't be widened past what
+    its owner can reach by editing it instead of creating it.
+    """
+    token = await db.get(ApiToken, token_id)
+    if token is None or token.user_id != user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Token not found")
+
+    sent = payload.model_fields_set
+    if "name" in sent:
+        token.name = _check_name(payload.name or "")
+    if "scopes" in sent:
+        _check_scopes(payload.scopes or [])
+        token.scopes = list(payload.scopes or [])
+    if "allowed_space_ids" in sent:
+        await _check_spaces(db, user, payload.allowed_space_ids)
+        token.allowed_space_ids = (
+            [str(s) for s in payload.allowed_space_ids]
+            if payload.allowed_space_ids
+            else None
+        )
+    if "allowed_collection_ids" in sent:
+        await _check_collections(db, user, payload.allowed_collection_ids)
+        token.allowed_collection_ids = (
+            [str(c) for c in payload.allowed_collection_ids]
+            if payload.allowed_collection_ids
+            else None
+        )
+    if "include_descendants" in sent and payload.include_descendants is not None:
+        token.include_descendants = payload.include_descendants
+    if "expires_at" in sent:
+        token.expires_at = payload.expires_at
+
+    await db.commit()
+    await db.refresh(token)
+    return token
 
 
 @router.delete(

@@ -16,6 +16,7 @@ export type ItemType =
   | "conferencePaper"
   | "thesis"
   | "report"
+  | "manual"
   | "preprint"
   | "webpage"
   | "patent"
@@ -44,6 +45,7 @@ export const ITEM_TYPES: { value: ItemType; label: string }[] = [
   { value: "conferencePaper", label: "Conference Paper" },
   { value: "thesis", label: "Thesis" },
   { value: "report", label: "Report" },
+  { value: "manual", label: "Manual" },
   { value: "preprint", label: "Preprint" },
   { value: "webpage", label: "Web Page" },
   { value: "patent", label: "Patent" },
@@ -94,6 +96,21 @@ export const TYPE_FIELDS: Record<string, readonly string[]> = {
   conferencePaper: ["proceedingsTitle", "publisher", "place", "DOI", "pages"],
   thesis: ["university", "place", "thesisType"],
   report: ["institution", "place", "reportNumber"],
+  // Documentation *for* a piece of software (a keyword reference, a file
+  // format description, a user or theory manual), where `computerProgram`
+  // is the software itself. `software` + `versionNumber` say which release
+  // the text describes — a keyword manual for one Abaqus release is not
+  // the manual for the next.
+  manual: [
+    "software",
+    "versionNumber",
+    "company",
+    "manualType",
+    "documentNumber",
+    "edition",
+    "language",
+    "numberOfPages",
+  ],
   webpage: ["websiteTitle", "accessDate"],
   preprint: ["repository", "DOI"],
   patent: ["country", "assignee", "patentNumber"],
@@ -152,11 +169,32 @@ export const FIELD_LABELS: Record<string, string> = {
   recipient: "Recipient",
   letterType: "Letter Type",
   manuscriptType: "Manuscript Type",
+  software: "Software",
+  manualType: "Manual Type",
+  documentNumber: "Document Number",
   note: "Note",
 };
 
 /** Multi-line fields render as a textarea instead of a single-line input. */
 export const TEXTAREA_FIELDS = new Set(["abstractNote", "extra", "note"]);
+
+/**
+ * Suggested values offered as a datalist under a free-text input. They
+ * are suggestions only; any other value is kept as typed.
+ */
+export const FIELD_SUGGESTIONS: Record<string, readonly string[]> = {
+  manualType: [
+    "User Manual",
+    "Keywords Reference",
+    "File Format Description",
+    "Theory Manual",
+    "Verification Manual",
+    "Example Problems",
+    "Installation Guide",
+    "Release Notes",
+    "Programming Reference",
+  ],
+};
 
 export function fieldsForType(itemType: string): string[] {
   return [

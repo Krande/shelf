@@ -1,6 +1,6 @@
 # shelf
 
-A self-hosted web library for documents: reference metadata, a PDF reader, and an OCR pipeline, in one image.
+A self-hosted web library for documents: reference metadata, a PDF reader, and an OCR pipeline.
 
 I wanted a reference manager I could run on my own hardware, that kept the PDFs searchable, so I wrote one. It works for what I use it for. It is not a product, and it has one deployment behind it — expect rough edges, missing conveniences, and an API that will change without much ceremony.
 
@@ -33,7 +33,9 @@ pixi global install shelf-cli \
 ```
 
 The tag is the shelf release the client belongs to; it is kept at the latest
-one. Point it at an instance with a token minted under Settings → API tokens
+one. pixi records that tag in its global manifest, so `pixi global update`
+re-installs the *same* release rather than moving to a newer one. To upgrade,
+run the command above again with the new tag. Point it at an instance with a token minted under Settings → API tokens
 (see [API tokens](#api-tokens)):
 
 ```toml
@@ -341,13 +343,16 @@ its owner, like anyone else.
 
 ## Running your own instance
 
-```bash
-docker run -p 8000:8000 ghcr.io/krande/shelf:latest
-```
+The application image, `ghcr.io/krande/shelf`, serves the API and the web
+interface, and runs the CPU OCR worker too, started with a different command.
+It isn't a whole deployment on its own. It needs PostgreSQL and an
+S3-compatible object store next to it, plus NATS for background processing. OCR for poor-quality scans uses a separate GPU worker image built
+from `Dockerfile.gpu`.
 
-One image serves the API and the web interface; a Helm chart is in
-[`deploy/helm/shelf/`](./deploy/helm/shelf/). Configuration, SSO, background
-OCR workers and local development are in [DEVELOPERS.md](./DEVELOPERS.md).
+A Helm chart for the application and its worker is in
+[`deploy/helm/shelf/`](./deploy/helm/shelf/), and `compose.yaml` runs the
+supporting services locally. Configuration, SSO, the OCR workers and local
+development are in [DEVELOPERS.md](./DEVELOPERS.md).
 
 ## Contributing
 

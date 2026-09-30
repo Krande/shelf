@@ -80,6 +80,7 @@ _BIBTEX_TYPE: dict[str, str] = {
     "conferencePaper": "inproceedings",
     "thesis": "phdthesis",
     "report": "techreport",
+    "manual": "manual",
     "preprint": "misc",
     "webpage": "misc",
     "patent": "misc",
@@ -174,6 +175,18 @@ def render_bibtex(items: Iterable[Item]) -> str:
             v = data.get(src)
             if isinstance(v, str) and v.strip():
                 fields.append(_bibtex_field(dst, v.strip()))
+        if item.item_type == "manual":
+            # @manual's own slots: the vendor is the organization, and
+            # biblatex's `version` carries the software release.
+            for src, dst in (
+                ("company", "organization"),
+                ("versionNumber", "version"),
+                ("edition", "edition"),
+                ("documentNumber", "number"),
+            ):
+                v = data.get(src)
+                if isinstance(v, str) and v.strip():
+                    fields.append(_bibtex_field(dst, v.strip()))
         out.append(
             "@" + entry_type + "{" + cite + ",\n" + ",\n".join(fields) + "\n}"
         )
@@ -191,6 +204,9 @@ _CSL_TYPE: dict[str, str] = {
     "conferencePaper": "paper-conference",
     "thesis": "thesis",
     "report": "report",
+    # CSL has no manual type; "report" is what citation styles format
+    # closest (publisher + number).
+    "manual": "report",
     "preprint": "article",
     "webpage": "webpage",
     "patent": "patent",
@@ -295,6 +311,7 @@ _RDF_TYPE: dict[str, str] = {
     "conferencePaper": "bib:ConferencePaper",
     "thesis": "bib:Thesis",
     "report": "bib:Report",
+    "manual": "bib:Document",
     "preprint": "bib:Document",
     "webpage": "bib:Document",
     "patent": "bib:Patent",

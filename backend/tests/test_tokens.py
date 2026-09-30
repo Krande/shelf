@@ -93,6 +93,78 @@ async def test_create_token_rejects_collection_owned_by_other(
     assert r.status_code == 400
 
 
+async def test_update_token_changes_fields_and_keeps_secret(
+    client: AsyncClient,
+) -> None:
+    slug = await _login(client)
+    coll = (
+        await client.post(f"/api/spaces/{slug}/collections", json={"name": "C"})
+    ).json()
+    plaintext, body = await _make_token(client, scopes=["search"])
+
+    r = await client.patch(
+        f"/api/me/tokens/{body['id']}",
+        json={
+            "name": "renamed",
+            "scopes": ["search", "upload"],
+            "allowed_collection_ids": [coll["id"]],
+            "include_descendants": True,
+            "expires_at": "2099-01-01T00:00:00Z",
+        },
+    )
+    assert r.status_code == 200, r.text
+    updated = r.json()
+    assert updated["name"] == "renamed"
+    assert updated["scopes"] == ["search", "upload"]
+    assert updated["allowed_collection_ids"] == [coll["id"]]
+    assert updated["include_descendants"] is True
+    assert updated["expires_at"].startswith("2099-01-01")
+    assert updated["prefix"] == body["prefix"]
+    assert "plaintext" not in updated
+
+    # Fields left out stay put; an explicit null lifts a restriction.
+    r = await client.patch(
+        f"/api/me/tokens/{body['id']}",
+        json={"allowed_collection_ids": None, "expires_at": None},
+    )
+    assert r.status_code == 200, r.text
+    updated = r.json()
+    assert updated["name"] == "renamed"
+    assert updated["allowed_collection_ids"] is None
+    assert updated["expires_at"] is None
+
+    # The same secret still authenticates, now with the new scopes.
+    client.cookies.clear()
+    r = await client.get(
+        "/api/v1/search", headers={"Authorization": f"Bearer {plaintext}"}
+    )
+    assert r.status_code == 200, r.text
+
+
+async def test_update_token_validates_like_create(client: AsyncClient) -> None:
+    await _login(client, "alice@example.com")
+    alice_slug = f"u-{(await client.get('/api/me')).json()['id'].replace('-', '')[:8]}"
+    coll = (
+        await client.post(
+            f"/api/spaces/{alice_slug}/collections", json={"name": "C"}
+        )
+    ).json()
+    _, alices = await _make_token(client)
+
+    await client.post("/auth/logout")
+    await _login(client, "mallory@example.com")
+    _, body = await _make_token(client)
+    token_url = f"/api/me/tokens/{body['id']}"
+
+    assert (await client.patch(token_url, json={"scopes": []})).status_code == 400
+    assert (await client.patch(token_url, json={"name": "  "})).status_code == 400
+    r = await client.patch(token_url, json={"allowed_collection_ids": [coll["id"]]})
+    assert r.status_code == 400
+    # Someone else's token is not there to edit.
+    r = await client.patch(f"/api/me/tokens/{alices['id']}", json={"name": "x"})
+    assert r.status_code == 404
+
+
 # ── bearer auth ───────────────────────────────────────────────────────────
 
 

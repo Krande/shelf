@@ -32,7 +32,12 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { canEdit, fetchMySpaces, type Space } from "@/api/spaces";
+import {
+  canEdit,
+  fetchInherited,
+  fetchMySpaces,
+  type Space,
+} from "@/api/spaces";
 import {
   PREF_SUBCOLLECTION_AUTO_EXPAND_BELOW,
   usePref,
@@ -90,6 +95,7 @@ import CollectionRail, {
 import BulkAddToCollection from "@/components/library/BulkAddToCollection";
 import BulkCopyToSpace from "@/components/library/BulkCopyToSpace";
 import SearchScopePopover from "@/components/library/SearchScopePopover";
+import ColumnPicker from "@/components/library/ColumnPicker";
 import FulltextHitsRow from "@/components/library/FulltextHitsRow";
 
 function formatDate(s: string): string {
@@ -242,14 +248,54 @@ function SortHeader({
 // turning the table fixed is not itself a visible change. Title has no
 // entry: it takes whatever is left, so the common case of a wide window
 // spends the extra space on the one column that benefits.
-const COLUMN_KEYS = ["title", "creator", "type", "tags", "updated"] as const;
+const COLUMN_KEYS = [
+  "title",
+  "creator",
+  "type",
+  "space",
+  "collection",
+  "tags",
+  "updated",
+] as const;
+type ColumnKey = (typeof COLUMN_KEYS)[number];
 const COLUMN_DEFAULTS: Record<string, number> = {
   title: 420,
   creator: 200,
   type: 140,
+  space: 180,
+  collection: 240,
   tags: 220,
   updated: 180,
 };
+
+// Columns the reader can switch off or on. Space defaults on, but only
+// exists at all while the space inherits another; a collection path can
+// run long, so it's opt-in.
+type OptionalColumn = "space" | "collection";
+const OPTIONAL_COLUMN_DEFAULTS: Record<OptionalColumn, boolean> = {
+  space: true,
+  collection: false,
+};
+const OPTIONAL_COLUMNS_PREF_KEY = "shelf.libraryOptionalColumns";
+
+function readOptionalColumns(): Record<OptionalColumn, boolean> {
+  try {
+    const raw = window.localStorage.getItem(OPTIONAL_COLUMNS_PREF_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : null;
+    if (!parsed || typeof parsed !== "object") return OPTIONAL_COLUMN_DEFAULTS;
+    const p = parsed as Record<string, unknown>;
+    return {
+      space:
+        typeof p.space === "boolean" ? p.space : OPTIONAL_COLUMN_DEFAULTS.space,
+      collection:
+        typeof p.collection === "boolean"
+          ? p.collection
+          : OPTIONAL_COLUMN_DEFAULTS.collection,
+    };
+  } catch {
+    return OPTIONAL_COLUMN_DEFAULTS;
+  }
+}
 
 const RAIL_PREF_KEY = "shelf:rail-open";
 
@@ -676,6 +722,82 @@ export default function LibraryPage() {
     queryKey: ["spaces", "with-inherited"],
     queryFn: () => fetchMySpaces({ includeInherited: true }),
   });
+
+  // What the browsed space inherits. Only its length matters here: the
+  // Space column earns its width when items can come from more than one
+  // space, and is noise when they can't.
+  const inherits = useQuery({
+    queryKey: ["inherits", slug],
+    queryFn: () => fetchInherited(slug!),
+    enabled: !!slug,
+  });
+  const inheritsAny =
+    (inherits.data?.length ?? 0) > 0 ||
+    loadedItems.some((i) => i.is_inherited);
+
+  const [optionalColumns, setOptionalColumns] =
+    useState<Record<OptionalColumn, boolean>>(readOptionalColumns);
+  const toggleOptionalColumn = useCallback((key: string) => {
+    setOptionalColumns((prev) => {
+      const next = { ...prev, [key]: !prev[key as OptionalColumn] };
+      try {
+        window.localStorage.setItem(
+          OPTIONAL_COLUMNS_PREF_KEY,
+          JSON.stringify(next),
+        );
+      } catch {
+        // Not remembered, but still applied for this session.
+      }
+      return next;
+    });
+  }, []);
+  const showSpaceColumn = inheritsAny && optionalColumns.space;
+  const showCollectionColumn = optionalColumns.collection;
+  const visibleColumns = useMemo<ColumnKey[]>(
+    () =>
+      COLUMN_KEYS.filter(
+        (k) =>
+          (k !== "space" || showSpaceColumn) &&
+          (k !== "collection" || showCollectionColumn),
+      ),
+    [showSpaceColumn, showCollectionColumn],
+  );
+  // Checkbox and filler cells on either side of the sized columns.
+  const colCount = visibleColumns.length + 2;
+
+  const spaceNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const s of spacesWithInherited.data ?? []) map.set(s.id, s.name);
+    return map;
+  }, [spacesWithInherited.data]);
+
+  // "Parent › Child" for every collection this space can see, its
+  // inherited ones included, so an inherited item's folders resolve too.
+  const collectionPathById = useMemo(() => {
+    const byId = new Map<string, Collection>();
+    for (const c of collections.data ?? []) byId.set(c.id, c);
+    const paths = new Map<string, string>();
+    const pathOf = (c: Collection, depth = 0): string => {
+      const cached = paths.get(c.id);
+      if (cached !== undefined) return cached;
+      const parent = c.parent_id ? byId.get(c.parent_id) : undefined;
+      // The depth cap only guards against a malformed cycle.
+      const path =
+        parent && depth < 32 ? `${pathOf(parent, depth + 1)} › ${c.name}` : c.name;
+      paths.set(c.id, path);
+      return path;
+    };
+    for (const c of byId.values()) pathOf(c);
+    return paths;
+  }, [collections.data]);
+  const collectionPaths = useCallback(
+    (item: Item): string[] =>
+      item.collection_ids
+        .map((id) => collectionPathById.get(id))
+        .filter((p): p is string => !!p)
+        .sort(),
+    [collectionPathById],
+  );
 
   // ?item=<id> may name an item outside the current page of list results
   // — arriving from the landing-page search dropdown, or coming back
@@ -1550,6 +1672,27 @@ export default function LibraryPage() {
                   ))}
                 </select>
               )}
+              <ColumnPicker
+                options={[
+                  ...(inheritsAny
+                    ? [
+                        {
+                          key: "space",
+                          label: "Space",
+                          checked: optionalColumns.space,
+                          hint: "Where an inherited item lives",
+                        },
+                      ]
+                    : []),
+                  {
+                    key: "collection",
+                    label: "Collection",
+                    checked: optionalColumns.collection,
+                    hint: "Full folder path; can be long",
+                  },
+                ]}
+                onToggle={toggleOptionalColumn}
+              />
               {view === "library" && (
                 <>
                   {checkedIds.size > 0 && (
@@ -1800,7 +1943,7 @@ export default function LibraryPage() {
               {listEntries.length > 0 && (
                 <table
                   className="w-full table-fixed text-sm"
-                  style={{ minWidth: columns.total([...COLUMN_KEYS]) + 32 }}
+                  style={{ minWidth: columns.total(visibleColumns) + 32 }}
                 >
                   <thead
                     className="sticky top-0 border-b text-left text-xs uppercase tracking-wider"
@@ -1848,6 +1991,27 @@ export default function LibraryPage() {
                         columnKey="type"
                         columns={columns}
                       />
+                      {showSpaceColumn && (
+                        <th
+                          className="relative px-4 py-2"
+                          style={{ width: columns.width("space") }}
+                        >
+                          Space
+                          <ColumnResizer columnKey="space" columns={columns} />
+                        </th>
+                      )}
+                      {showCollectionColumn && (
+                        <th
+                          className="relative px-4 py-2"
+                          style={{ width: columns.width("collection") }}
+                        >
+                          Collection
+                          <ColumnResizer
+                            columnKey="collection"
+                            columns={columns}
+                          />
+                        </th>
+                      )}
                       <th
                         className="relative px-4 py-2"
                         style={{ width: columns.width("tags") }}
@@ -1876,7 +2040,7 @@ export default function LibraryPage() {
                       if (entry.kind === "subheader") {
                         return (
                           <tr key="subcollections">
-                            <td colSpan={7} className="px-0 py-0">
+                            <td colSpan={colCount} className="px-0 py-0">
                               <button
                                 type="button"
                                 onClick={() => setSubOpenOverride(!subOpen)}
@@ -1908,7 +2072,7 @@ export default function LibraryPage() {
                         return (
                           <tr key={`group-${entry.collection.id}`}>
                             <td
-                              colSpan={7}
+                              colSpan={colCount}
                               className="px-3 py-1.5 pl-7 text-xs"
                               style={{ color: "var(--color-text-muted)" }}
                             >
@@ -1935,7 +2099,7 @@ export default function LibraryPage() {
                             }}
                           >
                             <td
-                              colSpan={7}
+                              colSpan={colCount}
                               className="px-4 py-1.5 text-xs uppercase tracking-wider"
                               style={{ color: "var(--color-text-muted)" }}
                             >
@@ -1951,7 +2115,7 @@ export default function LibraryPage() {
                             key={`hits-${entry.itemId}`}
                             itemId={entry.itemId}
                             query={debouncedQuery}
-                            colSpan={7}
+                            colSpan={colCount}
                             onOpen={setSelectedId}
                           />
                         );
@@ -2061,6 +2225,24 @@ export default function LibraryPage() {
                           >
                             {itemTypeLabel(it.item_type)}
                           </td>
+                          {showSpaceColumn && (
+                            <td
+                              className="truncate px-4 py-2 text-xs"
+                              style={{ color: "var(--color-text-muted)" }}
+                              title={spaceNameById.get(it.space_id)}
+                            >
+                              {spaceNameById.get(it.space_id) ?? ""}
+                            </td>
+                          )}
+                          {showCollectionColumn && (
+                            <td
+                              className="truncate px-4 py-2 text-xs"
+                              style={{ color: "var(--color-text-muted)" }}
+                              title={collectionPaths(it).join("\n")}
+                            >
+                              {collectionPaths(it).join("; ")}
+                            </td>
+                          )}
                           <td className="overflow-hidden px-4 py-2">
                             <TagChips
                               tags={tagNamesById(it.tag_ids)}

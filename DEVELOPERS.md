@@ -400,11 +400,13 @@ importer and editions filed by hand land in one revision history.
 
 ## Deployment
 
-Images are published to the GitHub Container Registry on each release tag:
-
-```bash
-docker run -p 8000:8000 ghcr.io/krande/shelf:latest
-```
+The application image is published to the GitHub Container Registry on each
+release tag, as `ghcr.io/krande/shelf:<version>` and `:latest`. It runs the API
+and SPA by default, and the CPU worker with `python -m shelf.worker` (which is
+how the Helm chart's worker Deployment uses it). It won't start usefully alone:
+point it at PostgreSQL (`SHELF_DATABASE_URL`) and an S3-compatible store, and
+at NATS (`SHELF_NATS_URL`) for background processing. The GPU worker is a
+separate image built from `Dockerfile.gpu` and isn't published by CI.
 
 The image bundles the built SPA and serves it from the same origin as the API, and installs the locked pixi environment, so what CI tested is what runs. A Helm chart is in [`deploy/helm/shelf/`](./deploy/helm/shelf/), with [`deploy/examples/values-example.yaml`](./deploy/examples/values-example.yaml) as a starting point. The chart expects a Kubernetes Secret holding at least `SHELF_DATABASE_URL` and `SHELF_SESSION_SECRET_KEY`.
 
