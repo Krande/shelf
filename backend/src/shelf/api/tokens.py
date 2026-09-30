@@ -6,6 +6,7 @@ defined alongside the action they authorise.
 """
 
 import uuid
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Annotated, Literal
 
@@ -90,7 +91,7 @@ def _check_name(raw: str) -> str:
     return name
 
 
-def _check_scopes(scopes: list[str]) -> None:
+def _check_scopes(scopes: Sequence[str]) -> None:
     if not scopes:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
