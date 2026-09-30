@@ -2,6 +2,13 @@
 
 
 
+## v0.14.2 (2026-09-30)
+
+### Fix
+
+* fix(preflight): refuse to serve a database schema older than the build (#22) ([`8bd811e`](https://github.com/Krande/shelf/commit/8bd811e0a6834d201a778d72a209419c9f787e94))
+
+
 ## v0.14.1 (2026-09-30)
 
 ### Fix
