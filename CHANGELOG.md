@@ -2,6 +2,13 @@
 
 
 
+## v0.12.0 (2026-09-30)
+
+### Feature
+
+* feat: reader details drawer, generated README figures, and a user-facing README (#18) ([`db36767`](https://github.com/Krande/shelf/commit/db367677f69984c094c7f552c36db91731b85d8e))
+
+
 ## v0.11.1 (2026-09-29)
 
 ### Fix
