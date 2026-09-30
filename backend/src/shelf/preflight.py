@@ -21,12 +21,15 @@ would otherwise exercise.
 """
 
 import asyncio
+import functools
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
+from alembic.script import ScriptDirectory
 from obstore import list_with_delimiter_async
 from sqlalchemy import text
 
@@ -101,12 +104,17 @@ async def _retrying(name: str, check: Check) -> CheckResult:
 
 
 async def check_database() -> str:
-    """Connect, and confirm the migrations have been applied.
+    """Connect, and confirm the migrations this build needs have run.
 
     An unmigrated database is a configuration fault rather than a
     transient one: the schema is created by a separate migration step,
-    so serving against an empty database only produces confusing errors
-    further in.
+    so serving against it only produces confusing errors further in.
+
+    "Unmigrated" includes *behind*, not just empty. The migration step
+    runs its own image, so a deployment that bumps the app's image tag
+    but not the migration job's comes up on the previous schema - and
+    every query touching a new column 500s, which to a user reads as
+    their library having vanished.
     """
     async with engine.connect() as conn:
         await conn.execute(text("SELECT 1"))
@@ -116,7 +124,49 @@ async def check_database() -> str:
             "database has no alembic_version row - run the migrations "
             "('alembic upgrade head') before starting the API"
         )
-    return f"connected, schema at {revision}"
+    return schema_verdict(str(revision))
+
+
+# backend/src/shelf/preflight.py -> backend/alembic. The image keeps the
+# backend as an editable install with its migrations beside it.
+MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "alembic"
+
+
+@functools.cache
+def _migration_history() -> tuple[frozenset[str], frozenset[str]] | None:
+    """(every revision this build ships, its heads) - read once, since the
+    readiness probe re-runs the database check."""
+    if not (MIGRATIONS_DIR / "versions").is_dir():
+        return None
+    script = ScriptDirectory(str(MIGRATIONS_DIR))
+    known = frozenset(s.revision for s in script.walk_revisions())
+    return known, frozenset(script.get_heads())
+
+
+def schema_verdict(revision: str) -> str:
+    """Whether a database at `revision` can serve this build.
+
+    Only a schema *behind* the code is refused. One *ahead* - a revision
+    this build has never heard of - is what every old pod sees for the
+    length of a rolling upgrade, after the new release's migration has
+    run; failing readiness on it would take the old pods out of service
+    before the new ones are up. Migrations here are additive, so old code
+    keeps working against the newer schema.
+    """
+    history = _migration_history()
+    if history is None:
+        return f"connected, schema at {revision} (no migration scripts to compare against)"
+    known, heads = history
+    if revision in heads:
+        return f"connected, schema at {revision} (current)"
+    if revision not in known:
+        return f"connected, schema at {revision}, newer than this build - an upgrade in progress?"
+    raise PreflightError(
+        f"database schema is at {revision}, but this build needs "
+        f"{', '.join(sorted(heads))}. Run the migrations with this release's "
+        "image ('alembic upgrade head') - a migration job still on the "
+        "previous image leaves the schema behind"
+    )
 
 
 async def check_object_store() -> str:
