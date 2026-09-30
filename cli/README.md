@@ -38,13 +38,19 @@ shelf whoami
 
 ## Searching and browsing
 
-`shelf search` finds what the landing page finds — titles, creators,
-abstracts and **PDF body text**, title hits first:
+`shelf search` finds what the landing page finds — titles, a standard's
+designation, creators, abstracts and **PDF body text**, title hits first:
 
 ```sh
 shelf search "load case"                        # JSON, one row per document
 shelf search "load case" --scope fulltext --hits 5   # + each row's first 5 matching pages
+shelf search "1993-1-9" --scope designation     # a standard by its code
+shelf search "NA:2009" --scope field:edition    # any other metadata field
 ```
+
+Any metadata field can be searched as `--scope field:NAME` (`field:edition`,
+`field:DOI`, `field:standardBody`). Those are opt-in and repeatable; naming
+one searches it alongside whatever other `--scope`s you give, and only those.
 
 `shelf browse` is the same search as a terminal UI. Type to search; each
 document is listed with the PDF pages it matched underneath.

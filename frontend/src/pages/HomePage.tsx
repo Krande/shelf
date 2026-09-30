@@ -18,7 +18,9 @@ import {
   fetchFulltextHits,
   type FulltextHitsAttachment,
   searchMyItems,
-  SEARCH_SCOPE_LABELS,
+  isBuiltinScope,
+  isDefaultScope,
+  scopeLabel,
   type Item,
   type SearchScope,
 } from "@/api/items";
@@ -64,7 +66,7 @@ export default function HomePage() {
   ]);
   const narrowed = useMemo(
     () =>
-      scope.length === 0 || scope.length < ALL_SEARCH_SCOPES.length,
+      scope.length === 0 || !isDefaultScope(scope),
     [scope],
   );
 
@@ -129,10 +131,18 @@ export default function HomePage() {
   // the user is still mid-keystroke. Fulltext hits a heavier index
   // than the others, so we debounce all of these by a beat to avoid
   // hammering the backend on every keystroke. Title is excluded —
-  // those rows are already shown above the status strip.
+  // those rows are already shown above the status strip. Designation
+  // comes first after it: a standard is usually searched for by the code
+  // it's known by, which its title often leaves out. Any metadata fields
+  // opted into from the scope popover get a section each, below the
+  // built-ins and above the PDF body, as the server ranks them.
+  const fieldScopes = useMemo(
+    () => scope.filter((s) => !isBuiltinScope(s)),
+    [scope],
+  );
   const COUNT_SCOPES: SearchScope[] = useMemo(
-    () => ["creators", "abstract", "extra", "fulltext"],
-    [],
+    () => ["designation", "creators", "abstract", "extra", ...fieldScopes, "fulltext"],
+    [fieldScopes],
   );
   // Items per scope section. Matches the backend's max page size so
   // the dropdown can show every match the API will hand us in one
@@ -306,7 +316,7 @@ export default function HomePage() {
       }
       return {
         scope,
-        label: SEARCH_SCOPE_LABELS[scope],
+        label: scopeLabel(scope),
         items: fresh,
         apiTotal: data?.total ?? 0,
         fetched: data?.items.length ?? 0,
@@ -842,16 +852,16 @@ export default function HomePage() {
                       disabled={!hasResults}
                       title={
                         loading
-                          ? `Searching ${SEARCH_SCOPE_LABELS[s].toLowerCase()}…`
+                          ? `Searching ${scopeLabel(s).toLowerCase()}…`
                           : count > 0
-                            ? `${count} match${count === 1 ? "" : "es"} in ${SEARCH_SCOPE_LABELS[s].toLowerCase()}${
+                            ? `${count} match${count === 1 ? "" : "es"} in ${scopeLabel(s).toLowerCase()}${
                                 overlapped > 0
                                   ? ` (+${overlapped} already listed above)`
                                   : ""
                               } — click to open`
                             : sd.apiTotal > 0
-                              ? `${sd.apiTotal} match${sd.apiTotal === 1 ? "" : "es"} in ${SEARCH_SCOPE_LABELS[s].toLowerCase()}, all already listed above`
-                              : `No matches in ${SEARCH_SCOPE_LABELS[s].toLowerCase()}`
+                              ? `${sd.apiTotal} match${sd.apiTotal === 1 ? "" : "es"} in ${scopeLabel(s).toLowerCase()}, all already listed above`
+                              : `No matches in ${scopeLabel(s).toLowerCase()}`
                       }
                       className="flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs disabled:cursor-default"
                       style={{
@@ -875,7 +885,7 @@ export default function HomePage() {
                           }}
                         />
                       )}
-                      <span>{SEARCH_SCOPE_LABELS[s]}</span>
+                      <span>{scopeLabel(s)}</span>
                       <span
                         className="tabular-nums"
                         style={{ color: "var(--color-text-muted)" }}

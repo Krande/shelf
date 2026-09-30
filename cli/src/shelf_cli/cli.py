@@ -17,6 +17,7 @@ Usage:
     shelf profiles pull <id> -o widgets.json       # capture what's there
     shelf search "widgets"
     shelf search "load case" --scope fulltext --hits 5
+    shelf search "NA:2009" --scope field:edition     # any metadata field
     shelf browse "load case"                       # interactive
     shelf open <attachment-id> --page 12           # local PDF, at page 12
     shelf open <attachment-id> --page 12 --web     # the shelf reader
@@ -37,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -292,6 +294,20 @@ def cmd_profiles_pull(args: argparse.Namespace) -> int:
 
 # ── wiring ───────────────────────────────────────────────────────────────
 
+# The server's default search scopes, in its rank order. Any other
+# metadata field is `field:<name>`, checked for shape here so a typo fails
+# before the request rather than as a 422.
+SEARCH_SCOPES = ("title", "designation", "creators", "abstract", "extra", "fulltext")
+_FIELD_SCOPE = re.compile(r"^field:[A-Za-z][A-Za-z0-9_]{0,63}$")
+
+
+def _search_scope(value: str) -> str:
+    if value in SEARCH_SCOPES or _FIELD_SCOPE.match(value):
+        return value
+    raise argparse.ArgumentTypeError(
+        f"{value!r} is not a scope: use one of {', '.join(SEARCH_SCOPES)}, or field:NAME"
+    )
+
 _VERSION_HELP = (
     "latest (default): what the shelf reader shows — OCR'd and bookmarked where "
     "that has run; original: the bytes as uploaded; or an id from `shelf versions`"
@@ -373,8 +389,13 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument(
         "--scope",
         action="append",
-        choices=["title", "creators", "abstract", "extra", "fulltext"],
-        help="search only these fields; repeatable. Default: all of them",
+        type=_search_scope,
+        metavar="SCOPE",
+        help=(
+            f"search only these fields; repeatable. One of {', '.join(SEARCH_SCOPES)}, "
+            "or field:NAME for any other metadata field (field:edition). "
+            "Default: the named ones"
+        ),
     )
     search.add_argument(
         "--hits",

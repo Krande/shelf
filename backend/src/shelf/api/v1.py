@@ -55,7 +55,7 @@ from ..models import (
 from ..services import extraction, storage
 from ..services.storage import attachment_storage_key
 from .attachments import resolve_version
-from .items import _SNIPPET_PAD, SearchScope, _escape_ilike, _parse_search
+from .items import _SNIPPET_PAD, ScopeQuery, SearchScope, _escape_ilike, _parse_search
 from .standards import LinkRevisionRequest, item_revisions, upsert_revision
 
 router = APIRouter(tags=["v1"], prefix="/api/v1")
@@ -1535,7 +1535,7 @@ async def search(
     auth: Annotated[TokenAuth, Depends(require_scope("search"))],
     db: Annotated[AsyncSession, Depends(get_session)],
     q: Annotated[str | None, Query(max_length=200)] = None,
-    scope: Annotated[list[SearchScope] | None, Query()] = None,
+    scope: ScopeQuery = None,
     hits: Annotated[
         int,
         Query(
@@ -1649,7 +1649,7 @@ async def search(
     rows = (await db.execute(stmt)).scalars().unique().all()
     results = await _hydrate_collection_ids(db, list(rows))
 
-    wants_body = scope is None or SearchScope.fulltext in scope
+    wants_body = scope is None or SearchScope.fulltext.value in scope
     if hits and q and q.strip() and wants_body:
         found = await _page_hits(
             db, [it.id for it in rows], q.strip(), per_item=hits

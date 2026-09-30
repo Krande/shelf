@@ -64,10 +64,14 @@ import {
   createItem,
   deleteItem,
   getItem,
+  isBuiltinScope,
+  isDefaultScope,
+  isSearchScope,
   listItems,
   permanentDeleteItem,
   restoreItem,
-  SEARCH_SCOPE_LABELS,
+  scopeLabel,
+  scopeRankOrder,
   updateItem,
   type Item,
   type ItemSort,
@@ -147,6 +151,13 @@ function primaryScopeMatch(
   ) {
     return "title";
   }
+  if (
+    enabled.has("designation") &&
+    typeof item.data.designation === "string" &&
+    item.data.designation.toLowerCase().includes(needle)
+  ) {
+    return "designation";
+  }
   if (enabled.has("creators")) {
     const creators = item.data.creators ?? [];
     const blob = creators
@@ -170,6 +181,14 @@ function primaryScopeMatch(
     item.data.extra.toLowerCase().includes(needle)
   ) {
     return "extra";
+  }
+  // Opted-in metadata fields, below the built-ins as the server ranks them.
+  for (const s of enabled) {
+    if (isBuiltinScope(s)) continue;
+    const v = (item.data as Record<string, unknown>)[s.slice("field:".length)];
+    const text =
+      typeof v === "string" ? v : typeof v === "number" ? String(v) : "";
+    if (text.toLowerCase().includes(needle)) return s;
   }
   return null;
 }
@@ -426,21 +445,19 @@ export default function LibraryPage() {
     [searchParams],
   );
 
-  // Search scope: when no `scope=` is on the URL, all four are
-  // active. Empty array means "narrowed past every scope" — which
+  // Search scope: when no `scope=` is on the URL, the default built-ins
+  // are active. Empty array means "narrowed past every scope" — which
   // the backend treats as a guaranteed no-match — so we surface that
-  // explicitly instead of falling back to "all" silently.
+  // explicitly instead of falling back to the default silently.
   const searchScope = useMemo<SearchScope[]>(() => {
     const raw = searchParams.getAll("scope");
     if (raw.length === 0) return [...ALL_SEARCH_SCOPES];
-    return raw.filter((s): s is SearchScope =>
-      (ALL_SEARCH_SCOPES as string[]).includes(s),
-    );
+    return raw.filter(isSearchScope);
   }, [searchParams]);
 
   function setSearchScope(next: SearchScope[]) {
     searchParams.delete("scope");
-    if (next.length > 0 && next.length < ALL_SEARCH_SCOPES.length) {
+    if (next.length > 0 && !isDefaultScope(next)) {
       for (const s of next) searchParams.append("scope", s);
     } else if (next.length === 0) {
       // Encode the user's deliberate "search nothing" as a single
@@ -657,20 +674,17 @@ export default function LibraryPage() {
       return null;
     }
     const enabled = new Set(searchScope);
-    const groups: Record<SearchScope, Item[]> = {
-      title: [],
-      creators: [],
-      abstract: [],
-      extra: [],
-      fulltext: [],
+    // A Map, since opted-in field scopes make the set of groups open.
+    const groups = new Map<SearchScope, Item[]>();
+    const add = (s: SearchScope, it: Item) => {
+      const list = groups.get(s);
+      if (list) list.push(it);
+      else groups.set(s, [it]);
     };
     for (const it of flatItems) {
       const where = primaryScopeMatch(it, trimmed, enabled);
-      if (where) {
-        groups[where].push(it);
-      } else if (enabled.has("fulltext")) {
-        groups.fulltext.push(it);
-      }
+      if (where) add(where, it);
+      else if (enabled.has("fulltext")) add("fulltext", it);
     }
     return groups;
   }, [flatItems, debouncedQuery, searchScope]);
@@ -995,14 +1009,15 @@ export default function LibraryPage() {
   const ownEntries = useMemo(
     () =>
       groupedItems
-        ? ALL_SEARCH_SCOPES.filter((s) => groupedItems[s].length > 0).flatMap(
-            (s) => [
+        ? scopeRankOrder(searchScope)
+            .filter((s) => (groupedItems.get(s)?.length ?? 0) > 0)
+            .flatMap((s) => [
               {
                 kind: "header" as const,
                 scope: s,
-                count: groupedItems[s].length,
+                count: groupedItems.get(s)!.length,
               },
-              ...groupedItems[s].flatMap((it) => {
+              ...groupedItems.get(s)!.flatMap((it) => {
                 const row = {
                   kind: "row" as const,
                   item: it,
@@ -1017,15 +1032,14 @@ export default function LibraryPage() {
                 }
                 return [row];
               }),
-            ],
-          )
+            ])
         : flatItems.map((it) => ({
             kind: "row" as const,
             item: it,
             scope: null,
             rowKey: it.id,
           })),
-    [groupedItems, flatItems, expandedFulltextIds],
+    [groupedItems, flatItems, expandedFulltextIds, searchScope],
   );
 
   // The subcollection tree, as the rail draws it. Built in lib so the
@@ -1789,6 +1803,7 @@ export default function LibraryPage() {
               <SearchScopePopover
                 scope={searchScope}
                 onChange={setSearchScope}
+                preferTypes={itemTypesOnScreen}
               />
             </div>
 
@@ -2239,7 +2254,7 @@ export default function LibraryPage() {
                               className="px-4 py-1.5 text-xs uppercase tracking-wider"
                               style={{ color: "var(--color-text-muted)" }}
                             >
-                              {SEARCH_SCOPE_LABELS[entry.scope]} ·{" "}
+                              {scopeLabel(entry.scope)} ·{" "}
                               {entry.count}
                             </td>
                           </tr>

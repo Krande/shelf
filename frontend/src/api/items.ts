@@ -1,5 +1,5 @@
 import { apiFetch } from "./client";
-import type { Creator } from "./itemFields";
+import { labelFor, type Creator } from "./itemFields";
 
 /**
  * Item.data is opaque JSON on the wire; this typed view captures the
@@ -41,28 +41,85 @@ export interface Item {
 export type ItemStatus = "active" | "trashed" | "all";
 export type ItemSort = "updated" | "created" | "title" | "type";
 export type SortDirection = "asc" | "desc";
-export type SearchScope =
+/** The fields a search covers by default. */
+export type BuiltinSearchScope =
   | "title"
+  | "designation"
   | "creators"
   | "abstract"
   | "extra"
   | "fulltext";
 
-export const ALL_SEARCH_SCOPES: SearchScope[] = [
+/** A built-in scope, or any other metadata field opted into as
+ *  `field:<name>` (`field:edition`). Field scopes are never on by default:
+ *  each is one more comparison per row, so the plain search stays cheap. */
+export type SearchScope = BuiltinSearchScope | `field:${string}`;
+
+/** The default search, in the server's rank order: a title hit outranks
+ *  a designation hit, which outranks a creator hit, and so on down to the
+ *  PDF body. */
+export const ALL_SEARCH_SCOPES: BuiltinSearchScope[] = [
   "title",
+  "designation",
   "creators",
   "abstract",
   "extra",
   "fulltext",
 ];
 
-export const SEARCH_SCOPE_LABELS: Record<SearchScope, string> = {
+export const SEARCH_SCOPE_LABELS: Record<BuiltinSearchScope, string> = {
   title: "Title",
+  designation: "Designation",
   creators: "Creators",
   abstract: "Abstract",
   extra: "Extra",
   fulltext: "PDF body",
 };
+
+/** The server's cap on `field:` scopes in one search. */
+export const MAX_FIELD_SCOPES = 20;
+
+/** Metadata fields that already have a built-in scope, so aren't offered
+ *  again as `field:` ones. */
+export const FIELDS_WITH_BUILTIN_SCOPE = new Set([
+  "title",
+  "designation",
+  "creators",
+  "abstractNote",
+  "extra",
+]);
+
+export function isBuiltinScope(s: string): s is BuiltinSearchScope {
+  return (ALL_SEARCH_SCOPES as string[]).includes(s);
+}
+
+export function isSearchScope(s: string): s is SearchScope {
+  return isBuiltinScope(s) || /^field:[A-Za-z][A-Za-z0-9_]{0,63}$/.test(s);
+}
+
+export function scopeLabel(s: SearchScope): string {
+  return isBuiltinScope(s) ? SEARCH_SCOPE_LABELS[s] : labelFor(s.slice("field:".length));
+}
+
+/** Whether `scope` is exactly the default search — every built-in, no
+ *  extra fields — in which case no `scope=` needs sending at all. */
+export function isDefaultScope(scope: SearchScope[]): boolean {
+  return (
+    scope.length === ALL_SEARCH_SCOPES.length &&
+    ALL_SEARCH_SCOPES.every((s) => scope.includes(s))
+  );
+}
+
+/**
+ * The order results are grouped in: the built-ins in rank order, then any
+ * opted-in fields (which the server ranks below the built-in metadata but
+ * above the PDF body), then the body.
+ */
+export function scopeRankOrder(scope: SearchScope[]): SearchScope[] {
+  const fields = scope.filter((s) => !isBuiltinScope(s));
+  const builtins = ALL_SEARCH_SCOPES.filter((s) => s !== "fulltext");
+  return [...builtins, ...fields, "fulltext"];
+}
 
 /**
  * What to do with standards this space has pinned a revision of.
@@ -121,13 +178,9 @@ export function listItems(
       if (trimmed) params.append("tag", trimmed);
     }
   }
-  // Only emit scope= when the caller has narrowed past the default
-  // (all four). Equal-set short-circuit keeps URLs tidy.
-  if (
-    opts.scope &&
-    opts.scope.length > 0 &&
-    opts.scope.length < ALL_SEARCH_SCOPES.length
-  ) {
+  // Only emit scope= when it differs from the default search. Equal-set
+  // short-circuit keeps URLs tidy.
+  if (opts.scope && opts.scope.length > 0 && !isDefaultScope(opts.scope)) {
     for (const s of opts.scope) params.append("scope", s);
   }
   if (opts.collection) params.set("collection", opts.collection);
@@ -183,11 +236,7 @@ export function searchMyItems(
   if (opts.direction && opts.direction !== "desc") {
     params.set("direction", opts.direction);
   }
-  if (
-    opts.scope &&
-    opts.scope.length > 0 &&
-    opts.scope.length < ALL_SEARCH_SCOPES.length
-  ) {
+  if (opts.scope && opts.scope.length > 0 && !isDefaultScope(opts.scope)) {
     for (const s of opts.scope) params.append("scope", s);
   }
   if (opts.spaces) {
