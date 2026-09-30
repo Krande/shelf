@@ -2,6 +2,13 @@
 
 
 
+## v0.13.0 (2026-09-30)
+
+### Feature
+
+* feat: Manual item type, Space/Collection library columns, and editable API tokens (#19) ([`2e17cb5`](https://github.com/Krande/shelf/commit/2e17cb5dd84d64848eae0b8432571ae0b95d7e63))
+
+
 ## v0.12.0 (2026-09-30)
 
 ### Feature
