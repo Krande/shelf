@@ -259,6 +259,24 @@ export function toggleColumn(
   return next;
 }
 
+/**
+ * Move `key` so it lands at `index` of the list as it was before the
+ * move — what a drop between two rows means. Dropping a row onto its own
+ * slot, or the slot right after it, changes nothing.
+ */
+export function moveColumnTo(
+  current: ColumnKey[],
+  key: ColumnKey,
+  index: number,
+): ColumnKey[] {
+  const from = current.indexOf(key);
+  if (from === -1) return current;
+  const next = current.filter((k) => k !== key);
+  const to = Math.max(0, Math.min(from < index ? index - 1 : index, next.length));
+  next.splice(to, 0, key);
+  return next;
+}
+
 /** Move `key` one place left (-1) or right (+1). */
 export function moveColumn(
   current: ColumnKey[],

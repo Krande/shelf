@@ -1,11 +1,12 @@
 import { useMemo, useState } from "react";
-import { ArrowDown, ArrowUp, X } from "lucide-react";
+import { ArrowDown, ArrowUp, GripVertical, X } from "lucide-react";
 import {
   BUILTIN_COLUMNS,
   columnLabel,
   fieldColumnHint,
   fieldColumns,
   moveColumn,
+  moveColumnTo,
   sourceName,
   type ColumnKey,
   type ResolvedProfile,
@@ -52,6 +53,11 @@ export default function ProfileModal({
 }) {
   const [desc, setDesc] = useState(description ?? "");
   const [own, setOwn] = useState<ColumnKey[] | null>(columns);
+  // Drag-to-reorder: the row being dragged, and the gap it would drop
+  // into (0 = before the first row, own.length = after the last). The
+  // arrow buttons stay for keyboards and for one-step nudges.
+  const [dragging, setDragging] = useState<ColumnKey | null>(null);
+  const [dropAt, setDropAt] = useState<number | null>(null);
   const available = useMemo<ColumnKey[]>(
     () => [...BUILTIN_COLUMNS, ...fieldColumns(preferTypes)],
     [preferTypes],
@@ -159,13 +165,58 @@ export default function ProfileModal({
                 className="ml-6 mt-2 rounded border"
                 style={{ borderColor: "var(--color-border)" }}
               >
-                <ol>
+                <ol onDragLeave={(e) => {
+                  // Leaving the list altogether, not moving between rows.
+                  if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropAt(null);
+                }}>
                   {own.map((k, i) => (
                     <li
                       key={k}
-                      className="flex items-center gap-2 border-b px-2 py-1 text-sm last:border-b-0"
-                      style={{ borderColor: "var(--color-border)" }}
+                      draggable={!readOnly}
+                      onDragStart={(e) => {
+                        setDragging(k);
+                        e.dataTransfer.effectAllowed = "move";
+                        // Firefox starts no drag without some data.
+                        e.dataTransfer.setData("text/plain", k);
+                      }}
+                      onDragOver={(e) => {
+                        if (!dragging) return;
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = "move";
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        setDropAt(e.clientY < rect.top + rect.height / 2 ? i : i + 1);
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        if (dragging && dropAt !== null) {
+                          setOwn(moveColumnTo(own, dragging, dropAt));
+                        }
+                        setDragging(null);
+                        setDropAt(null);
+                      }}
+                      onDragEnd={() => {
+                        setDragging(null);
+                        setDropAt(null);
+                      }}
+                      className={`relative flex items-center gap-2 border-b px-2 py-1 text-sm last:border-b-0 ${
+                        readOnly ? "" : "cursor-grab active:cursor-grabbing"
+                      }`}
+                      style={{
+                        borderColor: "var(--color-border)",
+                        opacity: dragging === k ? 0.4 : undefined,
+                      }}
                     >
+                      {dragging && dropAt === i && <DropLine edge="top" />}
+                      {dragging && dropAt === own.length && i === own.length - 1 && (
+                        <DropLine edge="bottom" />
+                      )}
+                      {!readOnly && (
+                        <GripVertical
+                          aria-hidden
+                          className="h-3.5 w-3.5 shrink-0"
+                          style={{ color: "var(--color-text-muted)" }}
+                        />
+                      )}
                       <span className="flex-1 truncate">{optionLabel(k)}</span>
                       {!readOnly && (
                         <>
@@ -262,6 +313,20 @@ export default function ProfileModal({
 function optionLabel(k: ColumnKey): string {
   const hint = fieldColumnHint(k);
   return hint ? `${columnLabel(k)} (${hint})` : columnLabel(k);
+}
+
+/** Where a dragged column will land: a line along one edge of a row. */
+function DropLine({ edge }: { edge: "top" | "bottom" }) {
+  return (
+    <span
+      aria-hidden
+      className="pointer-events-none absolute left-1 right-1 h-0.5 rounded-full"
+      style={{
+        [edge]: "-1px",
+        backgroundColor: "var(--color-accent)",
+      }}
+    />
+  );
 }
 
 function IconButton({

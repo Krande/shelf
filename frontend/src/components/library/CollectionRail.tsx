@@ -29,14 +29,13 @@ import {
   updateCollection,
 } from "@/api/collections";
 import { downloadCollectionPdfsZip } from "@/api/attachments";
-import { canEdit, fetchMySpaces, updateSpaceProfile } from "@/api/spaces";
+import { canEdit, fetchMySpaces } from "@/api/spaces";
 import {
   inheritedProfile,
   isColumnKey,
-  resolveProfile,
   type ColumnKey,
 } from "@/lib/libraryColumns";
-import ProfileModal, { type ProfileDraft } from "./ProfileModal";
+import ProfileModal from "./ProfileModal";
 
 /** Drag payload: a JSON array of item ids being filed into a folder. */
 export const ITEM_DRAG_TYPE = "application/x-shelf-items";
@@ -86,12 +85,13 @@ export default function CollectionRail({
 
   // Editing state — only one row can be in a mode at a time.
   const [renamingId, setRenamingId] = useState<string | null>(null);
-  const [profileTarget, setProfileTarget] = useState<
-    { kind: "collection"; collection: Collection } | { kind: "space" } | null
-  >(null);
+  // A space's own profile is edited in Settings → Spaces; the rail only
+  // handles collections'.
+  const [profileTarget, setProfileTarget] = useState<{
+    kind: "collection";
+    collection: Collection;
+  } | null>(null);
   const [moveTarget, setMoveTarget] = useState<Collection | null>(null);
-  const [spaceMenuAt, setSpaceMenuAt] = useState<MenuAnchor | null>(null);
-  const closeSpaceMenu = useCallback(() => setSpaceMenuAt(null), []);
 
   const collections = useQuery({
     queryKey: ["collections", slug],
@@ -248,17 +248,6 @@ export default function CollectionRail({
     },
   });
 
-  const saveSpaceProfile = useMutation({
-    mutationFn: (draft: ProfileDraft) =>
-      updateSpaceProfile(slug!, {
-        description: draft.description,
-        columns: draft.columns,
-      }),
-    // Both space listings carry the profile.
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["spaces"] }),
-    onError: (e: Error) => window.alert(`Could not save the profile: ${e.message}`),
-  });
-
   const ownColumns = (cols: string[] | null | undefined): ColumnKey[] | null => {
     const valid = (cols ?? []).filter(isColumnKey);
     return valid.length > 0 ? valid : null;
@@ -405,29 +394,7 @@ export default function CollectionRail({
           label="All Items"
           active={isActive({ view: "library", collection: null })}
           onClick={() => onSelect({ view: "library", collection: null })}
-          // The space's own profile lives here: All Items is the space.
-          onContextMenu={(e) => {
-            if (!browsedSpace) return;
-            e.preventDefault();
-            setSpaceMenuAt(anchorAtPointer(e));
-          }}
         />
-        {spaceMenuAt && browsedSpace && (
-          <ActionMenu at={spaceMenuAt} onClose={closeSpaceMenu}>
-            <MenuItem
-              icon={SlidersHorizontal}
-              label={
-                canEdit(browsedSpace)
-                  ? `Edit ${browsedSpace.name} profile…`
-                  : `View ${browsedSpace.name} profile…`
-              }
-              onClick={() => {
-                setSpaceMenuAt(null);
-                setProfileTarget({ kind: "space" });
-              }}
-            />
-          </ActionMenu>
-        )}
         <SpecialEntry
           icon={Inbox}
           label="Unfiled"
@@ -643,22 +610,6 @@ export default function CollectionRail({
         />
       )}
 
-      {profileTarget?.kind === "space" && browsedSpace && (
-        <ProfileModal
-          title={`Profile · ${browsedSpace.name}`}
-          kind="space"
-          description={browsedSpace.description ?? null}
-          columns={ownColumns(browsedSpace.columns)}
-          inherited={resolveProfile(null, [], [], null)}
-          preferTypes={itemTypes}
-          readOnly={!canEdit(browsedSpace)}
-          onClose={() => setProfileTarget(null)}
-          onSave={(draft) => {
-            saveSpaceProfile.mutate(draft);
-            setProfileTarget(null);
-          }}
-        />
-      )}
 
       {moveTarget && (
         <MoveIntoModal
@@ -685,18 +636,15 @@ function SpecialEntry({
   label,
   active,
   onClick,
-  onContextMenu,
 }: {
   icon: typeof LibraryBig;
   label: string;
   active: boolean;
   onClick: () => void;
-  onContextMenu?: (e: React.MouseEvent) => void;
 }) {
   return (
     <button
       onClick={onClick}
-      onContextMenu={onContextMenu}
       className="mb-0.5 flex w-full items-center gap-2 rounded px-2 py-1 text-left hover:opacity-90"
       style={{
         backgroundColor: active

@@ -505,3 +505,44 @@ describe("creating a space", () => {
     expect(screen.queryByLabelText(/name for the new space/i)).toBeNull();
   });
 });
+
+describe("profile", () => {
+  it("is offered to editors and owners, not viewers", async () => {
+    renderWithProviders(<SpacesSection user={makeMe()} />);
+    await screen.findByText("My shelf");
+    expect(screen.getByRole("button", { name: /edit my shelf profile/i })).toBeInTheDocument();
+    // Both shared rows are named "Team shelf"; only the editor's row
+    // (proj) offers the profile, the viewer's (team) doesn't.
+    expect(screen.getAllByRole("button", { name: /edit team shelf profile/i })).toHaveLength(1);
+  });
+
+  it("saves a description and columns", async () => {
+    const fetchFn = mockFetch({
+      "/api/me/spaces": { body: [{ ...SHARED_EDITOR, name: "Standards" }] },
+      "/api/spaces/proj/profile": { body: { description: "Ours", columns: null } },
+    });
+    renderWithProviders(<SpacesSection user={makeMe()} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: /edit standards profile/i }),
+    );
+    const dialog = screen.getByRole("dialog", { name: /profile · standards/i });
+    await userEvent.type(within(dialog).getByLabelText(/description/i), "Ours");
+    await userEvent.click(within(dialog).getByRole("radio", { name: /choose columns/i }));
+    await userEvent.selectOptions(
+      within(dialog).getByRole("combobox", { name: /add a column/i }),
+      "field:designation",
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: /^save$/i }));
+
+    await waitFor(() => {
+      const call = fetchFn.mock.calls.find(([url]) =>
+        String(url).includes("/api/spaces/proj/profile"),
+      );
+      expect(call).toBeDefined();
+      const body = JSON.parse((call![1] as RequestInit).body as string);
+      expect(body.description).toBe("Ours");
+      expect(body.columns).toContain("field:designation");
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+});

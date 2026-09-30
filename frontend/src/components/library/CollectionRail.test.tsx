@@ -234,35 +234,6 @@ describe("profiles", () => {
     expect(screen.queryByRole("button", { name: /^save$/i })).toBeNull();
   });
 
-  it("edits the space's profile from a right-click on All Items", async () => {
-    const fetchFn = mockFetch({
-      "/api/spaces/my-space/collections": { body: [REPORTS] },
-      "/api/me/spaces": { body: [MY_SPACE] },
-      "/api/spaces/my-space/profile": { body: { description: "Ours", columns: null } },
-    });
-    render(null);
-    await screen.findByText("Reports");
-    await userEvent.pointer({
-      keys: "[MouseRight]",
-      target: screen.getByRole("button", { name: /all items/i }),
-    });
-    await userEvent.click(
-      await screen.findByRole("menuitem", { name: /edit my space profile/i }),
-    );
-    await userEvent.type(screen.getByLabelText(/description/i), "Ours");
-    await userEvent.click(screen.getByRole("button", { name: /^save$/i }));
-
-    await waitFor(() => {
-      const call = fetchFn.mock.calls.find(([url]) =>
-        String(url).includes("/api/spaces/my-space/profile"),
-      );
-      expect(call).toBeDefined();
-      expect(JSON.parse((call![1] as RequestInit).body as string)).toEqual({
-        description: "Ours",
-        columns: null,
-      });
-    });
-  });
 });
 
 afterEach(() => {

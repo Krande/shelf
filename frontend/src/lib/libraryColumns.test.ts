@@ -6,6 +6,7 @@ import {
   fieldColumns,
   inheritedProfile,
   moveColumn,
+  moveColumnTo,
   readOverride,
   resolveProfile,
   toggleColumn,
@@ -135,6 +136,43 @@ describe("moveColumn", () => {
       "tags",
     ]);
     expect(moveColumn(["title", "type"], "title", -1)).toEqual(["title", "type"]);
+  });
+});
+
+describe("moveColumnTo", () => {
+  const cols: ColumnKey[] = ["title", "type", "tags", "updated", "field:designation"];
+
+  it("drops a row into a gap far above it", () => {
+    expect(moveColumnTo(cols, "field:designation", 1)).toEqual([
+      "title",
+      "field:designation",
+      "type",
+      "tags",
+      "updated",
+    ]);
+  });
+
+  it("drops a row into a gap far below it", () => {
+    // Gap 4 is between updated and designation, counted before the move.
+    expect(moveColumnTo(cols, "type", 4)).toEqual([
+      "title",
+      "tags",
+      "updated",
+      "type",
+      "field:designation",
+    ]);
+    expect(moveColumnTo(cols, "type", cols.length)).toEqual([
+      "title",
+      "tags",
+      "updated",
+      "field:designation",
+      "type",
+    ]);
+  });
+
+  it("leaves the order alone when dropped beside itself", () => {
+    expect(moveColumnTo(cols, "tags", 2)).toEqual(cols);
+    expect(moveColumnTo(cols, "tags", 3)).toEqual(cols);
   });
 });
 

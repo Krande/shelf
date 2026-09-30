@@ -15,10 +15,12 @@ import {
   Loader2,
   Pencil,
   Plus,
+  SlidersHorizontal,
   Users,
 } from "lucide-react";
 import {
   addMember,
+  canEdit,
   createSpace,
   fetchDirectory,
   fetchMembers,
@@ -26,6 +28,7 @@ import {
   removeMember,
   updateMemberRole,
   updateSpace,
+  updateSpaceProfile,
   type DirectoryUser,
   type Space,
   type SpaceMember,
@@ -33,6 +36,14 @@ import {
 } from "@/api/spaces";
 import { ApiError } from "@/api/client";
 import type { Me } from "@/api/me";
+import ProfileModal, {
+  type ProfileDraft,
+} from "@/components/library/ProfileModal";
+import {
+  isColumnKey,
+  resolveProfile,
+  type ColumnKey,
+} from "@/lib/libraryColumns";
 import SpaceInheritance from "./SpaceInheritance";
 
 const ROLE_BLURB: Record<SpaceRole, string> = {
@@ -196,9 +207,27 @@ function SpaceRow({
    *  a label change, which grants no access to what it holds. */
   isAdmin: boolean;
 }) {
+  const qc = useQueryClient();
   const [panel, setPanel] = useState<Panel | null>(null);
   const toggle = (which: Panel) =>
     setPanel((current) => (current === which ? null : which));
+
+  // The profile is edited in a dialog rather than a panel: it's the same
+  // editor collections use, and its column list needs the room.
+  const [editingProfile, setEditingProfile] = useState(false);
+  const saveProfile = useMutation({
+    mutationFn: (draft: ProfileDraft) =>
+      updateSpaceProfile(space.slug, {
+        description: draft.description,
+        columns: draft.columns,
+      }),
+    onSuccess: () => {
+      // Both space listings (plain and with-inherited) carry the profile.
+      qc.invalidateQueries({ queryKey: ["spaces"] });
+      setEditingProfile(false);
+    },
+    onError: (e: Error) => window.alert(`Could not save the profile: ${e.message}`),
+  });
 
   // Nobody renames somebody else's personal shelf, admin or not.
   const canRename = space.is_owner || (isAdmin && !space.is_personal);
@@ -231,6 +260,18 @@ function SpaceRow({
             {space.slug} · you are {space.role}
           </span>
         </span>
+        {canEdit(space) && (
+          <button
+            onClick={() => setEditingProfile(true)}
+            aria-label={`Edit ${space.name} profile`}
+            title="Description and default library columns"
+            className="flex shrink-0 items-center gap-1 rounded border px-2 py-1 text-xs hover:opacity-80"
+            style={{ borderColor: "var(--color-border)" }}
+          >
+            <SlidersHorizontal className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Profile</span>
+          </button>
+        )}
         {canRename && (
           <PanelButton
             label="Rename"
@@ -263,8 +304,27 @@ function SpaceRow({
       {space.is_owner && panel === "inherits" && (
         <SpaceInheritance space={space} />
       )}
+      {editingProfile && (
+        <ProfileModal
+          title={`Profile · ${space.name}`}
+          kind="space"
+          description={space.description ?? null}
+          columns={ownColumns(space.columns)}
+          inherited={resolveProfile(null, [], [], null)}
+          preferTypes={[]}
+          onClose={() => setEditingProfile(false)}
+          onSave={(draft) => saveProfile.mutate(draft)}
+        />
+      )}
     </li>
   );
+}
+
+/** A stored column list, minus anything this build doesn't know; null
+ *  when nothing usable is left, which the editor shows as "default". */
+function ownColumns(cols: string[] | null | undefined): ColumnKey[] | null {
+  const valid = (cols ?? []).filter(isColumnKey);
+  return valid.length > 0 ? valid : null;
 }
 
 /**
