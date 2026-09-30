@@ -17,6 +17,7 @@ is that document" rather than "what is in this library". Both share
 `_parse_search`, so a query means the same thing in either.
 """
 
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -268,10 +269,82 @@ class SearchScope(StrEnum):
     """
 
     title_ = "title"
+    # An engineering standard's designation (`NS-EN 1993-1-9`), which
+    # publishers often leave out of the title — so a search for the code a
+    # standard is known by found nothing unless the file name carried it.
+    designation = "designation"
     creators = "creators"
     abstract = "abstract"
     extra = "extra"
     fulltext = "fulltext"
+
+
+# Any other metadata field can be searched too, as `scope=field:<name>`
+# (`field:edition`, `field:DOI`). Opt-in only: the default search stays the
+# built-ins above. Each field is one more ilike on the item's JSONB, in the
+# scan the other metadata scopes already make, so it needs no index of its
+# own — but a query naming dozens of them would still be dozens of
+# comparisons per row, hence the cap.
+FIELD_SCOPE = re.compile(r"^field:(?P<name>[A-Za-z][A-Za-z0-9_]{0,63})$")
+MAX_FIELD_SCOPES = 20
+
+# Fields that already have a scope of their own. `field:designation` is
+# the same search as `designation`, so it's folded into it rather than
+# ranked as a second, lesser hit on the same text.
+_BUILTIN_FOR_FIELD = {
+    "title": SearchScope.title_,
+    "designation": SearchScope.designation,
+    "creators": SearchScope.creators,
+    "abstractNote": SearchScope.abstract,
+    "extra": SearchScope.extra,
+}
+
+# Declared once so the three search endpoints document it identically.
+ScopeQuery = Annotated[
+    list[str] | None,
+    Query(
+        description=(
+            "Narrow `q` to these fields; repeatable. One of "
+            + ", ".join(s.value for s in SearchScope)
+            + ", or `field:<name>` for any other metadata field "
+            f"(at most {MAX_FIELD_SCOPES}). Default: the named scopes."
+        ),
+    ),
+]
+
+
+def parse_scopes(raw: list[str] | None) -> tuple[set[SearchScope], list[str]] | None:
+    """`scope=` values as (built-in scopes, extra metadata field names).
+
+    None when no scope was given — the default search. An unknown value
+    is a 422 naming it, rather than silently searching less than asked.
+    """
+    if raw is None:
+        return None
+    builtins: set[SearchScope] = set()
+    fields: list[str] = []
+    for value in raw:
+        if value in SearchScope._value2member_map_:
+            builtins.add(SearchScope(value))
+            continue
+        m = FIELD_SCOPE.match(value)
+        if m is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"Unknown search scope {value!r}: use one of "
+                f"{', '.join(s.value for s in SearchScope)}, or field:<name>",
+            )
+        name = m["name"]
+        if name in _BUILTIN_FOR_FIELD:
+            builtins.add(_BUILTIN_FOR_FIELD[name])
+        elif name not in fields:
+            fields.append(name)
+    if len(fields) > MAX_FIELD_SCOPES:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"At most {MAX_FIELD_SCOPES} metadata fields per search",
+        )
+    return builtins, fields
 
 
 @dataclass(frozen=True)
@@ -294,7 +367,7 @@ class _Search:
     matches_nothing: bool = False
 
 
-def _parse_search(q: str | None, scope: list[SearchScope] | None) -> _Search:
+def _parse_search(q: str | None, scope: list[str] | None) -> _Search:
     """Build the search predicate for `q`, narrowed to `scope`.
 
     Metadata is matched **word by word**: every whitespace-separated
@@ -315,30 +388,38 @@ def _parse_search(q: str | None, scope: list[SearchScope] | None) -> _Search:
     what the reader's find tool and the per-page hit snippets look for, and
     the listing has to agree with them about which pages match.
     """
+    # Parsed before the empty-query shortcut, so a bad scope is refused
+    # whether or not there is anything to search for yet.
+    parsed = parse_scopes(scope)
     if not q or not q.strip():
         return _Search()
 
-    enabled = set(scope) if scope else set(SearchScope)
+    enabled, extra_fields = parsed if parsed is not None else (set(SearchScope), [])
     cleaned = q.strip()
     words = [f"%{_escape_ilike(w)}%" for w in cleaned.split()]
 
     fields: dict[SearchScope, ColumnElement[str]] = {
         SearchScope.title_: Item.data["title"].astext,
+        SearchScope.designation: Item.data["designation"].astext,
         SearchScope.creators: cast(Item.data["creators"], String),
         SearchScope.abstract: Item.data["abstractNote"].astext,
         SearchScope.extra: Item.data["extra"].astext,
     }
+    # `->>` gives a number or a list as its JSON text, which is what a
+    # substring match on "74" or a keyword wants anyway.
+    field_columns = [Item.data[name].astext for name in extra_fields]
 
     def every_word_in(field: ColumnElement[str]) -> ColumnElement[bool]:
         return and_(*(field.ilike(w, escape="\\") for w in words))
 
     title_clause = every_word_in(fields[SearchScope.title_])
+    designation_clause = every_word_in(fields[SearchScope.designation])
     creators_clause = every_word_in(fields[SearchScope.creators])
     abstract_clause = every_word_in(fields[SearchScope.abstract])
     extra_clause = every_word_in(fields[SearchScope.extra])
 
     clauses = []
-    searched = [field for s, field in fields.items() if s in enabled]
+    searched = [field for s, field in fields.items() if s in enabled] + field_columns
     if searched:
         # Each word somewhere among the searched fields.
         clauses.append(
@@ -370,21 +451,24 @@ def _parse_search(q: str | None, scope: list[SearchScope] | None) -> _Search:
 
     if not clauses:
         return _Search(matches_nothing=True)
-    return _Search(
-        where=or_(*clauses),
-        # Lower number = higher priority. Mirrors the order the SPA
-        # already uses to bucket results into "Title hits" / "Creator
-        # hits" / etc. sections. A field ranks when it holds every word
-        # itself; an item whose words are spread across fields sorts
-        # with the body hits.
-        rank=case(
-            (title_clause, 0),
-            (creators_clause, 1),
-            (abstract_clause, 2),
-            (extra_clause, 3),
-            else_=4,
-        ),
-    )
+
+    # Lower number = higher priority. Mirrors the order the SPA already
+    # uses to bucket results into "Title hits" / "Creator hits" / etc.
+    # sections. A field ranks when it holds every word itself; an item
+    # whose words are spread across fields sorts with the body hits. A
+    # designation hit sits just under a title hit: someone typing
+    # "EN 1993" is naming a document.
+    ranked: list[tuple[ColumnElement[bool], int]] = [
+        (title_clause, 0),
+        (designation_clause, 1),
+        (creators_clause, 2),
+        (abstract_clause, 3),
+        (extra_clause, 4),
+    ]
+    if field_columns:
+        # Any opted-in metadata field holding every word itself.
+        ranked.append((or_(*(every_word_in(f) for f in field_columns)), 5))
+    return _Search(where=or_(*clauses), rank=case(*ranked, else_=6))
 
 
 async def _resolve_space(
@@ -437,7 +521,7 @@ async def list_items(
     direction: Annotated[SortDirection, Query()] = SortDirection.desc,
     collection: Annotated[str | None, Query(max_length=64)] = None,
     collection_scope: Annotated[CollectionScope, Query()] = CollectionScope.direct,
-    scope: Annotated[list[SearchScope] | None, Query()] = None,
+    scope: ScopeQuery = None,
     revisions: Annotated[RevisionFilter, Query()] = RevisionFilter.pinned,
 ) -> dict[str, Any]:
     space = await _resolve_space(db, user, slug)
@@ -612,7 +696,7 @@ async def search_my_items(
     status_: Annotated[ItemStatus, Query(alias="status")] = ItemStatus.active,
     sort: Annotated[ItemSort, Query()] = ItemSort.updated,
     direction: Annotated[SortDirection, Query()] = SortDirection.desc,
-    scope: Annotated[list[SearchScope] | None, Query()] = None,
+    scope: ScopeQuery = None,
 ) -> dict[str, Any]:
     """Search every space the caller can read, in one query.
 

@@ -1,5 +1,12 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { ALL_SEARCH_SCOPES, searchMyItems } from "./items";
+import {
+  ALL_SEARCH_SCOPES,
+  isDefaultScope,
+  isSearchScope,
+  scopeLabel,
+  scopeRankOrder,
+  searchMyItems,
+} from "./items";
 import { resetSessionExpiryForTests } from "@/auth/expiry";
 import { mockFetch } from "@/test/utils";
 
@@ -54,6 +61,46 @@ describe("searchMyItems", () => {
   it("carries a narrowed scope", async () => {
     await searchMyItems({ q: "acme", scope: ["title"] });
     expect(requestedUrl(fetchMock)).toContain("scope=title");
+  });
+
+  it("sends the whole scope once a metadata field is added", async () => {
+    // Longer than the default, but not the default: every built-in has to
+    // go along with the field or the server would search only the field.
+    await searchMyItems({ q: "acme", scope: [...ALL_SEARCH_SCOPES, "field:edition"] });
+    const url = requestedUrl(fetchMock);
+    expect(url).toContain("scope=field%3Aedition");
+    expect(url).toContain("scope=designation");
+    expect(url).toContain("scope=fulltext");
+  });
+
+  it("knows the default only when it is exactly the built-ins", () => {
+    expect(isDefaultScope([...ALL_SEARCH_SCOPES].reverse())).toBe(true);
+    expect(isDefaultScope(["title"])).toBe(false);
+    expect(isDefaultScope([...ALL_SEARCH_SCOPES, "field:edition"])).toBe(false);
+  });
+
+  it("accepts the built-ins and well-formed field scopes only", () => {
+    expect(isSearchScope("designation")).toBe(true);
+    expect(isSearchScope("field:edition")).toBe(true);
+    expect(isSearchScope("field:")).toBe(false);
+    expect(isSearchScope("none")).toBe(false);
+  });
+
+  it("labels a field scope by its field", () => {
+    expect(scopeLabel("designation")).toBe("Designation");
+    expect(scopeLabel("field:standardBody")).toBe("Issuing Body");
+  });
+
+  it("groups field hits between the metadata and the PDF body", () => {
+    expect(scopeRankOrder(["field:edition", "title"])).toEqual([
+      "title",
+      "designation",
+      "creators",
+      "abstract",
+      "extra",
+      "field:edition",
+      "fulltext",
+    ]);
   });
 
   it("trims the query and skips a blank one", async () => {
