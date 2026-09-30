@@ -2,6 +2,13 @@
 
 
 
+## v0.14.0 (2026-09-30)
+
+### Feature
+
+* feat: space and collection profiles, and OCR&#39;d downloads through the API and CLI (#20) ([`5254bb8`](https://github.com/Krande/shelf/commit/5254bb850b457bfcadad41ffc448e233e42d05bf))
+
+
 ## v0.13.0 (2026-09-30)
 
 ### Feature
