@@ -74,6 +74,12 @@ async def test_register_and_list_attachment(
     download = (await client.get(f"/api/attachments/{att_id}/download")).json()
     assert download["url"].startswith("https://memory/download/")
 
+    # The reader knows only the attachment id; this is how it finds the item.
+    one = await client.get(f"/api/attachments/{att_id}")
+    assert one.status_code == 200, one.text
+    assert one.json()["item_id"] == item["id"]
+    assert one.json()["filename"] == "paper.pdf"
+
 
 async def test_delete_attachment_drops_row(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
@@ -200,6 +206,8 @@ async def test_other_user_cannot_see_attachment(
     r = await client.get(f"/api/items/{item['id']}/attachments")
     assert r.status_code == 404
     r = await client.get(f"/api/attachments/{att['id']}/download")
+    assert r.status_code == 404
+    r = await client.get(f"/api/attachments/{att['id']}")
     assert r.status_code == 404
     r = await client.delete(f"/api/attachments/{att['id']}")
     assert r.status_code == 404

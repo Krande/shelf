@@ -207,7 +207,7 @@ export default function AttachmentsList({
             return (
               <li
                 key={a.id}
-                className="group flex items-center gap-2 rounded px-1 py-1 text-sm hover:bg-black/5"
+                className="flex items-center gap-2 rounded px-1 py-1 text-sm hover:bg-black/5"
               >
                 <Paperclip
                   className="h-3.5 w-3.5"
@@ -249,10 +249,11 @@ export default function AttachmentsList({
                       nav(`/reader/${encodeURIComponent(a.id)}`)
                     }
                     aria-label="Open in reader"
-                    // sm+ keeps the desktop hover-reveal behaviour;
-                    // touch devices (no `hover:` event) need the
-                    // buttons always visible.
-                    className="rounded p-0.5 hover:opacity-70 sm:invisible sm:group-hover:visible"
+                    title="Open in reader"
+                    // Always shown, never hover-revealed: these are how
+                    // someone finds out a document can be read at all,
+                    // and touch devices have no hover to reveal them.
+                    className="rounded p-0.5 hover:opacity-70"
                     style={{ color: "var(--color-accent)" }}
                   >
                     <BookOpen className="h-3.5 w-3.5" />
@@ -263,7 +264,8 @@ export default function AttachmentsList({
                   onClick={() => onDownload(a)}
                   disabled={pending}
                   aria-label="Download"
-                  className="rounded p-0.5 hover:opacity-70 disabled:opacity-30 sm:invisible sm:group-hover:visible"
+                  title="Download"
+                  className="rounded p-0.5 hover:opacity-70 disabled:opacity-30"
                   style={{ color: "var(--color-text-muted)" }}
                 >
                   <Download className="h-3.5 w-3.5" />
@@ -277,7 +279,8 @@ export default function AttachmentsList({
                       }
                     }}
                     aria-label="Delete attachment"
-                    className="rounded p-0.5 hover:bg-red-500/10 sm:invisible sm:group-hover:visible"
+                    title="Delete attachment"
+                    className="rounded p-0.5 hover:bg-red-500/10"
                     style={{ color: "var(--color-text-muted)" }}
                   >
                     <Trash2 className="h-3.5 w-3.5" />

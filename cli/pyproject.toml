@@ -40,7 +40,10 @@ testpaths = ["tests"]
 #
 #   pixi global install shelf-cli \
 #       --git https://github.com/Krande/shelf.git \
-#       --subdirectory cli --tag v0.4.0
+#       --subdirectory cli --tag v<release>
+#
+# (The README's copy of this command names the current release, and CI
+# checks it; see scripts/check_cli_version.py.)
 #
 # It lives inside the shelf repo rather than beside it so it is versioned
 # with the API it talks to — a CLI that has drifted from its server is a

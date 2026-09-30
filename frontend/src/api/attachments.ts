@@ -14,6 +14,10 @@ interface RegisterResponse {
   upload_url: string;
 }
 
+export function getAttachment(id: string): Promise<Attachment> {
+  return apiFetch<Attachment>(`/api/attachments/${encodeURIComponent(id)}`);
+}
+
 export function listAttachments(itemId: string): Promise<Attachment[]> {
   return apiFetch<Attachment[]>(
     `/api/items/${encodeURIComponent(itemId)}/attachments`,

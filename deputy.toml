@@ -54,3 +54,16 @@ version_variables = [
     "cli/src/shelf_cli/__init__.py:__version__",
     'frontend/package.json:"version"',
 ]
+
+# The `pixi global install shelf-cli ... --tag vX.Y.Z` commands in the READMEs.
+# They can't go in version_variables: the pattern above insists on a quoted,
+# bare semver after `:`/`=`, and a pixi flag is `--tag v0.11.1`, which it
+# doesn't match - and a pattern that matches nothing is skipped SILENTLY.
+#
+# So semantic-release runs this after it has written the new version into
+# cli/pyproject.toml (the script reads it from there; PSR 8.5.1 passes no
+# NEW_VERSION) and before it commits, and `assets` stages the result into the
+# release commit the tag points at. Keep `assets` in step with DOCS in the
+# script. `pixi run check-cli-version` on every PR catches what this misses.
+build_command = "python scripts/check_cli_version.py --write"
+assets = ["README.md", "cli/README.md"]

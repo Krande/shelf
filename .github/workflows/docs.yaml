@@ -1,0 +1,29 @@
+name: Docs
+
+# Checks the `pixi global install shelf-cli ... --tag vX.Y.Z` commands in the
+# READMEs name the version in cli/pyproject.toml. The release rewrites them
+# (build_command in deputy.toml), so on a PR they should always equal the
+# current version; a mismatch means a hand edit or an install snippet the
+# rewrite can't find, and it would ship in the next tag. Needs nothing but
+# Python, so no pixi install.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  cli-install-version:
+    name: shelf-cli install version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - run: python scripts/check_cli_version.py
