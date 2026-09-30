@@ -45,6 +45,27 @@ export function createToken(payload: {
   });
 }
 
+/**
+ * Change a token in place; the secret stays the same. A key left out is
+ * unchanged, and null on an allow-list or `expires_at` lifts it.
+ */
+export function updateToken(
+  id: string,
+  payload: {
+    name?: string;
+    scopes?: TokenScope[];
+    allowed_space_ids?: string[] | null;
+    allowed_collection_ids?: string[] | null;
+    include_descendants?: boolean;
+    expires_at?: string | null;
+  },
+): Promise<ApiToken> {
+  return apiFetch<ApiToken>(`/api/me/tokens/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
 export function revokeToken(id: string): Promise<void> {
   return apiFetch<void>(`/api/me/tokens/${encodeURIComponent(id)}`, {
     method: "DELETE",

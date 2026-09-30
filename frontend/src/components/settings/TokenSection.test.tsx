@@ -174,3 +174,69 @@ describe("space scoping", () => {
     ).toBeInTheDocument();
   });
 });
+
+describe("editing", () => {
+  const TOKEN = {
+    id: "tok-1",
+    name: "importer",
+    prefix: "shelf_abcdef",
+    scopes: ["search"],
+    allowed_space_ids: ["sp-3"],
+    allowed_collection_ids: null,
+    include_descendants: false,
+    expires_at: null,
+    last_used_at: null,
+    created_at: "2026-01-01T00:00:00Z",
+  };
+
+  function stubWithToken() {
+    const fn = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const json = (body: unknown, status = 200) =>
+        new Response(JSON.stringify(body), {
+          status,
+          headers: { "Content-Type": "application/json" },
+        });
+      if (init?.method === "PATCH") return json(TOKEN);
+      if (url.includes("/api/me/spaces"))
+        return json([PERSONAL, PROJECT, STANDARDS]);
+      if (url.includes("/api/me/tokens")) return json([TOKEN]);
+      if (url.includes("/collections")) return json([]);
+      return json({});
+    });
+    vi.stubGlobal("fetch", fn);
+    return fn;
+  }
+
+  it("opens the form prefilled and PATCHes the changes", async () => {
+    const fetchFn = stubWithToken();
+    renderWithProviders(<TokenSection />);
+    // The space restriction is listed by name on the row.
+    expect(await screen.findByText("Standards")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /edit token/i }));
+
+    const nameInput = screen.getByPlaceholderText(/my-import-script/i);
+    expect(nameInput).toHaveValue("importer");
+    expect(
+      screen.getByRole("checkbox", { name: /restrict to specific spaces/i }),
+    ).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /Standards/ })).toBeChecked();
+
+    await userEvent.click(screen.getByRole("checkbox", { name: "upload" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: /save changes/i }),
+    );
+
+    await waitFor(() => {
+      const call = fetchFn.mock.calls.find(
+        ([, init]) => (init as RequestInit)?.method === "PATCH",
+      );
+      expect(call).toBeDefined();
+      expect(String(call![0])).toContain("/api/me/tokens/tok-1");
+      const body = JSON.parse((call![1] as RequestInit).body as string);
+      expect(body.scopes).toEqual(["upload", "search"]);
+      expect(body.allowed_space_ids).toEqual(["sp-3"]);
+      expect(body.name).toBe("importer");
+    });
+  });
+});
