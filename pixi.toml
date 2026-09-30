@@ -70,7 +70,7 @@ obstore = "*"
 [feature.dev.dependencies]
 # Node major is pinned here so local dev (pixi run frontend-*) and the SPA
 # build stage agree. Bump in lockstep with the FROM line in the Dockerfile.
-nodejs = ">=22,<23"
+nodejs = ">=24,<25"
 pytest = "*"
 pytest-asyncio = "*"
 ruff = "*"
@@ -178,10 +178,72 @@ bitsandbytes = "*"
 # pypdfium2>=5.0 while marker-pdf, which olmocr pulls in, pins ==4.30.0. That
 # is also why the two tiers are separate images rather than one.
 
+#
+# ui is only the README figures (`pixi run stories`), and holds none of the
+# server: the scripts drive the SPA over HTTP, and the CLI stories run the
+# `shelf` CLI, which is installed here. It stays out of the shelf
+# group because Playwright's driver wants a newer Node build than linux-64 can
+# share with the OCR stack (its ICU is newer than unpaper's libxml2 allows).
 [environments]
 default = { features = ["dev", "ocr"], solve-group = "shelf" }
 prod = { features = ["ocr"], solve-group = "shelf" }
 gpu = { features = ["gpu"], solve-group = "gpu" }
+ui = { features = ["ui"], no-default-feature = true }
+
+# ── UI stories (README screenshots) ──────────────────────────────────────────
+
+[feature.ui.dependencies]
+python = ">=3.12,<3.13"
+# conda-forge ships the bindings (playwright-python) and the Node driver they
+# talk to (playwright) as two packages without tying their versions, and a
+# mismatched pair fails at launch with "timeout: expected float, got
+# undefined" — so both are pinned to the same minor. Move them together.
+playwright-python = "1.62.*"
+playwright = "1.62.*"
+# Draws the demo PDFs the stories seed, with exact font metrics so a seeded
+# highlight lands on its phrase.
+reportlab = "*"
+# The CLI stories run `shelf` itself; these are its dependencies, from
+# conda-forge so the editable install below doesn't pull them from PyPI.
+httpx = "*"
+textual = ">=8.2.8,<9"
+
+[feature.ui.pypi-dependencies]
+shelf-cli = { path = "./cli", editable = true }
+
+# Browsers go under .pixi/ rather than Playwright's per-user cache, so the
+# download belongs to this checkout and pixi can see it as the install task's
+# output: `ui-stories` depends on the install, and pixi skips it while the
+# INSTALLATION_COMPLETE markers are there and the environment hasn't changed.
+# A fresh machine needs just `pixi run ui-stories`.
+[feature.ui.tasks.ui-stories]
+cmd = "python scripts/ui_stories.py"
+depends-on = ["ui-stories-install"]
+env = { PLAYWRIGHT_BROWSERS_PATH = ".pixi/ms-playwright" }
+description = "Seed demo data into a running `pixi run up` stack and screenshot the web UI into docs/screenshots (--list, --story NAME, --base-url, --theme)"
+
+# The CLI's stories need no browser to shoot, but they seed the demo
+# library through the same Playwright HTTP client ui-stories uses.
+[feature.ui.tasks.cli-stories]
+cmd = "python scripts/cli_stories.py"
+description = "Seed demo data into a running `pixi run up` stack and record the shelf CLI into docs/screenshots/cli-*.svg (--list, --story NAME, --base-url)"
+
+# Both sets, for regenerating every figure in the README at once.
+[feature.ui.tasks.stories]
+depends-on = ["ui-stories", "cli-stories"]
+description = "Regenerate every README figure: ui-stories, then cli-stories"
+
+[feature.ui.tasks.ui-stories-install]
+cmd = "playwright install chromium"
+# NODE_USE_SYSTEM_CA: the downloader is Node, which trusts only its bundled
+# CAs by default and fails behind a TLS-inspecting proxy; the OS store is what
+# every other tool on the machine trusts.
+env = { PLAYWRIGHT_BROWSERS_PATH = ".pixi/ms-playwright", NODE_USE_SYSTEM_CA = "1" }
+outputs = [
+    ".pixi/ms-playwright/chromium-*/INSTALLATION_COMPLETE",
+    ".pixi/ms-playwright/chromium_headless_shell-*/INSTALLATION_COMPLETE",
+]
+description = "Download the Chromium build ui-stories drives (cached; ui-stories runs it for you)"
 
 # ── Local dev ────────────────────────────────────────────────────────────────
 
@@ -311,6 +373,10 @@ description = "Format Python code"
 [tasks.lint]
 cmd = "ruff check backend cli"
 description = "Lint Python code (backend and the CLI)"
+
+[tasks.check-cli-version]
+cmd = "python scripts/check_cli_version.py"
+description = "Check the shelf-cli install commands in the READMEs name the current release"
 
 [tasks.typecheck]
 cmd = "mypy src"

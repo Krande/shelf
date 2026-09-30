@@ -6,7 +6,7 @@ metadata kept in files — into an instance whenever one is ready.
 
 ```sh
 pixi global install shelf-cli \
-  --git https://github.com/Krande/shelf.git --subdirectory cli --tag v0.4.0
+  --git https://github.com/Krande/shelf.git --subdirectory cli --tag v0.11.1
 ```
 
 It lives inside the shelf repo rather than beside it so it's versioned
@@ -185,8 +185,5 @@ already has those bytes. `"force": true` re-uploads regardless.
 
 ## Developing
 
-```sh
-pixi run cli-test
-```
-
-The tests fake the client, so they need no server and no database.
+See [DEVELOPERS.md](../DEVELOPERS.md#cli) — `pixi run cli-test`, which
+needs no server and no database.
