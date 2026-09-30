@@ -292,3 +292,48 @@ async def test_preflight_error_passes_through_unretried(
 )
 def test_transient_classification(exc: BaseException, transient: bool) -> None:
     assert preflight._is_transient(exc) is transient
+
+
+# ── Schema version ───────────────────────────────────────────────────────────
+#
+# A deployment that bumps the app's image but not the migration job's comes
+# up on the previous schema, and every query touching a new column 500s. The
+# checks below read this build's real migration history.
+
+
+def test_a_schema_at_head_is_current() -> None:
+    history = preflight._migration_history()
+    assert history is not None, "the migrations beside the package weren't found"
+    _known, heads = history
+    (head,) = heads
+    assert "current" in preflight.schema_verdict(head)
+
+
+def test_a_schema_behind_the_build_is_refused() -> None:
+    history = preflight._migration_history()
+    assert history is not None
+    known, heads = history
+    behind = next(r for r in sorted(known) if r not in heads)
+    with pytest.raises(preflight.PreflightError, match="alembic upgrade head") as err:
+        preflight.schema_verdict(behind)
+    # Names both ends, so the log says what to run and why.
+    assert behind in str(err.value)
+    assert next(iter(heads)) in str(err.value)
+
+
+def test_a_schema_ahead_of_the_build_is_served() -> None:
+    # What an old pod sees mid-rollout, once the new release has migrated.
+    # Refusing it would pull the old pods before the new ones are ready.
+    verdict = preflight.schema_verdict("9999_from_a_newer_release")
+    assert "newer than this build" in verdict
+
+
+def test_without_migration_scripts_only_presence_is_checked(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    monkeypatch.setattr(preflight, "MIGRATIONS_DIR", tmp_path / "nowhere")
+    preflight._migration_history.cache_clear()
+    try:
+        assert "no migration scripts" in preflight.schema_verdict("0001_initial")
+    finally:
+        preflight._migration_history.cache_clear()
