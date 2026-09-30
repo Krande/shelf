@@ -57,6 +57,10 @@ class SpaceResponse(BaseModel):
     # Only ever true in an `?include_inherited=true` listing: a space
     # reached through a subscription rather than held directly.
     is_inherited: bool = False
+    # The space's profile (see api/profiles.py). Carried here so the
+    # library resolves which columns to show without a request per space.
+    description: str | None = None
+    columns: list[str] | None = None
 
 
 @router.get("/api/me", response_model=MeResponse)
@@ -173,6 +177,8 @@ async def my_spaces(
             ),
             is_owner=s.owner_id == user.id,
             is_inherited=s.id not in held,
+            description=s.description,
+            columns=s.columns,
         )
         for s in spaces
     ]

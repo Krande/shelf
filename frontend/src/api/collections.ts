@@ -6,6 +6,9 @@ export interface Collection {
   parent_id: string | null;
   name: string;
   description: string | null;
+  /** Default library columns here and in subcollections that don't set
+   *  their own; null inherits. See lib/libraryColumns. */
+  columns?: string[] | null;
   position: number;
   created_at: string;
   updated_at: string;
@@ -53,6 +56,8 @@ export function updateCollection(
     description?: string | null;
     parent_id?: string | null;
     position?: number;
+    /** null (or []) to inherit again. */
+    columns?: string[] | null;
   },
 ): Promise<Collection> {
   return apiFetch<Collection>(`/api/collections/${encodeURIComponent(id)}`, {

@@ -14,6 +14,30 @@ export interface Space {
   /** Only set in an `includeInherited` listing: reached through a
    *  subscription rather than held directly. Always read-only. */
   is_inherited?: boolean;
+  /** The space's profile: what it's for, shown at its library root. */
+  description?: string | null;
+  /** Default library columns; null leaves it to the built-in default.
+   *  See lib/libraryColumns. */
+  columns?: string[] | null;
+}
+
+export interface SpaceProfile {
+  description: string | null;
+  columns: string[] | null;
+}
+
+/**
+ * Set a space's description and/or default columns. Editors may; an
+ * omitted field is left alone, and null (or "" / []) clears it.
+ */
+export function updateSpaceProfile(
+  slug: string,
+  changes: { description?: string | null; columns?: string[] | null },
+): Promise<SpaceProfile> {
+  return apiFetch<SpaceProfile>(
+    `/api/spaces/${encodeURIComponent(slug)}/profile`,
+    { method: "PATCH", body: JSON.stringify(changes) },
+  );
 }
 
 /**

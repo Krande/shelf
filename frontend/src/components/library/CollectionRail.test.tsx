@@ -118,7 +118,7 @@ describe("the folder menu", () => {
       screen.getByRole("button", { name: /more actions for Reports/i }),
     );
     await userEvent.click(
-      screen.getByRole("button", { name: /add subcollection/i }),
+      screen.getByRole("menuitem", { name: /add subcollection/i }),
     );
     await userEvent.type(screen.getByRole("textbox"), "Working{Enter}");
 
@@ -129,6 +129,111 @@ describe("the folder menu", () => {
       });
     });
   });
+
+  it("opens on a right-click too", async () => {
+    render(null);
+    const row = await screen.findByText("Reports");
+    await userEvent.pointer({ keys: "[MouseRight]", target: row });
+    expect(screen.getByRole("menuitem", { name: /rename/i })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /profile/i })).toBeInTheDocument();
+  });
+});
+
+// ── Profiles ─────────────────────────────────────────────────────────────────
+
+const MY_SPACE = {
+  id: "s",
+  slug: "my-space",
+  name: "My space",
+  is_personal: false,
+  role: "owner",
+  is_owner: true,
+  description: null,
+  columns: null,
+};
+
+const STANDARDS = {
+  id: "std",
+  slug: "standards",
+  name: "Standards",
+  is_personal: false,
+  // Reached through the subscription: read-only here.
+  role: "viewer",
+  is_owner: false,
+  is_inherited: true,
+  description: null,
+  columns: ["title", "field:designation"],
+};
+
+const EUROCODES = {
+  ...REPORTS,
+  id: "33333333-3333-3333-3333-333333333333",
+  space_id: "std",
+  name: "Eurocodes",
+  is_inherited: true,
+  space_name: "Standards",
+};
+
+describe("profiles", () => {
+  it("saves a collection's own columns", async () => {
+    const fetchFn = mockFetch({
+      "/api/spaces/my-space/collections": { body: [REPORTS, DRAFTS] },
+      "/api/me/spaces": { body: [MY_SPACE, STANDARDS] },
+      "/api/collections/": { body: REPORTS },
+    });
+    render(null);
+    await userEvent.click(
+      await screen.findByRole("button", { name: /more actions for Reports/i }),
+    );
+    await userEvent.click(screen.getByRole("menuitem", { name: /edit profile/i }));
+
+    const dialog = screen.getByRole("dialog", { name: /profile · reports/i });
+    expect(dialog).toHaveTextContent(/use the default columns/i);
+    await userEvent.click(screen.getByRole("radio", { name: /choose columns/i }));
+    await userEvent.selectOptions(
+      screen.getByRole("combobox", { name: /add a column/i }),
+      "field:reportNumber",
+    );
+    await userEvent.click(screen.getByRole("button", { name: /^save$/i }));
+
+    await waitFor(() => {
+      const call = fetchFn.mock.calls.find(
+        ([url, init]) =>
+          String(url).includes(`/api/collections/${REPORTS.id}`) &&
+          (init as RequestInit)?.method === "PATCH",
+      );
+      expect(call).toBeDefined();
+      const body = JSON.parse((call![1] as RequestInit).body as string);
+      expect(body.columns).toContain("field:reportNumber");
+      expect(body.columns[0]).toBe("title");
+    });
+  });
+
+  it("gives an inherited collection a menu without the structural writes", async () => {
+    mockFetch({
+      "/api/spaces/my-space/collections": { body: [REPORTS, EUROCODES] },
+      "/api/me/spaces": { body: [MY_SPACE, STANDARDS] },
+    });
+    render(null);
+    await userEvent.click(
+      await screen.findByRole("button", { name: /more actions for Eurocodes/i }),
+    );
+    // Viewer in Standards: the profile can be read, not changed.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("menuitem", { name: /view profile/i }),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("menuitem", { name: /download pdfs/i })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /rename/i })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: /delete/i })).toBeNull();
+
+    await userEvent.click(screen.getByRole("menuitem", { name: /view profile/i }));
+    // Falls back to the space it lives in, not the one browsed.
+    expect(screen.getByRole("dialog")).toHaveTextContent(/inherit from standards/i);
+    expect(screen.queryByRole("button", { name: /^save$/i })).toBeNull();
+  });
+
 });
 
 afterEach(() => {

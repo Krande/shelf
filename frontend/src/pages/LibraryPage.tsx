@@ -36,8 +36,24 @@ import {
   canEdit,
   fetchInherited,
   fetchMySpaces,
+  updateSpaceProfile,
   type Space,
 } from "@/api/spaces";
+import {
+  BUILTIN_COLUMNS,
+  columnLabel,
+  fieldColumnHint,
+  fieldColumns,
+  fieldOf,
+  isFieldColumn,
+  readOverride,
+  resolveProfile,
+  sourceKey,
+  sourceName,
+  toggleColumn,
+  writeOverride,
+  type ColumnKey,
+} from "@/lib/libraryColumns";
 import {
   PREF_SUBCOLLECTION_AUTO_EXPAND_BELOW,
   usePref,
@@ -62,6 +78,7 @@ import {
 import {
   listCollections,
   setItemCollections,
+  updateCollection,
   type Collection,
 } from "@/api/collections";
 import { fetchPins } from "@/api/standards";
@@ -245,19 +262,8 @@ function SortHeader({
 }
 
 // Starting widths, near enough to what the auto layout produced that
-// turning the table fixed is not itself a visible change. Title has no
-// entry: it takes whatever is left, so the common case of a wide window
-// spends the extra space on the one column that benefits.
-const COLUMN_KEYS = [
-  "title",
-  "creator",
-  "type",
-  "space",
-  "collection",
-  "tags",
-  "updated",
-] as const;
-type ColumnKey = (typeof COLUMN_KEYS)[number];
+// turning the table fixed is not itself a visible change. A metadata
+// field column has no entry and starts at the hook's 160.
 const COLUMN_DEFAULTS: Record<string, number> = {
   title: 420,
   creator: 200,
@@ -268,33 +274,14 @@ const COLUMN_DEFAULTS: Record<string, number> = {
   updated: 180,
 };
 
-// Columns the reader can switch off or on. Space defaults on, but only
-// exists at all while the space inherits another; a collection path can
-// run long, so it's opt-in.
-type OptionalColumn = "space" | "collection";
-const OPTIONAL_COLUMN_DEFAULTS: Record<OptionalColumn, boolean> = {
-  space: true,
-  collection: false,
-};
-const OPTIONAL_COLUMNS_PREF_KEY = "shelf.libraryOptionalColumns";
-
-function readOptionalColumns(): Record<OptionalColumn, boolean> {
-  try {
-    const raw = window.localStorage.getItem(OPTIONAL_COLUMNS_PREF_KEY);
-    const parsed: unknown = raw ? JSON.parse(raw) : null;
-    if (!parsed || typeof parsed !== "object") return OPTIONAL_COLUMN_DEFAULTS;
-    const p = parsed as Record<string, unknown>;
-    return {
-      space:
-        typeof p.space === "boolean" ? p.space : OPTIONAL_COLUMN_DEFAULTS.space,
-      collection:
-        typeof p.collection === "boolean"
-          ? p.collection
-          : OPTIONAL_COLUMN_DEFAULTS.collection,
-    };
-  } catch {
-    return OPTIONAL_COLUMN_DEFAULTS;
-  }
+/** A metadata field's value as table text. Most are strings; a page
+ *  count may be a number, and anything structured is left out rather
+ *  than shown as [object Object]. */
+function fieldText(item: Item, field: string): string {
+  const v = (item.data as Record<string, unknown>)[field];
+  if (typeof v === "string") return v;
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  return "";
 }
 
 const RAIL_PREF_KEY = "shelf:rail-open";
@@ -735,35 +722,112 @@ export default function LibraryPage() {
     (inherits.data?.length ?? 0) > 0 ||
     loadedItems.some((i) => i.is_inherited);
 
-  const [optionalColumns, setOptionalColumns] =
-    useState<Record<OptionalColumn, boolean>>(readOptionalColumns);
-  const toggleOptionalColumn = useCallback((key: string) => {
-    setOptionalColumns((prev) => {
-      const next = { ...prev, [key]: !prev[key as OptionalColumn] };
-      try {
-        window.localStorage.setItem(
-          OPTIONAL_COLUMNS_PREF_KEY,
-          JSON.stringify(next),
-        );
-      } catch {
-        // Not remembered, but still applied for this session.
-      }
-      return next;
-    });
-  }, []);
-  const showSpaceColumn = inheritsAny && optionalColumns.space;
-  const showCollectionColumn = optionalColumns.collection;
-  const visibleColumns = useMemo<ColumnKey[]>(
+  // ── Columns ───────────────────────────────────────────────────────────
+  //
+  // The open collection's profile (or its nearest ancestor's, or its
+  // space's) says which columns to show; the reader's own choice, kept
+  // in this browser per profile, sits on top. See lib/libraryColumns.
+  const profile = useMemo(
     () =>
-      COLUMN_KEYS.filter(
-        (k) =>
-          (k !== "space" || showSpaceColumn) &&
-          (k !== "collection" || showCollectionColumn),
+      resolveProfile(
+        openCollection,
+        collections.data ?? [],
+        spacesWithInherited.data ?? [],
+        activeSpace,
       ),
-    [showSpaceColumn, showCollectionColumn],
+    [openCollection, collections.data, spacesWithInherited.data, activeSpace],
   );
+  const profileKey = sourceKey(profile.source);
+  // Held in state only to re-render on change; localStorage is the
+  // record. Keyed so switching profile re-reads rather than carrying
+  // one folder's choice into another's.
+  const [overrideState, setOverrideState] = useState<{
+    key: string;
+    columns: ColumnKey[] | null;
+  } | null>(null);
+  const override =
+    overrideState?.key === profileKey
+      ? overrideState.columns
+      : readOverride(profile.source);
+  const chosenColumns = override ?? profile.columns;
+  const setOverride = useCallback(
+    (columns: ColumnKey[] | null) => {
+      writeOverride(profile.source, columns);
+      setOverrideState({ key: sourceKey(profile.source), columns });
+    },
+    [profile.source],
+  );
+
+  const visibleColumns = useMemo<ColumnKey[]>(() => {
+    // Space only earns its width when items can come from more than
+    // one space.
+    const cols = chosenColumns.filter((k) => k !== "space" || inheritsAny);
+    // Title is how a row opens; a profile can't take it away.
+    return cols.includes("title") ? cols : ["title", ...cols];
+  }, [chosenColumns, inheritsAny]);
   // Checkbox and filler cells on either side of the sized columns.
   const colCount = visibleColumns.length + 2;
+
+  // Item types on screen: their fields are offered first when picking
+  // columns, so a Standards library leads with Designation, not DOI.
+  const itemTypesOnScreen = useMemo(
+    () => [...new Set(loadedItems.map((i) => i.item_type))],
+    [loadedItems],
+  );
+
+  // Where "Save as default" can write: the profile in effect, the open
+  // collection when it's a different one, and the space. Each only when
+  // the caller edits the space that holds it.
+  const saveTargets = useMemo(() => {
+    const spaceById = new Map(
+      (spacesWithInherited.data ?? []).map((s) => [s.id, s] as const),
+    );
+    const collById = new Map(
+      (collections.data ?? []).map((c) => [c.id, c] as const),
+    );
+    const targets: { kind: "collection" | "space"; id: string; name: string }[] = [];
+    const addCollection = (id: string | null) => {
+      const c = id ? collById.get(id) : undefined;
+      if (!c || !canEdit(spaceById.get(c.space_id))) return;
+      if (!targets.some((t) => t.id === c.id)) {
+        targets.push({ kind: "collection", id: c.id, name: c.name });
+      }
+    };
+    addCollection(openCollection);
+    if (profile.source.kind === "collection") addCollection(profile.source.id);
+    if (activeSpace && canEdit(activeSpace)) {
+      targets.push({ kind: "space", id: activeSpace.id, name: activeSpace.name });
+    }
+    return targets;
+  }, [
+    spacesWithInherited.data,
+    collections.data,
+    openCollection,
+    profile.source,
+    activeSpace,
+  ]);
+
+  const saveColumns = useMutation({
+    mutationFn: async (target: { kind: "collection" | "space"; id: string }) => {
+      if (target.kind === "collection") {
+        await updateCollection(target.id, { columns: chosenColumns });
+      } else {
+        await updateSpaceProfile(slug!, { columns: chosenColumns });
+      }
+    },
+    onSuccess: async () => {
+      // The saved list is now the profile, so the personal copy has
+      // nothing left to say. Cleared before the refetch lands, which may
+      // resolve to a different profile (saving on the open collection
+      // when its parent's was in effect).
+      setOverride(null);
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["collections", slug] }),
+        qc.invalidateQueries({ queryKey: ["spaces"] }),
+      ]);
+    },
+    onError: (e: Error) => window.alert(`Could not save the columns: ${e.message}`),
+  });
 
   const spaceNameById = useMemo(() => {
     const map = new Map<string, string>();
@@ -798,6 +862,78 @@ export default function LibraryPage() {
         .sort(),
     [collectionPathById],
   );
+
+  /** One item's cell for any column but Title, whose cell carries the
+   *  row's full-text toggle and is built where the row is. */
+  function renderCell(key: ColumnKey, it: Item) {
+    const muted = "truncate px-4 py-2 text-xs";
+    const style = { color: "var(--color-text-muted)" };
+    if (isFieldColumn(key)) {
+      const text = fieldText(it, fieldOf(key));
+      return (
+        <td key={key} className={muted} style={style} title={text}>
+          {text}
+        </td>
+      );
+    }
+    switch (key) {
+      case "creator":
+        return (
+          <td key={key} className={muted} style={style} title={creatorSummary(it)}>
+            {creatorSummary(it)}
+          </td>
+        );
+      case "type":
+        return (
+          <td key={key} className={muted} style={style}>
+            {itemTypeLabel(it.item_type)}
+          </td>
+        );
+      case "space":
+        return (
+          <td
+            key={key}
+            className={muted}
+            style={style}
+            title={spaceNameById.get(it.space_id)}
+          >
+            {spaceNameById.get(it.space_id) ?? ""}
+          </td>
+        );
+      case "collection":
+        return (
+          <td
+            key={key}
+            className={muted}
+            style={style}
+            title={collectionPaths(it).join("\n")}
+          >
+            {collectionPaths(it).join("; ")}
+          </td>
+        );
+      case "tags":
+        return (
+          <td key={key} className="overflow-hidden px-4 py-2">
+            <TagChips
+              tags={tagNamesById(it.tag_ids)}
+              max={3}
+              size="xs"
+              onClick={(t) => addTag(t)}
+            />
+          </td>
+        );
+      case "updated":
+        return (
+          <td key={key} className={muted} style={style}>
+            {formatDate(
+              view === "trash" ? it.deleted_at ?? it.updated_at : it.updated_at,
+            )}
+          </td>
+        );
+      default:
+        return <td key={key} />;
+    }
+  }
 
   // ?item=<id> may name an item outside the current page of list results
   // — arriving from the landing-page search dropdown, or coming back
@@ -1423,18 +1559,20 @@ export default function LibraryPage() {
       const c = collections.data?.find((c) => c.id === collectionParam);
       return c?.name ?? "Collection";
     }
-    return personal ? personal.name : "Library";
-  }, [view, collectionParam, collections.data, personal]);
+    // The space being browsed, which is only the personal one until the
+    // switcher says otherwise.
+    return activeSpace?.name ?? personal?.name ?? "Library";
+  }, [view, collectionParam, collections.data, activeSpace, personal]);
 
-  // Description strip below the title — only when a real collection is
-  // selected and it has one set.
+  // Description strip below the title: the open collection's own, or at
+  // the library root, the space's. Deliberately not inherited — it says
+  // what one place is for.
   const headerDescription = useMemo<string | null>(() => {
-    if (view === "trash" || !collectionParam || collectionParam === "unfiled") {
-      return null;
-    }
+    if (view === "trash" || collectionParam === "unfiled") return null;
+    if (!collectionParam) return activeSpace?.description?.trim() || null;
     const c = collections.data?.find((c) => c.id === collectionParam);
     return c?.description?.trim() || null;
-  }, [view, collectionParam, collections.data]);
+  }, [view, collectionParam, collections.data, activeSpace]);
 
   // Ancestor chain — root → … → direct parent. Drives the
   // "↑ A / B / C" breadcrumb above the current collection title.
@@ -1533,6 +1671,7 @@ export default function LibraryPage() {
         {railOpen && (
           <CollectionRail
             slug={slug}
+            itemTypes={itemTypesOnScreen}
             selection={{ view, collection: collectionParam }}
             onSelect={(s) => {
               setSelection(s);
@@ -1673,25 +1812,47 @@ export default function LibraryPage() {
                 </select>
               )}
               <ColumnPicker
-                options={[
-                  ...(inheritsAny
-                    ? [
-                        {
-                          key: "space",
-                          label: "Space",
-                          checked: optionalColumns.space,
-                          hint: "Where an inherited item lives",
-                        },
-                      ]
-                    : []),
-                  {
-                    key: "collection",
-                    label: "Collection",
-                    checked: optionalColumns.collection,
-                    hint: "Full folder path; can be long",
-                  },
-                ]}
-                onToggle={toggleOptionalColumn}
+                table={BUILTIN_COLUMNS.filter(
+                  (k) => k !== "space" || inheritsAny,
+                ).map((k) => ({
+                  key: k,
+                  label:
+                    k === "updated" && view === "trash"
+                      ? "Trashed"
+                      : columnLabel(k),
+                  checked: visibleColumns.includes(k),
+                  locked: k === "title",
+                  hint:
+                    k === "space"
+                      ? "Where an inherited item lives"
+                      : k === "collection"
+                        ? "Full folder path; can be long"
+                        : undefined,
+                }))}
+                fields={fieldColumns(itemTypesOnScreen).map((k) => ({
+                  key: k,
+                  label: columnLabel(k),
+                  checked: visibleColumns.includes(k),
+                  hint: fieldColumnHint(k),
+                }))}
+                onToggle={(key) =>
+                  setOverride(
+                    toggleColumn(
+                      chosenColumns,
+                      key as ColumnKey,
+                      profile.columns,
+                    ),
+                  )
+                }
+                sourceLabel={sourceName(profile.source)}
+                customised={override !== null}
+                onReset={() => setOverride(null)}
+                saveTargets={saveTargets.map((t) => ({
+                  key: `${t.kind}:${t.id}`,
+                  label: `Save as default for ${t.name}`,
+                  onSave: () => saveColumns.mutate(t),
+                }))}
+                saving={saveColumns.isPending}
               />
               {view === "library" && (
                 <>
@@ -1966,68 +2127,43 @@ export default function LibraryPage() {
                           className="cursor-pointer"
                         />
                       </th>
-                      <SortHeader
-                        label="Title"
-                        column="title"
-                        activeSort={sort}
-                        direction={direction}
-                        onClick={applySort}
-                        columnKey="title"
-                        columns={columns}
-                      />
-                      <th
-                        className="relative px-4 py-2"
-                        style={{ width: columns.width("creator") }}
-                      >
-                        Creator
-                        <ColumnResizer columnKey="creator" columns={columns} />
-                      </th>
-                      <SortHeader
-                        label="Type"
-                        column="type"
-                        activeSort={sort}
-                        direction={direction}
-                        onClick={applySort}
-                        columnKey="type"
-                        columns={columns}
-                      />
-                      {showSpaceColumn && (
-                        <th
-                          className="relative px-4 py-2"
-                          style={{ width: columns.width("space") }}
-                        >
-                          Space
-                          <ColumnResizer columnKey="space" columns={columns} />
-                        </th>
-                      )}
-                      {showCollectionColumn && (
-                        <th
-                          className="relative px-4 py-2"
-                          style={{ width: columns.width("collection") }}
-                        >
-                          Collection
-                          <ColumnResizer
-                            columnKey="collection"
+                      {visibleColumns.map((key) => {
+                        // Sortable where the server can order by it.
+                        // Metadata fields can't be yet.
+                        const sortable: ItemSort | null =
+                          key === "title" || key === "type" || key === "updated"
+                            ? key
+                            : null;
+                        const label =
+                          key === "updated"
+                            ? view === "trash"
+                              ? "Trashed"
+                              : "Updated"
+                            : columnLabel(key);
+                        return sortable ? (
+                          <SortHeader
+                            key={key}
+                            label={label}
+                            column={sortable}
+                            activeSort={sort}
+                            direction={direction}
+                            onClick={applySort}
+                            columnKey={key}
                             columns={columns}
                           />
-                        </th>
-                      )}
-                      <th
-                        className="relative px-4 py-2"
-                        style={{ width: columns.width("tags") }}
-                      >
-                        Tags
-                        <ColumnResizer columnKey="tags" columns={columns} />
-                      </th>
-                      <SortHeader
-                        label={view === "trash" ? "Trashed" : "Updated"}
-                        column="updated"
-                        activeSort={sort}
-                        direction={direction}
-                        onClick={applySort}
-                        columnKey="updated"
-                        columns={columns}
-                      />
+                        ) : (
+                          <th
+                            key={key}
+                            className="relative overflow-hidden px-4 py-2"
+                            style={{ width: columns.width(key) }}
+                          >
+                            <span className="block truncate" title={label}>
+                              {label}
+                            </span>
+                            <ColumnResizer columnKey={key} columns={columns} />
+                          </th>
+                        );
+                      })}
                       {/* Swallows whatever the sized columns do not
                           use. Without it a fixed layout shares the
                           surplus out proportionally and every column
@@ -2163,7 +2299,11 @@ export default function LibraryPage() {
                               className="cursor-pointer"
                             />
                           </td>
-                          <td className="overflow-hidden px-4 py-2">
+                          {visibleColumns.map((key) =>
+                            key !== "title" ? (
+                              renderCell(key, it)
+                            ) : (
+                          <td key="title" className="overflow-hidden px-4 py-2">
                             <div className="flex min-w-0 items-center gap-1.5">
                               {isFulltextRow ? (
                                 <button
@@ -2212,55 +2352,8 @@ export default function LibraryPage() {
                               </span>
                             </div>
                           </td>
-                          <td
-                            className="truncate px-4 py-2 text-xs"
-                            style={{ color: "var(--color-text-muted)" }}
-                            title={creatorSummary(it)}
-                          >
-                            {creatorSummary(it)}
-                          </td>
-                          <td
-                            className="truncate px-4 py-2 text-xs"
-                            style={{ color: "var(--color-text-muted)" }}
-                          >
-                            {itemTypeLabel(it.item_type)}
-                          </td>
-                          {showSpaceColumn && (
-                            <td
-                              className="truncate px-4 py-2 text-xs"
-                              style={{ color: "var(--color-text-muted)" }}
-                              title={spaceNameById.get(it.space_id)}
-                            >
-                              {spaceNameById.get(it.space_id) ?? ""}
-                            </td>
+                            ),
                           )}
-                          {showCollectionColumn && (
-                            <td
-                              className="truncate px-4 py-2 text-xs"
-                              style={{ color: "var(--color-text-muted)" }}
-                              title={collectionPaths(it).join("\n")}
-                            >
-                              {collectionPaths(it).join("; ")}
-                            </td>
-                          )}
-                          <td className="overflow-hidden px-4 py-2">
-                            <TagChips
-                              tags={tagNamesById(it.tag_ids)}
-                              max={3}
-                              size="xs"
-                              onClick={(t) => addTag(t)}
-                            />
-                          </td>
-                          <td
-                            className="truncate px-4 py-2 text-xs"
-                            style={{ color: "var(--color-text-muted)" }}
-                          >
-                            {formatDate(
-                              view === "trash"
-                                ? it.deleted_at ?? it.updated_at
-                                : it.updated_at,
-                            )}
-                          </td>
                           <td aria-hidden="true" />
                         </tr>
                       );

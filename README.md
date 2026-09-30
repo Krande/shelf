@@ -180,8 +180,8 @@ shared spaces** from Settings → Spaces — the creator owns it and picks who e
 is in it. Creation is admin-gated because spaces are cheap to make and awkward
 to clean up; making a space still grants nothing over spaces other people own.
 
-**Rename** in the same panel changes a space's name and slug. The owner can do
-that to their own space, and an instance admin can do it to any *shared* space —
+A space's name and slug are edited in its **Profile** (see [Profiles](#profiles-what-a-space-or-collection-shows)
+below). The owner can rename their own space, and an instance admin can rename any *shared* space —
 a deliberate, narrow exception to "admins get nothing here", because a label is
 not a way in. An admin who renames a space still can't list a single item in it,
 see its members, or add to it. Nobody renames somebody else's personal shelf,
@@ -196,6 +196,30 @@ everyone with an account. Removing someone revokes their access but leaves the
 content they created — it belongs to the space, not to them.
 
 ![Settings → Spaces with a shared Standards space expanded: its owner, a viewer, and the picker for adding someone](docs/screenshots/sharing.png)
+
+### Profiles: what a space or collection shows
+
+A Standards library is read by Designation and Edition; a paper library by
+Creator. A **profile** lets a space or a collection say so: a description shown
+in the page header, and the columns its library table shows by default — the
+table's own (Title, Creator, Type, Tags, …) or any metadata field.
+
+- **A space's profile** — together with its name and slug — is under Settings →
+  Spaces → **Profile**. Editors can change the description and columns; renaming
+  stays with the owner.
+- **A collection's profile** is on its **⋯** menu or a right-click in the rail →
+  **Edit profile…**. Collections a space inherits have the menu too, editable
+  by editors of the space they belong to.
+
+Columns are inherited: a collection without its own takes its nearest parent's,
+then its space's, then the built-in default. An inherited collection falls back
+to the space it lives in, so a Standards folder looks like Standards wherever
+it's browsed from. Descriptions aren't inherited.
+
+Everyone can still change their own view from the **Columns** menu; that's
+remembered in their browser, per profile, with a reset back to the profile's
+columns. Editors also get **Save as default for …** there, which writes their
+view to the profile for everyone.
 
 People appear in that dropdown when they first sign in — nothing is synced from
 the identity provider ahead of that, so assigning someone the app in Entra (or

@@ -74,6 +74,26 @@ Opening a web hit needs the `search` scope; opening locally needs
 `download` too. `shelf open <attachment-id> --page N [--web]` does either
 from a script.
 
+### Downloading, and which copy you get
+
+Shelf never rewrites an upload. When it OCRs a scan or adds bookmarks,
+the result is stored as a new *version* beside the original, and the
+shelf reader shows the newest. The CLI does the same: `shelf download`,
+`shelf open` and `o` in the browser fetch **`latest`** by default, so a
+scanned standard arrives with its searchable text layer.
+
+```sh
+shelf download <attachment-id>                    # ./<its filename>, latest version
+shelf download <attachment-id> -o ./pdfs/         # into a directory
+shelf download <attachment-id> --version original # the bytes as uploaded
+shelf versions <attachment-id>                    # list OCR'd / outlined copies
+```
+
+`--version original` is the one to use when comparing files by content:
+its bytes are what the attachment's `sha256` describes. The local cache
+keeps each version apart, so a new OCR pass is downloaded the next time
+the document is opened rather than hidden behind an older copy.
+
 ### Opening a PDF at a page
 
 No operating system has a general way to open a file *at a page* —

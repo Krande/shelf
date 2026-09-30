@@ -27,6 +27,7 @@ from ..auth.spaces import (
 )
 from ..db import get_session
 from ..models import Collection, Item, ItemCollection, Space, User
+from .profiles import clean_columns
 
 router = APIRouter(tags=["collections"])
 
@@ -50,6 +51,9 @@ class CollectionUpdate(BaseModel):
     description: str | None = None
     parent_id: uuid.UUID | None = None
     position: int | None = None
+    # Default library columns here and below; null or [] to inherit
+    # again. See api/profiles.py.
+    columns: list[str] | None = None
 
 
 class CollectionResponse(BaseModel):
@@ -60,6 +64,7 @@ class CollectionResponse(BaseModel):
     parent_id: uuid.UUID | None
     name: str
     description: str | None
+    columns: list[str] | None = None
     position: int
     created_at: datetime
     updated_at: datetime
@@ -270,6 +275,9 @@ async def update_collection(
         # collapse to the same canonical state.
         desc = (payload.description or "").strip()
         coll.description = desc or None
+
+    if "columns" in provided:
+        coll.columns = clean_columns(payload.columns)
 
     # parent_id / position handling. Both can be set independently:
     # - parent_id only → append to new parent's end.

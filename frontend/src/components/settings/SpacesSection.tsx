@@ -13,12 +13,13 @@ import {
   ChevronRight,
   Link2,
   Loader2,
-  Pencil,
   Plus,
+  SlidersHorizontal,
   Users,
 } from "lucide-react";
 import {
   addMember,
+  canEdit,
   createSpace,
   fetchDirectory,
   fetchMembers,
@@ -26,6 +27,7 @@ import {
   removeMember,
   updateMemberRole,
   updateSpace,
+  updateSpaceProfile,
   type DirectoryUser,
   type Space,
   type SpaceMember,
@@ -33,6 +35,14 @@ import {
 } from "@/api/spaces";
 import { ApiError } from "@/api/client";
 import type { Me } from "@/api/me";
+import ProfileModal, {
+  type ProfileDraft,
+} from "@/components/library/ProfileModal";
+import {
+  isColumnKey,
+  resolveProfile,
+  type ColumnKey,
+} from "@/lib/libraryColumns";
 import SpaceInheritance from "./SpaceInheritance";
 
 const ROLE_BLURB: Record<SpaceRole, string> = {
@@ -185,7 +195,7 @@ function NewSpaceForm() {
 }
 
 /** Which expandable panel a space row is showing, if any. */
-type Panel = "members" | "inherits" | "rename";
+type Panel = "members" | "inherits";
 
 function SpaceRow({
   space,
@@ -196,12 +206,60 @@ function SpaceRow({
    *  a label change, which grants no access to what it holds. */
   isAdmin: boolean;
 }) {
+  const qc = useQueryClient();
   const [panel, setPanel] = useState<Panel | null>(null);
   const toggle = (which: Panel) =>
     setPanel((current) => (current === which ? null : which));
 
   // Nobody renames somebody else's personal shelf, admin or not.
   const canRename = space.is_owner || (isAdmin && !space.is_personal);
+  const canEditProfile = canEdit(space);
+
+  // Name, slug, description and columns are edited in one dialog — the
+  // same editor collections use, with the space's name and slug on top.
+  // The two halves are separate permissions and separate requests: an
+  // admin may rename a shared space without editing it, and an editor
+  // may edit it without renaming it.
+  const [editing, setEditing] = useState(false);
+  const save = useMutation({
+    mutationFn: async (draft: ProfileDraft) => {
+      let slug = space.slug;
+      const renamed = canRename && draft.name !== undefined && draft.name !== space.name;
+      const reslugged =
+        canRename && !space.is_personal && draft.slug !== undefined && draft.slug !== space.slug;
+      if (renamed || reslugged) {
+        const updated = await updateSpace(space.slug, {
+          ...(renamed ? { name: draft.name } : {}),
+          ...(reslugged ? { slug: draft.slug } : {}),
+        });
+        slug = updated.slug;
+      }
+      if (canEditProfile) {
+        await updateSpaceProfile(slug, {
+          description: draft.description,
+          columns: draft.columns,
+        });
+      }
+      return reslugged;
+    },
+    onSuccess: (reslugged) => {
+      // Both space listings (plain and with-inherited) carry the name and
+      // the profile.
+      qc.invalidateQueries({ queryKey: ["spaces"] });
+      if (reslugged) {
+        // The slug keys the item listing, the tag list and everything else
+        // addressed by it, so a slug change invalidates broadly.
+        qc.invalidateQueries({ queryKey: ["items"] });
+        qc.invalidateQueries({ queryKey: ["subscribable"] });
+      }
+      setEditing(false);
+    },
+  });
+  const saveError = save.error
+    ? save.error instanceof ApiError && save.error.status === 409
+      ? "Another space already has that slug."
+      : save.error.message
+    : null;
 
   return (
     <li
@@ -231,13 +289,20 @@ function SpaceRow({
             {space.slug} · you are {space.role}
           </span>
         </span>
-        {canRename && (
-          <PanelButton
-            label="Rename"
-            Icon={Pencil}
-            active={panel === "rename"}
-            onClick={() => toggle("rename")}
-          />
+        {(canEditProfile || canRename) && (
+          <button
+            onClick={() => {
+              save.reset();
+              setEditing(true);
+            }}
+            aria-label={`Edit ${space.name} profile`}
+            title="Name, description and default library columns"
+            className="flex shrink-0 items-center gap-1 rounded border px-2 py-1 text-xs hover:opacity-80"
+            style={{ borderColor: "var(--color-border)" }}
+          >
+            <SlidersHorizontal className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Profile</span>
+          </button>
         )}
         {space.is_owner && (
           <>
@@ -256,124 +321,40 @@ function SpaceRow({
           </>
         )}
       </div>
-      {canRename && panel === "rename" && (
-        <RenameForm space={space} onDone={() => setPanel(null)} />
-      )}
       {space.is_owner && panel === "members" && <MemberList slug={space.slug} />}
       {space.is_owner && panel === "inherits" && (
         <SpaceInheritance space={space} />
+      )}
+      {editing && (
+        <ProfileModal
+          title={`Profile · ${space.name}`}
+          kind="space"
+          identity={{
+            name: space.name,
+            slug: space.slug,
+            editable: canRename,
+            slugFixed: space.is_personal,
+          }}
+          description={space.description ?? null}
+          columns={ownColumns(space.columns)}
+          inherited={resolveProfile(null, [], [], null)}
+          preferTypes={[]}
+          readOnly={!canEditProfile}
+          saving={save.isPending}
+          error={saveError}
+          onClose={() => setEditing(false)}
+          onSave={(draft) => save.mutate(draft)}
+        />
       )}
     </li>
   );
 }
 
-/**
- * Change a space's name, and — for a shared space — its slug.
- *
- * A personal space's slug is fixed: `is_personal` is derived from the
- * `u-` prefix, so moving it would quietly reclassify the space. The name
- * is still free to change.
- */
-function RenameForm({
-  space,
-  onDone,
-}: {
-  space: Space;
-  onDone: () => void;
-}) {
-  const qc = useQueryClient();
-  const [name, setName] = useState(space.name);
-  const [slug, setSlug] = useState(space.slug);
-
-  const slugChanged = !space.is_personal && slug.trim() !== space.slug;
-
-  const save = useMutation({
-    mutationFn: () =>
-      updateSpace(space.slug, {
-        ...(name.trim() !== space.name ? { name: name.trim() } : {}),
-        ...(slugChanged ? { slug: slug.trim() } : {}),
-      }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["spaces"] });
-      // The slug keys the item listing, the tag list and everything else
-      // addressed by it, so a slug change invalidates broadly.
-      qc.invalidateQueries({ queryKey: ["items"] });
-      qc.invalidateQueries({ queryKey: ["subscribable"] });
-      onDone();
-    },
-  });
-
-  function onSubmit(e: FormEvent) {
-    e.preventDefault();
-    if (!name.trim() || save.isPending) return;
-    save.mutate();
-  }
-
-  return (
-    <form
-      onSubmit={onSubmit}
-      className="mt-2 border-t pt-2"
-      style={{ borderColor: "var(--color-border)" }}
-    >
-      <div className="flex flex-wrap gap-1">
-        <input
-          required
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          aria-label={`Name for ${space.name}`}
-          placeholder="Space name"
-          className="min-w-0 flex-1 rounded border px-2 py-1 text-xs"
-          style={{
-            borderColor: "var(--color-border)",
-            backgroundColor: "var(--color-surface)",
-          }}
-        />
-        <input
-          value={slug}
-          onChange={(e) => setSlug(e.target.value)}
-          disabled={space.is_personal}
-          aria-label={`Slug for ${space.name}`}
-          placeholder="slug"
-          className="min-w-0 flex-1 rounded border px-2 py-1 text-xs disabled:opacity-50"
-          style={{
-            borderColor: "var(--color-border)",
-            backgroundColor: "var(--color-surface)",
-          }}
-        />
-        <button
-          type="submit"
-          disabled={save.isPending || !name.trim()}
-          className="flex shrink-0 items-center gap-1 rounded border px-2 py-1 text-xs hover:opacity-80 disabled:opacity-50"
-          style={{ borderColor: "var(--color-border)" }}
-        >
-          {save.isPending && <Loader2 className="h-3 w-3 animate-spin" />}
-          Save
-        </button>
-        <button
-          type="button"
-          onClick={onDone}
-          className="shrink-0 rounded border px-2 py-1 text-xs hover:opacity-80"
-          style={{ borderColor: "var(--color-border)" }}
-        >
-          Cancel
-        </button>
-      </div>
-      <p className="mt-1 text-xs" style={{ color: "var(--color-text-muted)" }}>
-        {space.is_personal
-          ? "A personal space's slug is fixed, but you can call it whatever you like."
-          : slugChanged
-            ? "Changing the slug changes this space's URL. Links people already have will stop working — nothing else breaks."
-            : "The slug is what appears in URLs."}
-      </p>
-      {save.error && (
-        <p className="mt-1 text-xs text-red-600" role="alert">
-          {save.error instanceof ApiError && save.error.status === 409
-            ? "Another space already has that slug."
-            : save.error.message}
-        </p>
-      )}
-    </form>
-  );
+/** A stored column list, minus anything this build doesn't know; null
+ *  when nothing usable is left, which the editor shows as "default". */
+function ownColumns(cols: string[] | null | undefined): ColumnKey[] | null {
+  const valid = (cols ?? []).filter(isColumnKey);
+  return valid.length > 0 ? valid : null;
 }
 
 function PanelButton({

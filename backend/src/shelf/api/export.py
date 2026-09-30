@@ -38,7 +38,7 @@ from ..services.export_renderers import (
     render_csl_json,
     render_zotero_rdf,
 )
-from .attachments import _resolve_version
+from .attachments import resolve_version
 
 log = logging.getLogger(__name__)
 
@@ -504,7 +504,7 @@ async def download_attachments_zip(
                 # original). Reading ``storage_key`` directly would miss
                 # every attachment whose original was superseded by a
                 # derivation — its original object may no longer exist.
-                storage_key, _ = await _resolve_version(db, att, None)
+                storage_key, _ = await resolve_version(db, att, None)
                 try:
                     body = await storage.read_object(storage_key)
                 except Exception as exc:

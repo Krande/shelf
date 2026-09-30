@@ -43,6 +43,7 @@ from ..db import get_session
 from ..models import (
     ApiToken,
     Attachment,
+    AttachmentDerivation,
     AttachmentPage,
     Collection,
     Item,
@@ -53,6 +54,7 @@ from ..models import (
 )
 from ..services import extraction, storage
 from ..services.storage import attachment_storage_key
+from .attachments import resolve_version
 from .items import _SNIPPET_PAD, SearchScope, _escape_ilike, _parse_search
 from .standards import LinkRevisionRequest, item_revisions, upsert_revision
 
@@ -1724,15 +1726,11 @@ async def list_item_attachments(
 # ── download ──────────────────────────────────────────────────────────────
 
 
-@router.get("/download/{attachment_id}")
-async def download(
-    attachment_id: uuid.UUID,
-    auth: Annotated[TokenAuth, Depends(require_scope("download"))],
-    db: Annotated[AsyncSession, Depends(get_session)],
-) -> RedirectResponse:
-    """302-redirects to a short-lived presigned GET on the bucket. The
-    redirect saves us streaming the bytes through the API and lets
-    big files travel at line rate from Garage to the caller."""
+async def _resolve_readable_attachment(
+    db: AsyncSession, auth: TokenAuth, attachment_id: uuid.UUID
+) -> Attachment:
+    """An attachment the token may read, or a 404 that doesn't say which
+    check failed."""
     att = await db.get(Attachment, attachment_id)
     if att is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Attachment not found")
@@ -1746,6 +1744,97 @@ async def download(
     _enforce_space_scope(auth, item.space_id)
 
     await _enforce_collection_scope(db, auth, item)
+    return att
 
-    url = await storage.presign_download(att.storage_key)
-    return RedirectResponse(url, status_code=status.HTTP_302_FOUND)
+
+class AttachmentVersion(BaseModel):
+    """One processed copy of an attachment: an OCR pass that added a text
+    layer, or an outline pass that added bookmarks."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    kind: str
+    engine: str
+    created_at: datetime
+
+
+class AttachmentVersions(BaseModel):
+    # The upload's name, which every version is saved under: a client
+    # holding only an attachment id has nowhere else to learn it.
+    filename: str
+    # "original" when nothing has processed the upload yet, else the id
+    # of the version `?version=latest` resolves to.
+    latest: str
+    versions: list[AttachmentVersion]
+
+
+@router.get(
+    "/attachments/{attachment_id}/versions",
+    response_model=AttachmentVersions,
+    summary="List an attachment's processed versions",
+)
+async def list_attachment_versions(
+    attachment_id: uuid.UUID,
+    auth: Annotated[TokenAuth, Depends(require_scope("search"))],
+    db: Annotated[AsyncSession, Depends(get_session)],
+) -> AttachmentVersions:
+    """Every processed copy of one attachment, newest first.
+
+    Shelf never rewrites an upload in place: OCR and outline passes
+    each store a new copy beside it. These are what the SPA reader's
+    version picker offers, and any of their ids can be passed to
+    ``/download/{attachment_id}?version=``.
+    """
+    att = await _resolve_readable_attachment(db, auth, attachment_id)
+    rows = (
+        await db.execute(
+            select(AttachmentDerivation)
+            .where(AttachmentDerivation.attachment_id == att.id)
+            .order_by(AttachmentDerivation.created_at.desc())
+        )
+    ).scalars().all()
+    _, latest = await resolve_version(db, att, None)
+    return AttachmentVersions(
+        filename=att.filename,
+        latest=latest,
+        versions=[AttachmentVersion.model_validate(r) for r in rows],
+    )
+
+
+@router.get("/download/{attachment_id}")
+async def download(
+    attachment_id: uuid.UUID,
+    auth: Annotated[TokenAuth, Depends(require_scope("download"))],
+    db: Annotated[AsyncSession, Depends(get_session)],
+    version: Annotated[
+        str,
+        Query(
+            description=(
+                "`original` (the default) for the bytes as uploaded; "
+                "`latest` for the copy the shelf reader shows — OCR'd and "
+                "bookmarked where that has run; or a version id from "
+                "`/attachments/{attachment_id}/versions`."
+            ),
+        ),
+    ] = "original",
+) -> RedirectResponse:
+    """302-redirects to a short-lived presigned GET on the bucket. The
+    redirect saves us streaming the bytes through the API and lets
+    big files travel at line rate from Garage to the caller.
+
+    Defaults to the original rather than to what the reader shows, so
+    the bytes match the attachment's `sha256` — which is what anything
+    comparing files by content expects. `X-Shelf-Version` on the
+    response says which version was served.
+    """
+    att = await _resolve_readable_attachment(db, auth, attachment_id)
+    storage_key, served = await resolve_version(
+        db, att, None if version == "latest" else version
+    )
+    url = await storage.presign_download(storage_key)
+    return RedirectResponse(
+        url,
+        status_code=status.HTTP_302_FOUND,
+        headers={"X-Shelf-Version": served},
+    )
