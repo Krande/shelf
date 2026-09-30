@@ -31,7 +31,7 @@ def test_cached_path_keeps_the_name_but_not_its_hazards(
 ) -> None:
     monkeypatch.setenv("SHELF_CACHE_DIR", str(tmp_path))
     path = opener.cached_path("att-1", '../evil"; rm -rf ~.pdf')
-    assert path.parent == tmp_path / "att-1"
+    assert path.parent == tmp_path / "att-1" / "original"
     assert '"' not in path.name and ";" not in path.name
     assert path.name.endswith(".pdf")
 
@@ -69,22 +69,56 @@ def test_viewer_template_is_filled_as_written_on_windows() -> None:
     assert cmd == r'SumatraPDF.exe -page 4 "C:\a b.pdf"'
 
 
+class _Client:
+    """Stands in for ShelfClient: `latest` is whatever the test sets."""
+
+    def __init__(self, latest: str = "original") -> None:
+        self.latest = latest
+        self.calls: list[tuple[Path, str]] = []
+
+    def attachment_versions(self, attachment_id: str) -> dict[str, object]:
+        return {"filename": "doc.pdf", "latest": self.latest, "versions": []}
+
+    def download(self, attachment_id: str, dest: Path, *, version: str = "original") -> Path:
+        self.calls.append((dest, version))
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"%PDF")
+        return dest
+
+
 def test_fetch_downloads_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("SHELF_CACHE_DIR", str(tmp_path))
-    calls: list[Path] = []
+    client = _Client()
 
-    class Client:
-        def download(self, attachment_id: str, dest: Path) -> Path:
-            calls.append(dest)
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(b"%PDF")
-            return dest
+    first = opener.fetch(client, "a1", "doc.pdf")  # type: ignore[arg-type]
+    second = opener.fetch(client, "a1", "doc.pdf")  # type: ignore[arg-type]
+    assert first == second and len(client.calls) == 1
+    opener.fetch(client, "a1", "doc.pdf", refresh=True)  # type: ignore[arg-type]
+    assert len(client.calls) == 2
 
-    first = opener.fetch(Client(), "a1", "doc.pdf")  # type: ignore[arg-type]
-    second = opener.fetch(Client(), "a1", "doc.pdf")  # type: ignore[arg-type]
-    assert first == second and len(calls) == 1
-    opener.fetch(Client(), "a1", "doc.pdf", refresh=True)  # type: ignore[arg-type]
-    assert len(calls) == 2
+
+def test_fetch_takes_the_ocrd_copy_and_notices_a_newer_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("SHELF_CACHE_DIR", str(tmp_path))
+    client = _Client(latest="ocr-1")
+
+    path = opener.fetch(client, "a1", "doc.pdf")  # type: ignore[arg-type]
+    assert client.calls == [(path, "ocr-1")]
+    assert path.parent == tmp_path / "a1" / "ocr-1"
+
+    # An outline pass lands after the first open: fetched, not shadowed.
+    client.latest = "outline-2"
+    newer = opener.fetch(client, "a1", "doc.pdf")  # type: ignore[arg-type]
+    assert newer != path
+    assert client.calls[-1] == (newer, "outline-2")
+
+
+def test_fetch_can_ask_for_the_original(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("SHELF_CACHE_DIR", str(tmp_path))
+    client = _Client(latest="ocr-1")
+    path = opener.fetch(client, "a1", "doc.pdf", version="original")  # type: ignore[arg-type]
+    assert client.calls == [(path, "original")]
 
 
 def test_open_local_prefers_the_configured_viewer(

@@ -20,6 +20,9 @@ Usage:
     shelf browse "load case"                       # interactive
     shelf open <attachment-id> --page 12           # local PDF, at page 12
     shelf open <attachment-id> --page 12 --web     # the shelf reader
+    shelf download <attachment-id> -o ./pdfs/      # OCR'd copy where there is one
+    shelf download <attachment-id> --version original
+    shelf versions <attachment-id>                 # its OCR'd / outlined copies
 
 Env used:
     SHELF_API_BASE_URL   instance to talk to, e.g. https://shelf.example.com
@@ -189,7 +192,9 @@ def cmd_open(args: argparse.Namespace) -> int:
         # Cosmetic — the cache is keyed by id — but it's what the browser
         # tab shows, and search output carries it to pass along.
         filename = args.filename or f"{args.attachment_id}.pdf"
-        path = opener.fetch(client, args.attachment_id, filename, refresh=args.refresh)
+        path = opener.fetch(
+            client, args.attachment_id, filename, version=args.version, refresh=args.refresh
+        )
     opened = opener.open_local(path, args.page, viewer=cfg.pdf_viewer, query=args.find)
     print(path)
     if not opened.at_page:
@@ -198,6 +203,31 @@ def cmd_open(args: argparse.Namespace) -> int:
             "Set [viewer] pdf in shelf.toml to use a viewer that does.",
             file=sys.stderr,
         )
+    return 0
+
+
+def cmd_download(args: argparse.Namespace) -> int:
+    """Save one attachment. `latest` by default: for a scan, the copy
+    shelf has OCR'd, which is the one a viewer can search and copy from."""
+    from .opener import safe_name
+
+    with _client(args) as client:
+        info = client.attachment_versions(args.attachment_id)
+        version = str(info["latest"]) if args.version == "latest" else args.version
+        dest = Path(args.output) if args.output else Path(safe_name(info["filename"]))
+        if dest.is_dir():
+            dest = dest / safe_name(info["filename"])
+        client.download(args.attachment_id, dest, version=version)
+    print(dest)
+    if version != "original":
+        kind = next((v["kind"] for v in info["versions"] if v["id"] == version), version)
+        print(f"version: {kind} ({version})", file=sys.stderr)
+    return 0
+
+
+def cmd_versions(args: argparse.Namespace) -> int:
+    with _client(args) as client:
+        _emit(client.attachment_versions(args.attachment_id))
     return 0
 
 
@@ -261,6 +291,11 @@ def cmd_profiles_pull(args: argparse.Namespace) -> int:
 
 
 # ── wiring ───────────────────────────────────────────────────────────────
+
+_VERSION_HELP = (
+    "latest (default): what the shelf reader shows — OCR'd and bookmarked where "
+    "that has run; original: the bytes as uploaded; or an id from `shelf versions`"
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -376,7 +411,20 @@ def build_parser() -> argparse.ArgumentParser:
     open_cmd.add_argument(
         "--refresh", action="store_true", help="download again even if cached"
     )
+    open_cmd.add_argument("--version", default="latest", help=_VERSION_HELP)
     open_cmd.set_defaults(func=cmd_open)
+
+    download = sub.add_parser("download", help="save an attachment, OCR'd copy by default")
+    download.add_argument("attachment_id")
+    download.add_argument(
+        "-o", "--output", help="file or directory to save to (default: its name, here)"
+    )
+    download.add_argument("--version", default="latest", help=_VERSION_HELP)
+    download.set_defaults(func=cmd_download)
+
+    versions = sub.add_parser("versions", help="list an attachment's OCR'd and outlined copies")
+    versions.add_argument("attachment_id")
+    versions.set_defaults(func=cmd_versions)
 
     return parser
 

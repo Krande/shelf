@@ -73,27 +73,45 @@ def cache_dir() -> Path:
 _UNSAFE = re.compile(r"[^\w.\- ()\[\]+,]")
 
 
-def cached_path(attachment_id: str, filename: str) -> Path:
-    """`<cache>/<attachment id>/<filename>`: the id keeps two files
-    called `spec.pdf` apart, and the real name is what the browser tab
-    and the viewer's title bar show. The name is reduced to a plain set
-    of characters, since it ends up on a command line."""
+def safe_name(filename: str) -> str:
+    """`filename` reduced to a plain set of characters, since it ends up
+    on a command line, and ending in `.pdf`."""
     name = _UNSAFE.sub("_", Path(filename).name).strip(" .") or "document.pdf"
     if not name.lower().endswith(".pdf"):
         name += ".pdf"
-    return cache_dir() / str(attachment_id) / name
+    return name
 
 
-def fetch(client: ShelfClient, attachment_id: str, filename: str, *, refresh: bool = False) -> Path:
+def cached_path(attachment_id: str, filename: str, version: str = "original") -> Path:
+    """`<cache>/<attachment id>/<version>/<filename>`: the id keeps two
+    files called `spec.pdf` apart, the version keeps a scan apart from
+    its OCR'd copy, and the real name is what the browser tab and the
+    viewer's title bar show."""
+    return cache_dir() / str(attachment_id) / _UNSAFE.sub("_", version) / safe_name(filename)
+
+
+def fetch(
+    client: ShelfClient,
+    attachment_id: str,
+    filename: str,
+    *,
+    version: str = "latest",
+    refresh: bool = False,
+) -> Path:
     """The local copy of an attachment, downloading it the first time.
 
-    Keyed by attachment id: shelf rewrites a blob in place when it OCRs
-    it, but never renumbers pages doing so, so a stale copy still lands
-    on the right page. `refresh` is there for when it matters.
+    Shelf never rewrites an upload: OCR and outline passes each store a
+    new copy beside it, and `latest` — what the shelf reader shows — is
+    the default because a scan's OCR'd copy is the one a viewer can
+    search. It is resolved to a concrete version before the cache is
+    consulted, so a newer OCR pass is fetched rather than shadowed by an
+    older copy.
     """
-    path = cached_path(attachment_id, filename)
+    if version == "latest":
+        version = str(client.attachment_versions(attachment_id)["latest"])
+    path = cached_path(attachment_id, filename, version)
     if refresh or not path.exists():
-        client.download(attachment_id, path)
+        client.download(attachment_id, path, version=version)
     return path
 
 

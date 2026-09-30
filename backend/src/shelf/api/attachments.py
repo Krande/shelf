@@ -225,7 +225,7 @@ class AttachmentDerivationListResponse(BaseModel):
     current_version: str
 
 
-async def _resolve_version(
+async def resolve_version(
     db: AsyncSession,
     attachment: Attachment,
     version: str | None,
@@ -308,7 +308,7 @@ async def download_attachment(
     ] = None,
 ) -> AttachmentDownloadResponse:
     att = await _resolve_attachment(db, user, attachment_id)
-    storage_key, _ = await _resolve_version(db, att, version)
+    storage_key, _ = await resolve_version(db, att, version)
     url = await storage.presign_download(storage_key)
     return AttachmentDownloadResponse(url=url)
 
@@ -329,7 +329,7 @@ async def stream_attachment(
     Signs for the server-side endpoint, not the browser-facing one: this
     process performs the GET itself, so the URL never leaves the server."""
     att = await _resolve_attachment(db, user, attachment_id)
-    storage_key, _ = await _resolve_version(db, att, version)
+    storage_key, _ = await resolve_version(db, att, version)
     presigned = await storage.presign_download_internal(storage_key)
 
     client = httpx.AsyncClient(follow_redirects=True, timeout=60.0)
@@ -388,7 +388,7 @@ async def list_derivations(
             .order_by(AttachmentDerivation.created_at.desc())
         )
     ).scalars().all()
-    _, current = await _resolve_version(db, att, None)
+    _, current = await resolve_version(db, att, None)
     return AttachmentDerivationListResponse(
         derivations=[
             AttachmentDerivationResponse.model_validate(r) for r in rows

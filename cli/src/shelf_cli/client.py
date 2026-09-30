@@ -135,6 +135,11 @@ class ShelfClient:
     def list_attachments(self, item_id: str | uuid.UUID) -> list[dict[str, Any]]:
         return list(self._request("GET", f"/api/v1/items/{item_id}/attachments"))
 
+    def attachment_versions(self, attachment_id: str | uuid.UUID) -> dict[str, Any]:
+        """The attachment's filename, its processed copies (OCR, outline)
+        newest first, and which one `version="latest"` would fetch."""
+        return self._request("GET", f"/api/v1/attachments/{attachment_id}/versions")
+
     def upload(
         self, item_id: str | uuid.UUID, path: Path, *, content_type: str | None = None
     ) -> dict[str, Any]:
@@ -186,9 +191,15 @@ class ShelfClient:
 
     # ── download ─────────────────────────────────────────────────────────
 
-    def download(self, attachment_id: str | uuid.UUID, dest: Path) -> Path:
+    def download(
+        self, attachment_id: str | uuid.UUID, dest: Path, *, version: str = "original"
+    ) -> Path:
         """Write an attachment's bytes to `dest`, via a `.part` file so an
         interrupted download never looks like a finished one.
+
+        `version` is `original` for the bytes as uploaded, `latest` for
+        the copy the shelf reader shows (OCR'd and bookmarked where that
+        has run), or an id from `attachment_versions`.
 
         The API answers with a redirect to a presigned bucket URL, which
         is followed by hand rather than by the client: the presigned URL
@@ -197,7 +208,7 @@ class ShelfClient:
         request for carrying two kinds of auth.
         """
         path = f"/api/v1/download/{attachment_id}"
-        response = self._client.get(path, follow_redirects=False)
+        response = self._client.get(path, params={"version": version}, follow_redirects=False)
         if response.status_code >= 400:
             raise ApiError(response.status_code, _detail(response), "GET", path)
         url = response.headers.get("location") if response.is_redirect else None
