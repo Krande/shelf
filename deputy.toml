@@ -62,8 +62,13 @@ version_variables = [
 #
 # So semantic-release runs this after it has written the new version into
 # cli/pyproject.toml (the script reads it from there; PSR 8.5.1 passes no
-# NEW_VERSION) and before it commits, and `assets` stages the result into the
-# release commit the tag points at. Keep `assets` in step with DOCS in the
-# script. `pixi run check-cli-version` on every PR catches what this misses.
-build_command = "python scripts/check_cli_version.py --write"
-assets = ["README.md", "cli/README.md"]
+# NEW_VERSION) and before it commits, and `--stage` has the script `git add`
+# what it rewrote, which puts it in the release commit the tag points at.
+# `pixi run check-cli-version` on every PR catches what this misses.
+#
+# NOT `assets`: PSR 8.5.1 stages those, but also uploads each one to the
+# GitHub release under its bare name, and README.md and cli/README.md collide
+# there. The second upload 422s and fails the tag job after the tag and release
+# already exist. Leave `assets` unset unless a file is really meant as a
+# release download.
+build_command = "python scripts/check_cli_version.py --write --stage"

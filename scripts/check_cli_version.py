@@ -13,20 +13,28 @@ snippet this script can't find — both things to catch before the tag.
     python scripts/check_cli_version.py                 # check against cli/pyproject.toml
     python scripts/check_cli_version.py --expect 0.12.0 # check against a given version
     python scripts/check_cli_version.py --write         # rewrite to cli/pyproject.toml
+    python scripts/check_cli_version.py --write --stage # ... and `git add` them
+
+`--stage` is how the rewrite reaches the release commit. semantic-release
+commits whatever is staged, and this is the only thing that knows which
+files it touched. The obvious alternative, listing the files under
+[release].assets, also makes semantic-release 8.5.1 *upload* each one to the
+GitHub release under its bare name. Two files are both called README.md, so
+the second upload 422s and fails the job after the tag is already out.
 """
 
 from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# Every file that carries an install command. Keep in step with
-# [release].assets in deputy.toml, or a rewrite is left out of the commit.
+# Every file that carries an install command.
 DOCS = ["README.md", "cli/README.md"]
 
 TAG = re.compile(r"--tag[ =]v?(?P<version>\d+\.\d+\.\d+[\w.+-]*)")
@@ -46,10 +54,18 @@ def main() -> int:
     parser.add_argument(
         "--write", action="store_true", help="rewrite the tags instead of checking them"
     )
+    parser.add_argument(
+        "--stage",
+        action="store_true",
+        help="with --write: `git add` what was rewritten, for the release commit",
+    )
     args = parser.parse_args()
+    if args.stage and not args.write:
+        parser.error("--stage only makes sense with --write")
     expected = (args.expect or current_version()).removeprefix("v")
 
     problems: list[str] = []
+    rewritten: list[str] = []
     for rel in DOCS:
         path = ROOT / rel
         text = path.read_text(encoding="utf-8")
@@ -88,7 +104,11 @@ def main() -> int:
             # newline="" so a CRLF checkout is written back as it was read.
             with path.open("w", encoding="utf-8", newline="") as f:
                 f.write("".join(lines))
+            rewritten.append(rel)
             print(f"{rel}: install command now names v{expected}")
+
+    if args.stage and rewritten:
+        subprocess.run(["git", "add", "--", *rewritten], cwd=ROOT, check=True)
 
     if problems:
         print(
