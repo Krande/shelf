@@ -98,6 +98,25 @@ def test_hits_render_under_their_document() -> None:
     asyncio.run(scenario())
 
 
+def test_starts_with_a_query_from_the_command_line() -> None:
+    # `shelf browse unicorn`: constructing the app with a query used to
+    # raise NoActiveAppError before anything was on screen.
+    async def scenario() -> None:
+        app = tui.ShelfBrowser(Config(base_url="https://shelf.test", token="t"), "unicorn")
+        fake = FakeApi()
+        app.api = fake  # type: ignore[assignment]
+        async with app.run_test() as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause(tui.DEBOUNCE_S + 0.2)
+            assert app._input.value == "unicorn"
+            assert _rows(app)[0] == "ItemRow"
+            # Searched once — putting the query in the box doesn't count
+            # as the user typing it.
+            assert fake.searches == ["unicorn"]
+
+    asyncio.run(scenario())
+
+
 def test_a_stale_search_never_replaces_a_newer_one() -> None:
     async def scenario() -> None:
         app, fake = _app()

@@ -292,8 +292,11 @@ class ShelfBrowser(App[None]):
         self._nav.show_root = True
         # Held rather than queried: messages can still arrive while the
         # app shuts down, after the DOM a query would search has gone.
+        # Empty here; the initial query goes in on mount. An Input given a
+        # value before the app is running reaches for the app to clear its
+        # selection and raises NoActiveAppError (textual 8), which made
+        # `shelf browse <query>` crash on start.
         self._input = Input(
-            value=initial_query,
             placeholder="Search titles, creators and PDF text…",
             id="query",
         )
@@ -316,6 +319,10 @@ class ShelfBrowser(App[None]):
         self.sub_title = self.config.base_url
         self._input.border_title = self._scope.label
         self._load_nav()
+        # Silently: the search below is the one to run, and a Changed
+        # event would schedule a second, debounced one for the same text.
+        with self._input.prevent(Input.Changed):
+            self._input.value = self.initial_query
         self._search_now(self.initial_query)
         if self.initial_query:
             self._list.focus()
