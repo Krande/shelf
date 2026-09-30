@@ -6,7 +6,7 @@ metadata kept in files — into an instance whenever one is ready.
 
 ```sh
 pixi global install shelf-cli \
-  --git https://github.com/Krande/shelf.git --subdirectory cli --tag v0.14.2
+  --git https://github.com/Krande/shelf.git --subdirectory cli --tag v0.15.0
 ```
 
 It lives inside the shelf repo rather than beside it so it's versioned

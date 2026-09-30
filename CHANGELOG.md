@@ -2,6 +2,13 @@
 
 
 
+## v0.15.0 (2026-09-30)
+
+### Feature
+
+* feat(search): search a standard by designation, and opt into any metadata field (#23) ([`20cc98f`](https://github.com/Krande/shelf/commit/20cc98ff70661f4b460ceb6b6659461e4ab0d881))
+
+
 ## v0.14.2 (2026-09-30)
 
 ### Fix
