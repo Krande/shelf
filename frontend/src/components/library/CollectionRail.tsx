@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   ArrowDown,
@@ -16,7 +16,7 @@ import {
   MoreHorizontal,
   Pencil,
   Plus,
-  Text,
+  SlidersHorizontal,
   Trash2,
   X,
 } from "lucide-react";
@@ -29,6 +29,14 @@ import {
   updateCollection,
 } from "@/api/collections";
 import { downloadCollectionPdfsZip } from "@/api/attachments";
+import { canEdit, fetchMySpaces, updateSpaceProfile } from "@/api/spaces";
+import {
+  inheritedProfile,
+  isColumnKey,
+  resolveProfile,
+  type ColumnKey,
+} from "@/lib/libraryColumns";
+import ProfileModal, { type ProfileDraft } from "./ProfileModal";
 
 /** Drag payload: a JSON array of item ids being filed into a folder. */
 export const ITEM_DRAG_TYPE = "application/x-shelf-items";
@@ -54,6 +62,7 @@ export default function CollectionRail({
   selection,
   onSelect,
   onDropItems,
+  itemTypes = [],
 }: {
   slug: string | null;
   selection: Selection;
@@ -62,6 +71,9 @@ export default function CollectionRail({
    *  by the page, which is what holds the items and their current
    *  memberships. */
   onDropItems: (collectionId: string, itemIds: string[]) => void;
+  /** Item types on screen, so the profile editor offers their fields
+   *  first. */
+  itemTypes?: string[];
 }) {
   const qc = useQueryClient();
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -74,14 +86,42 @@ export default function CollectionRail({
 
   // Editing state — only one row can be in a mode at a time.
   const [renamingId, setRenamingId] = useState<string | null>(null);
-  const [descEditTarget, setDescEditTarget] = useState<Collection | null>(null);
+  const [profileTarget, setProfileTarget] = useState<
+    { kind: "collection"; collection: Collection } | { kind: "space" } | null
+  >(null);
   const [moveTarget, setMoveTarget] = useState<Collection | null>(null);
+  const [spaceMenuAt, setSpaceMenuAt] = useState<MenuAnchor | null>(null);
+  const closeSpaceMenu = useCallback(() => setSpaceMenuAt(null), []);
 
   const collections = useQuery({
     queryKey: ["collections", slug],
     queryFn: () => listCollections(slug!),
     enabled: !!slug,
   });
+
+  // Every space this one can read, inherited ones included: a profile
+  // falls back to the space its collection lives in, and whether it may
+  // be edited is the caller's role *there*. Same query key as the
+  // library page's, so this costs no extra request.
+  const spaces = useQuery({
+    queryKey: ["spaces", "with-inherited"],
+    queryFn: () => fetchMySpaces({ includeInherited: true }),
+  });
+  const browsedSpace = useMemo(
+    () => spaces.data?.find((s) => s.slug === slug) ?? null,
+    [spaces.data, slug],
+  );
+  const homeSpace = useCallback(
+    (c: Collection) => spaces.data?.find((s) => s.id === c.space_id) ?? null,
+    [spaces.data],
+  );
+  const canEditProfile = useCallback(
+    // An inherited space is listed with the caller's role through the
+    // subscription (viewer); someone who edits Standards itself holds
+    // it directly and is listed as editor.
+    (c: Collection) => canEdit(homeSpace(c)),
+    [homeSpace],
+  );
 
   // "Download PDFs" on a folder. Server-assembled, the same archive the
   // bulk-select action produces -- the collection id goes over rather
@@ -91,7 +131,10 @@ export default function CollectionRail({
   const download = useMutation({
     mutationFn: (c: Collection) => {
       setDownloadingId(c.id);
-      return downloadCollectionPdfsZip(slug!, c.id);
+      // Zipped by the space the folder lives in: the archive is built
+      // from that space's items, and an inherited folder's aren't this
+      // one's.
+      return downloadCollectionPdfsZip(homeSpace(c)?.slug ?? slug!, c.id);
     },
     onSettled: () => setDownloadingId(null),
     onSuccess: ({ skipped }) => {
@@ -204,6 +247,22 @@ export default function CollectionRail({
       qc.invalidateQueries({ queryKey: ["collections", slug] });
     },
   });
+
+  const saveSpaceProfile = useMutation({
+    mutationFn: (draft: ProfileDraft) =>
+      updateSpaceProfile(slug!, {
+        description: draft.description,
+        columns: draft.columns,
+      }),
+    // Both space listings carry the profile.
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["spaces"] }),
+    onError: (e: Error) => window.alert(`Could not save the profile: ${e.message}`),
+  });
+
+  const ownColumns = (cols: string[] | null | undefined): ColumnKey[] | null => {
+    const valid = (cols ?? []).filter(isColumnKey);
+    return valid.length > 0 ? valid : null;
+  };
 
   function toggleExpanded(id: string) {
     setExpanded((prev) => {
@@ -346,7 +405,29 @@ export default function CollectionRail({
           label="All Items"
           active={isActive({ view: "library", collection: null })}
           onClick={() => onSelect({ view: "library", collection: null })}
+          // The space's own profile lives here: All Items is the space.
+          onContextMenu={(e) => {
+            if (!browsedSpace) return;
+            e.preventDefault();
+            setSpaceMenuAt(anchorAtPointer(e));
+          }}
         />
+        {spaceMenuAt && browsedSpace && (
+          <ActionMenu at={spaceMenuAt} onClose={closeSpaceMenu}>
+            <MenuItem
+              icon={SlidersHorizontal}
+              label={
+                canEdit(browsedSpace)
+                  ? `Edit ${browsedSpace.name} profile…`
+                  : `View ${browsedSpace.name} profile…`
+              }
+              onClick={() => {
+                setSpaceMenuAt(null);
+                setProfileTarget({ kind: "space" });
+              }}
+            />
+          </ActionMenu>
+        )}
         <SpecialEntry
           icon={Inbox}
           label="Unfiled"
@@ -461,7 +542,10 @@ export default function CollectionRail({
               if (!trimmed) return;
               update.mutate({ id, patch: { name: trimmed } });
             }}
-            onEditDescription={(c) => setDescEditTarget(c)}
+            onEditProfile={(c) =>
+              setProfileTarget({ kind: "collection", collection: c })
+            }
+            canEditProfile={canEditProfile}
             onMoveInto={(c) => setMoveTarget(c)}
             onMoveBy={moveBy}
             onDrop={handleDrop}
@@ -507,21 +591,25 @@ export default function CollectionRail({
                     : null
                 }
                 onSelect={(id) => onSelect({ view: "library", collection: id })}
-                // Everything below is a write, and an inherited
-                // collection belongs to another space — the API refuses
-                // all of them, so the row offers none of them.
+                // The structural writes belong to the collection's own
+                // space and the API refuses them from here, so the row
+                // offers none of them. Its profile and its PDFs are still
+                // reachable.
                 readOnly
                 renamingId={null}
                 onStartRename={() => {}}
                 onCancelRename={() => {}}
                 onCommitRename={() => {}}
-                onEditDescription={() => {}}
+                onEditProfile={(c) =>
+                  setProfileTarget({ kind: "collection", collection: c })
+                }
+                canEditProfile={canEditProfile}
                 onMoveInto={() => {}}
                 onMoveBy={() => {}}
                 onDrop={() => {}}
                 onDelete={() => {}}
-                onDownload={() => {}}
-                downloadingId={null}
+                onDownload={(c) => download.mutate(c)}
+                downloadingId={download.isPending ? downloadingId : null}
                 onDropItems={() => {}}
                 onAddChild={() => {}}
               />
@@ -530,16 +618,44 @@ export default function CollectionRail({
         ))}
       </div>
 
-      {descEditTarget && (
-        <DescriptionModal
-          collection={descEditTarget}
-          onClose={() => setDescEditTarget(null)}
-          onSave={(desc) => {
+      {profileTarget?.kind === "collection" && (
+        <ProfileModal
+          title={`Profile · ${profileTarget.collection.name}`}
+          kind="collection"
+          description={profileTarget.collection.description}
+          columns={ownColumns(profileTarget.collection.columns)}
+          inherited={inheritedProfile(
+            profileTarget.collection,
+            collections.data ?? [],
+            spaces.data ?? [],
+            browsedSpace,
+          )}
+          preferTypes={itemTypes}
+          readOnly={!canEditProfile(profileTarget.collection)}
+          onClose={() => setProfileTarget(null)}
+          onSave={(draft) => {
             update.mutate({
-              id: descEditTarget.id,
-              patch: { description: desc },
+              id: profileTarget.collection.id,
+              patch: { description: draft.description, columns: draft.columns },
             });
-            setDescEditTarget(null);
+            setProfileTarget(null);
+          }}
+        />
+      )}
+
+      {profileTarget?.kind === "space" && browsedSpace && (
+        <ProfileModal
+          title={`Profile · ${browsedSpace.name}`}
+          kind="space"
+          description={browsedSpace.description ?? null}
+          columns={ownColumns(browsedSpace.columns)}
+          inherited={resolveProfile(null, [], [], null)}
+          preferTypes={itemTypes}
+          readOnly={!canEdit(browsedSpace)}
+          onClose={() => setProfileTarget(null)}
+          onSave={(draft) => {
+            saveSpaceProfile.mutate(draft);
+            setProfileTarget(null);
           }}
         />
       )}
@@ -569,15 +685,18 @@ function SpecialEntry({
   label,
   active,
   onClick,
+  onContextMenu,
 }: {
   icon: typeof LibraryBig;
   label: string;
   active: boolean;
   onClick: () => void;
+  onContextMenu?: (e: React.MouseEvent) => void;
 }) {
   return (
     <button
       onClick={onClick}
+      onContextMenu={onContextMenu}
       className="mb-0.5 flex w-full items-center gap-2 rounded px-2 py-1 text-left hover:opacity-90"
       style={{
         backgroundColor: active
@@ -628,7 +747,7 @@ function CollectionNode({
   onStartRename,
   onCancelRename,
   onCommitRename,
-  onEditDescription,
+  onEditProfile,
   onMoveInto,
   onMoveBy,
   onDrop,
@@ -637,6 +756,7 @@ function CollectionNode({
   downloadingId,
   onDropItems,
   onAddChild,
+  canEditProfile,
   readOnly = false,
 }: {
   node: TreeNode;
@@ -651,7 +771,7 @@ function CollectionNode({
   onStartRename: (id: string) => void;
   onCancelRename: () => void;
   onCommitRename: (id: string, name: string) => void;
-  onEditDescription: (c: Collection) => void;
+  onEditProfile: (c: Collection) => void;
   onMoveInto: (c: Collection) => void;
   onMoveBy: (c: Collection, delta: number) => void;
   onDrop: (
@@ -667,14 +787,20 @@ function CollectionNode({
   onDropItems: (collectionId: string, itemIds: string[]) => void;
   /** Start drafting a collection nested inside this one. */
   onAddChild: (parentId: string) => void;
-  /** Inherited from another space: browsable, but every write the row
-   *  would otherwise offer is refused by the API, so none are shown. */
+  /** Whether the caller may change this collection's profile — decided
+   *  by their role in the space it lives in, which for an inherited
+   *  collection isn't the one being browsed. */
+  canEditProfile: (c: Collection) => boolean;
+  /** Inherited from another space: browsable, and its profile and PDFs
+   *  are reachable, but the structural writes (rename, move, delete,
+   *  filing) are refused by the API, so none are offered. */
   readOnly?: boolean;
 }) {
   const hasChildren = node.children.length > 0;
   const isOpen = expanded.has(node.id);
   const active = activeId === node.id;
   const renaming = renamingId === node.id;
+  const [menuAt, setMenuAt] = useState<MenuAnchor | null>(null);
   const [dropZone, setDropZone] = useState<
     "before" | "after" | "into" | null
   >(null);
@@ -746,6 +872,11 @@ function CollectionNode({
         onDragLeave={() => setDropZone(null)}
         onDrop={handleDrop}
         onClick={() => !renaming && onSelect(node.id)}
+        onContextMenu={(e) => {
+          if (renaming) return;
+          e.preventDefault();
+          setMenuAt(anchorAtPointer(e));
+        }}
         className="group relative flex cursor-pointer items-center gap-1 rounded px-1 py-1 hover:opacity-90"
         style={{
           paddingLeft: `${depth * 12 + 4}px`,
@@ -797,14 +928,18 @@ function CollectionNode({
             {node.name}
           </span>
         )}
-        {!renaming && !readOnly && (
+        {!renaming && (
           <NodeMenu
             node={node}
+            at={menuAt}
+            setAt={setMenuAt}
+            readOnly={readOnly}
+            canEditProfile={canEditProfile(node)}
             isFirst={siblingIndex === 0}
             isLast={siblingIndex === siblingCount - 1}
             onAddChild={() => onAddChild(node.id)}
             onRename={() => onStartRename(node.id)}
-            onEditDescription={() => onEditDescription(node)}
+            onEditProfile={() => onEditProfile(node)}
             onMoveInto={() => onMoveInto(node)}
             onMoveUp={() => onMoveBy(node, -1)}
             onMoveDown={() => onMoveBy(node, +1)}
@@ -831,7 +966,7 @@ function CollectionNode({
               onStartRename={onStartRename}
               onCancelRename={onCancelRename}
               onCommitRename={onCommitRename}
-              onEditDescription={onEditDescription}
+              onEditProfile={onEditProfile}
               onMoveInto={onMoveInto}
               onMoveBy={onMoveBy}
               onDrop={onDrop}
@@ -840,6 +975,7 @@ function CollectionNode({
               downloadingId={downloadingId}
               onDropItems={onDropItems}
               onAddChild={onAddChild}
+              canEditProfile={canEditProfile}
               readOnly={readOnly}
             />
           ))}
@@ -899,13 +1035,110 @@ function RenameInput({
   );
 }
 
+/** Where a menu opens: under the kebab (right-aligned to it), or at the
+ *  pointer for a right-click. */
+type MenuAnchor = { top: number; left?: number; right?: number };
+
+/** Right-click position, nudged so a menu near the window's edge opens
+ *  inward rather than off-screen. */
+function anchorAtPointer(e: React.MouseEvent): MenuAnchor {
+  return {
+    top: Math.min(e.clientY, window.innerHeight - 340),
+    left: Math.min(e.clientX, window.innerWidth - 200),
+  };
+}
+
+/**
+ * A popup of actions, portal-rendered to document.body so the row's
+ * hover-opacity doesn't cascade into it. The CSS ``opacity`` property
+ * multiplies through descendants — on mobile, sticky hover after a tap
+ * was making the menu near-unreadable.
+ *
+ * Closes on an outside click, Escape, a resize or a scroll: a menu left
+ * floating where its row used to be is worse than one that goes away.
+ */
+function ActionMenu({
+  at,
+  onClose,
+  ignore,
+  children,
+}: {
+  at: MenuAnchor;
+  onClose: () => void;
+  /** The button that toggles the menu: a click on it is its own toggle,
+   *  not an outside click. */
+  ignore?: React.RefObject<HTMLElement | null>;
+  children: React.ReactNode;
+}) {
+  const menuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    function onClickOutside(e: MouseEvent) {
+      const target = e.target as Node;
+      if (ignore?.current?.contains(target)) return;
+      if (menuRef.current?.contains(target)) return;
+      onClose();
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    document.addEventListener("mousedown", onClickOutside);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("resize", onClose);
+    window.addEventListener("scroll", onClose, true);
+    return () => {
+      document.removeEventListener("mousedown", onClickOutside);
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("resize", onClose);
+      window.removeEventListener("scroll", onClose, true);
+    };
+  }, [onClose, ignore]);
+
+  return createPortal(
+    <div
+      ref={menuRef}
+      role="menu"
+      className="fixed z-50 min-w-[180px] rounded border py-1 shadow-lg"
+      style={{
+        top: at.top,
+        left: at.left,
+        right: at.right,
+        backgroundColor: "var(--color-surface)",
+        borderColor: "var(--color-border)",
+        color: "var(--color-text)",
+      }}
+      onClick={(e) => e.stopPropagation()}
+      onContextMenu={(e) => e.preventDefault()}
+    >
+      {children}
+    </div>,
+    document.body,
+  );
+}
+
+function MenuDivider() {
+  return (
+    <div className="my-1 border-t" style={{ borderColor: "var(--color-border)" }} />
+  );
+}
+
+/**
+ * A collection's actions, from its kebab or a right-click on the row.
+ *
+ * An inherited collection gets the menu too, trimmed to what makes sense
+ * for a folder that belongs to another space: its profile (editable by
+ * that space's editors, readable by everyone else) and a download.
+ */
 function NodeMenu({
   node,
+  at,
+  setAt,
+  readOnly,
+  canEditProfile,
   isFirst,
   isLast,
   onAddChild,
   onRename,
-  onEditDescription,
+  onEditProfile,
   onMoveInto,
   onMoveUp,
   onMoveDown,
@@ -914,11 +1147,15 @@ function NodeMenu({
   onDelete,
 }: {
   node: Collection;
+  at: MenuAnchor | null;
+  setAt: (at: MenuAnchor | null) => void;
+  readOnly: boolean;
+  canEditProfile: boolean;
   isFirst: boolean;
   isLast: boolean;
   onAddChild: () => void;
   onRename: () => void;
-  onEditDescription: () => void;
+  onEditProfile: () => void;
   onMoveInto: () => void;
   onMoveUp: () => void;
   onMoveDown: () => void;
@@ -928,50 +1165,33 @@ function NodeMenu({
   downloading: boolean;
   onDelete: () => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState<{ top: number; right: number } | null>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-
-  // Portal-rendered to document.body so the row's hover-opacity
-  // doesn't cascade into the menu. The CSS ``opacity`` property
-  // multiplies through descendants — on mobile, sticky hover after a
-  // tap was making the menu near-unreadable.
-  useEffect(() => {
-    if (!open) return;
-    function place() {
-      const rect = buttonRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      setPos({
-        top: rect.bottom + 4,
-        right: window.innerWidth - rect.right,
-      });
-    }
-    place();
-    function onClickOutside(e: MouseEvent) {
-      const target = e.target as Node;
-      if (buttonRef.current?.contains(target)) return;
-      if (menuRef.current?.contains(target)) return;
-      setOpen(false);
-    }
-    document.addEventListener("mousedown", onClickOutside);
-    window.addEventListener("resize", place);
-    window.addEventListener("scroll", place, true);
-    return () => {
-      document.removeEventListener("mousedown", onClickOutside);
-      window.removeEventListener("resize", place);
-      window.removeEventListener("scroll", place, true);
-    };
-  }, [open]);
+  const close = useCallback(() => setAt(null), [setAt]);
 
   // Item runs the action and closes the menu — saves a click everywhere.
   function run(fn: () => void) {
     return (e: React.MouseEvent) => {
       e.stopPropagation();
-      setOpen(false);
+      setAt(null);
       fn();
     };
   }
+
+  const profile = (
+    <MenuItem
+      icon={SlidersHorizontal}
+      label={canEditProfile ? "Edit profile…" : "View profile…"}
+      onClick={run(onEditProfile)}
+    />
+  );
+  const download = (
+    <MenuItem
+      icon={Download}
+      label={downloading ? "Zipping…" : "Download PDFs"}
+      disabled={downloading}
+      onClick={run(onDownload)}
+    />
+  );
 
   return (
     <>
@@ -979,80 +1199,68 @@ function NodeMenu({
         ref={buttonRef}
         onClick={(e) => {
           e.stopPropagation();
-          setOpen((v) => !v);
+          if (at) {
+            setAt(null);
+            return;
+          }
+          const rect = e.currentTarget.getBoundingClientRect();
+          setAt({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
         }}
         aria-label={`More actions for ${node.name}`}
+        aria-haspopup="menu"
+        aria-expanded={!!at}
         className="rounded p-0.5 hover:opacity-70"
         style={{ color: "var(--color-text-muted)" }}
       >
         <MoreHorizontal className="h-3.5 w-3.5" />
       </button>
-      {open &&
-        pos &&
-        createPortal(
-          <div
-            ref={menuRef}
-            className="fixed z-50 min-w-[180px] rounded border shadow-lg"
-            style={{
-              top: pos.top,
-              right: pos.right,
-              backgroundColor: "var(--color-surface)",
-              borderColor: "var(--color-border)",
-              color: "var(--color-text)",
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <MenuItem
-              icon={FolderPlus}
-              label="Add subcollection"
-              onClick={run(onAddChild)}
-            />
-            <MenuItem icon={Pencil} label="Rename" onClick={run(onRename)} />
-            <MenuItem
-              icon={Text}
-              label="Edit description"
-              onClick={run(onEditDescription)}
-            />
-            <MenuItem
-              icon={ArrowUp}
-              label="Move up"
-              disabled={isFirst}
-              onClick={run(onMoveUp)}
-            />
-            <MenuItem
-              icon={ArrowDown}
-              label="Move down"
-              disabled={isLast}
-              onClick={run(onMoveDown)}
-            />
-            <MenuItem
-              icon={FolderInput}
-              label="Move into…"
-              onClick={run(onMoveInto)}
-            />
-            <div
-              className="my-1 border-t"
-              style={{ borderColor: "var(--color-border)" }}
-            />
-            <MenuItem
-              icon={Download}
-              label={downloading ? "Zipping…" : "Download PDFs"}
-              disabled={downloading}
-              onClick={run(onDownload)}
-            />
-            <div
-              className="my-1 border-t"
-              style={{ borderColor: "var(--color-border)" }}
-            />
-            <MenuItem
-              icon={Trash2}
-              label="Delete"
-              destructive
-              onClick={run(onDelete)}
-            />
-          </div>,
-          document.body,
-        )}
+      {at && (
+        <ActionMenu at={at} onClose={close} ignore={buttonRef}>
+          {readOnly ? (
+            <>
+              {profile}
+              <MenuDivider />
+              {download}
+            </>
+          ) : (
+            <>
+              <MenuItem
+                icon={FolderPlus}
+                label="Add subcollection"
+                onClick={run(onAddChild)}
+              />
+              <MenuItem icon={Pencil} label="Rename" onClick={run(onRename)} />
+              {profile}
+              <MenuItem
+                icon={ArrowUp}
+                label="Move up"
+                disabled={isFirst}
+                onClick={run(onMoveUp)}
+              />
+              <MenuItem
+                icon={ArrowDown}
+                label="Move down"
+                disabled={isLast}
+                onClick={run(onMoveDown)}
+              />
+              <MenuItem
+                icon={FolderInput}
+                label="Move into…"
+                onClick={run(onMoveInto)}
+              />
+              <MenuDivider />
+              {download}
+              <MenuDivider />
+              <MenuItem
+                icon={Trash2}
+                label="Delete"
+                destructive
+                onClick={run(onDelete)}
+              />
+            </>
+          )}
+        </ActionMenu>
+      )}
     </>
   );
 }
@@ -1073,6 +1281,7 @@ function MenuItem({
   return (
     <button
       type="button"
+      role="menuitem"
       disabled={disabled}
       onClick={onClick}
       className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:opacity-80 disabled:opacity-40"
@@ -1083,94 +1292,6 @@ function MenuItem({
       <Icon className="h-3.5 w-3.5" />
       {label}
     </button>
-  );
-}
-
-function DescriptionModal({
-  collection,
-  onClose,
-  onSave,
-}: {
-  collection: Collection;
-  onClose: () => void;
-  onSave: (description: string) => void;
-}) {
-  const [value, setValue] = useState(collection.description ?? "");
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 sm:p-8"
-      onClick={onClose}
-      role="dialog"
-      aria-modal="true"
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-md rounded-lg border shadow-xl"
-        style={{
-          backgroundColor: "var(--color-surface)",
-          borderColor: "var(--color-border)",
-        }}
-      >
-        <div
-          className="flex items-center justify-between border-b px-4 py-3"
-          style={{ borderColor: "var(--color-border)" }}
-        >
-          <h2 className="text-base font-semibold">
-            Description · {collection.name}
-          </h2>
-          <button
-            onClick={onClose}
-            aria-label="Close"
-            className="rounded p-1 hover:opacity-70"
-            style={{ color: "var(--color-text-muted)" }}
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-        <div className="p-4">
-          <textarea
-            autoFocus
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            rows={6}
-            placeholder="What's this collection for?"
-            className="w-full rounded border px-2 py-1.5 text-sm"
-            style={{
-              backgroundColor: "var(--color-surface)",
-              borderColor: "var(--color-border)",
-              color: "var(--color-text)",
-            }}
-          />
-          <p
-            className="mt-2 text-xs"
-            style={{ color: "var(--color-text-muted)" }}
-          >
-            Shown in the page header when this collection is selected.
-          </p>
-        </div>
-        <div
-          className="flex items-center justify-end gap-2 border-t px-4 py-3"
-          style={{ borderColor: "var(--color-border)" }}
-        >
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded px-3 py-1.5 text-sm hover:opacity-70"
-            style={{ color: "var(--color-text-muted)" }}
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={() => onSave(value)}
-            className="rounded px-3 py-1.5 text-sm font-medium text-white"
-            style={{ backgroundColor: "var(--color-accent)" }}
-          >
-            Save
-          </button>
-        </div>
-      </div>
-    </div>
   );
 }
 

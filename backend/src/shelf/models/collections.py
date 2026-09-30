@@ -1,6 +1,7 @@
 import uuid
 
 from sqlalchemy import ForeignKey, Index, Integer, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import UUIDPK, Base, Timestamps
@@ -30,6 +31,9 @@ class Collection(UUIDPK, Timestamps, Base):
     )
     name: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Default library columns here and in every collection below that
+    # doesn't set its own. NULL means "inherit" — see api/profiles.py.
+    columns: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     position: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="0"
     )

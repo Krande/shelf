@@ -8,7 +8,9 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     String,
+    Text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import UUIDPK, Base, Timestamps, utcnow
@@ -31,6 +33,12 @@ class Space(UUIDPK, Timestamps, Base):
     subscribable: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
+    # The space's profile: what it is for, and which library columns it
+    # shows by default. `columns` NULL means "not set" — collections
+    # without their own list fall back to it, and it to the built-in
+    # default. See api/profiles.py.
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    columns: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
 
 
 class SpaceMembership(Base):

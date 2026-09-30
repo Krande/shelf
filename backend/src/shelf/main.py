@@ -25,6 +25,7 @@ from .api import (
     members,
     notes,
     processing,
+    profiles,
     spaces,
     standards,
     tags,
@@ -83,6 +84,7 @@ app.include_router(admin.router)
 app.include_router(items.router)
 app.include_router(item_copy.router)
 app.include_router(spaces.router)
+app.include_router(profiles.router)
 app.include_router(inheritance.router)
 app.include_router(standards.router)
 app.include_router(members.router)
