@@ -75,6 +75,33 @@ async def test_bibtex_single_item(client: AsyncClient) -> None:
     assert r.headers["content-type"].startswith("application/x-bibtex")
 
 
+async def test_bibtex_manual(client: AsyncClient) -> None:
+    slug = await _login(client)
+    r = await client.post(
+        f"/api/spaces/{slug}/items",
+        json={
+            "item_type": "manual",
+            "data": {
+                "title": "Abaqus Keywords Reference Guide",
+                "creators": [{"creatorType": "author", "name": "Dassault Systèmes"}],
+                "date": "2024",
+                "software": "Abaqus",
+                "versionNumber": "2024",
+                "company": "Dassault Systèmes",
+                "manualType": "Keywords Reference",
+            },
+        },
+    )
+    assert r.status_code == 201, r.text
+    r = await client.get(
+        f"/api/items/{r.json()['id']}/export", params={"format": "bibtex"}
+    )
+    assert r.status_code == 200
+    assert r.text.startswith("@manual{")
+    assert "organization = {Dassault Systèmes}" in r.text
+    assert "version = {2024}" in r.text
+
+
 async def test_csl_json_single_item(client: AsyncClient) -> None:
     slug = await _login(client)
     item = await _make_paper(client, slug)

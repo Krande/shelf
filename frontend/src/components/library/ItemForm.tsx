@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { X } from "lucide-react";
 import {
+  FIELD_SUGGESTIONS,
   ITEM_TYPES,
   TEXTAREA_FIELDS,
   fieldsForType,
@@ -199,18 +200,28 @@ export default function ItemForm({
                     }}
                   />
                 ) : (
-                  <input
-                    type="text"
-                    value={value}
-                    onChange={(e) => setField(field, e.target.value)}
-                    disabled={loading}
-                    className="w-full rounded border px-2 py-1.5 text-sm"
-                    style={{
-                      backgroundColor: "var(--color-surface)",
-                      borderColor: "var(--color-border)",
-                      color: "var(--color-text)",
-                    }}
-                  />
+                  <>
+                    <input
+                      type="text"
+                      value={value}
+                      onChange={(e) => setField(field, e.target.value)}
+                      disabled={loading}
+                      list={FIELD_SUGGESTIONS[field] ? `suggest-${field}` : undefined}
+                      className="w-full rounded border px-2 py-1.5 text-sm"
+                      style={{
+                        backgroundColor: "var(--color-surface)",
+                        borderColor: "var(--color-border)",
+                        color: "var(--color-text)",
+                      }}
+                    />
+                    {FIELD_SUGGESTIONS[field] && (
+                      <datalist id={`suggest-${field}`}>
+                        {FIELD_SUGGESTIONS[field].map((s) => (
+                          <option key={s} value={s} />
+                        ))}
+                      </datalist>
+                    )}
+                  </>
                 )}
               </label>
             );
