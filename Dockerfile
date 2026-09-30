@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1.7
 
 # ── Stage 1: build the SPA ───────────────────────────────────────────────────
-# Keep this in lockstep with `nodejs = ">=22,<23"` in pixi.toml's `dev`
+# Keep this in lockstep with `nodejs = ">=24,<25"` in pixi.toml's `dev`
 # feature so local pixi runs and the container build agree on Node major.
-FROM node:22-alpine AS frontend
+FROM node:24-alpine AS frontend
 WORKDIR /app
 COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm install
