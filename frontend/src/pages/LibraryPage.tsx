@@ -60,7 +60,12 @@ import {
   type Collection,
 } from "@/api/collections";
 import { fetchPins } from "@/api/standards";
-import { createTag, listTags, setItemTags, type Tag } from "@/api/tags";
+import {
+  listTags,
+  resolveTagNames,
+  setItemTags,
+  type Tag,
+} from "@/api/tags";
 import {
   downloadItemPdfsZip,
   listAttachments,
@@ -851,39 +856,15 @@ export default function LibraryPage() {
   // separates concerns; the membership endpoint is the source of
   // truth.
   // Resolve a list of tag names to ids, creating any tag the user
-  // typed that doesn't already exist (case-insensitively). The
-  // server's CITEXT unique constraint means a concurrent creator
-  // could win the race; we re-fetch on 409 and pick up the row that
-  // got there first instead of erroring.
+  // typed that doesn't already exist — see resolveTagNames.
   const resolveTagNamesToIds = useCallback(
     async (names: string[]): Promise<string[]> => {
       if (!slug || names.length === 0) return [];
-      const existing = tagsQuery.data ?? (await listTags(slug));
-      const byName = new Map<string, Tag>();
-      for (const t of existing) byName.set(t.name.toLowerCase(), t);
-      const ids: string[] = [];
-      const created: Tag[] = [];
-      for (const raw of names) {
-        const name = raw.trim();
-        if (!name) continue;
-        const hit = byName.get(name.toLowerCase());
-        if (hit) {
-          if (!ids.includes(hit.id)) ids.push(hit.id);
-          continue;
-        }
-        try {
-          const t = await createTag(slug, { name });
-          byName.set(t.name.toLowerCase(), t);
-          created.push(t);
-          ids.push(t.id);
-        } catch {
-          // Lost the race; refresh and try once more from cache.
-          const refreshed = await listTags(slug);
-          for (const t of refreshed) byName.set(t.name.toLowerCase(), t);
-          const hit2 = byName.get(name.toLowerCase());
-          if (hit2 && !ids.includes(hit2.id)) ids.push(hit2.id);
-        }
-      }
+      const { ids, created } = await resolveTagNames(
+        slug,
+        names,
+        tagsQuery.data,
+      );
       if (created.length > 0) {
         // Push the new tag rows into the cache so the next render
         // resolves their names without an extra round-trip.

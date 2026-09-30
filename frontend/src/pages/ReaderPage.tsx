@@ -48,6 +48,7 @@ import { RenderQueue } from "@/lib/renderQueue";
 import { pageRows, rowOfPage } from "@/lib/spreads";
 import { PageCanvas } from "@/components/reader/PageCanvas";
 import { ContinuousList } from "@/components/reader/ContinuousList";
+import { DocumentInfoPanel } from "@/components/reader/DocumentInfoPanel";
 import { HighlightsPanel } from "@/components/reader/HighlightsPanel";
 import { ReaderToolbar } from "@/components/reader/ReaderToolbar";
 import {
@@ -148,6 +149,10 @@ export default function ReaderPage() {
   const [highlightsOpen, setHighlightsOpen] = useState(false);
   // Side drawer with the PDF's embedded outline (table of contents).
   const [outlineOpen, setOutlineOpen] = useState(false);
+  // Right-hand drawer with the document's metadata, the library's
+  // detail panel. Shares the right edge with highlights, so the
+  // toolbar keeps at most one of the two open.
+  const [infoOpen, setInfoOpen] = useState(false);
   const isCoarsePointer = useMemo(
     () =>
       typeof window !== "undefined" &&
@@ -1184,6 +1189,7 @@ export default function ReaderPage() {
           setSelectMode,
           isCoarsePointer,
         }}
+        info={{ infoOpen, setInfoOpen }}
       />
 
       {findOpen && (
@@ -1282,7 +1288,7 @@ export default function ReaderPage() {
         // wider than the viewport, so the browser can scroll to the
         // rest of it. The transform model had to pan it by hand.
         className={`flex-1 overflow-auto p-4${
-          (highlightsOpen || outlineOpen) && isCoarsePointer
+          (highlightsOpen || outlineOpen || infoOpen) && isCoarsePointer
             ? " hidden sm:block"
             : ""
         }`}
@@ -1410,6 +1416,12 @@ export default function ReaderPage() {
             onDelete={(id) => removeAnnotation.mutate(id)}
             onRecolor={(id, color) => recolorAnnotation.mutate({ id, color })}
             onClose={() => setHighlightsOpen(false)}
+          />
+        )}
+        {infoOpen && params.attachmentId && (
+          <DocumentInfoPanel
+            attachmentId={params.attachmentId}
+            onClose={() => setInfoOpen(false)}
           />
         )}
       </div>

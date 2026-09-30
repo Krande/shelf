@@ -276,6 +276,17 @@ async def _resolve_version(
     return attachment.storage_key, "original"
 
 
+@router.get("/api/attachments/{attachment_id}", response_model=AttachmentResponse)
+async def get_attachment(
+    attachment_id: uuid.UUID,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+) -> Attachment:
+    """One attachment's row. The reader is addressed by attachment id
+    alone, and this is how it finds the item the PDF belongs to."""
+    return await _resolve_attachment(db, user, attachment_id)
+
+
 @router.get(
     "/api/attachments/{attachment_id}/download",
     response_model=AttachmentDownloadResponse,

@@ -15,6 +15,7 @@ import {
   Eye,
   EyeOff,
   Highlighter,
+  Info,
   ListTree,
   Search,
   Type,
@@ -80,13 +81,20 @@ export interface ReaderToolbarProps {
     setSelectMode: (v: boolean) => void;
     isCoarsePointer: boolean;
   };
+  /** What the document is: its metadata drawer, at the far right. */
+  info: {
+    infoOpen: boolean;
+    setInfoOpen: (v: boolean) => void;
+  };
 }
 
 export function ReaderToolbar({
   navigation,
   view,
   marks,
+  info,
 }: ReaderToolbarProps) {
+  const { infoOpen, setInfoOpen } = info;
   const {
     onBack,
     page,
@@ -151,7 +159,10 @@ export function ReaderToolbar({
                 // would leave no document. There is room for both on a
                 // desktop, and wanting the outline beside the notes is
                 // an obvious thing to want.
-                if (next && isCoarsePointer) setHighlightsOpen(false);
+                if (next && isCoarsePointer) {
+                  setHighlightsOpen(false);
+                  setInfoOpen(false);
+                }
               }}
               aria-label="Outline"
               title="Show document outline"
@@ -365,6 +376,7 @@ export function ReaderToolbar({
               onClick={() => {
                 const next = !highlightsOpen;
                 setHighlightsOpen(next);
+                if (next) setInfoOpen(false);
                 if (next && isCoarsePointer) setOutlineOpen(false);
               }}
               aria-label="Highlights"
@@ -415,6 +427,28 @@ export function ReaderToolbar({
               ) : (
                 <EyeOff className="h-3.5 w-3.5" />
               )}
+            </button>
+
+            {/* Last, so it sits above the drawer it opens. The highlights
+                drawer opens on the same side, so one replaces the other. */}
+            <button
+              onClick={() => {
+                const next = !infoOpen;
+                setInfoOpen(next);
+                if (next) setHighlightsOpen(false);
+                if (next && isCoarsePointer) setOutlineOpen(false);
+              }}
+              aria-label="Document info"
+              aria-pressed={infoOpen}
+              title="Show this document's details"
+              className="flex items-center gap-1 rounded px-2 py-1 text-xs hover:opacity-80"
+              style={{
+                color: infoOpen
+                  ? "var(--color-accent)"
+                  : "var(--color-text-muted)",
+              }}
+            >
+              <Info className="h-3.5 w-3.5" />
             </button>
       </span>
     </div>
