@@ -2,6 +2,13 @@
 
 
 
+## v0.14.1 (2026-09-30)
+
+### Fix
+
+* fix(release): stage the README rewrites instead of uploading them as release assets (#21) ([`c01a138`](https://github.com/Krande/shelf/commit/c01a13811d929146e30023a0a59a46c24c716d2d))
+
+
 ## v0.14.0 (2026-09-30)
 
 ### Feature
