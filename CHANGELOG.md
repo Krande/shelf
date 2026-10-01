@@ -2,6 +2,13 @@
 
 
 
+## v0.16.0 (2026-10-01)
+
+### Feature
+
+* feat: admin audit log, uploader info, resizable panels, and a floating edit form (#24) ([`2e558c0`](https://github.com/Krande/shelf/commit/2e558c0c1ea9c0c681248f80ca4334c733dab064))
+
+
 ## v0.15.0 (2026-09-30)
 
 ### Feature

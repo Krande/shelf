@@ -29,7 +29,7 @@ installable on its own with [pixi](https://pixi.sh):
 
 ```sh
 pixi global install shelf-cli \
-  --git https://github.com/Krande/shelf.git --subdirectory cli --tag v0.15.0
+  --git https://github.com/Krande/shelf.git --subdirectory cli --tag v0.16.0
 ```
 
 The tag is the shelf release the client belongs to; it is kept at the latest
