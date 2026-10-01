@@ -157,7 +157,8 @@ export default function CollectionRail({
     },
     onError: (e: Error) =>
       window.alert(
-        e.message === "Not Found"
+        // The server's 404 detail, which replaces the status text.
+        e.message === "No matching items"
           ? "Nothing to download — no PDFs in that collection."
           : `Download failed: ${e.message}`,
       ),
