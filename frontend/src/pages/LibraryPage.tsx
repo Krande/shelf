@@ -2414,6 +2414,7 @@ export default function LibraryPage() {
             />
 
             <aside
+              ref={detailWidth.paneRef}
               className="hidden w-[360px] shrink-0 border-l md:block lg:w-[420px]"
               style={{
                 borderColor: "var(--color-border)",

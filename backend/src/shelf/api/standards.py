@@ -47,8 +47,16 @@ from ..models import (
     StandardRevision,
     User,
 )
+from ..services.audit import AuditAction, record
 
 router = APIRouter(tags=["standards"])
+
+
+def _item_title(item: Item | None) -> str:
+    title = item.data.get("title") if item and isinstance(item.data, dict) else None
+    if isinstance(title, str) and title.strip():
+        return title.strip()
+    return "(untitled)"
 
 
 class FamilyResponse(BaseModel):
@@ -266,9 +274,46 @@ async def link_revision(
         db, space, user.id, SPACE_ROLE_EDITOR, label="Item not found"
     )
 
-    await upsert_revision(db, item, payload)
+    before = await revision_snapshot(db, item.id)
+    family = await upsert_revision(db, item, payload)
+    if before is not None and await revision_snapshot(db, item.id) == before:
+        # Idempotent re-filing (an importer re-running) changes nothing
+        # and isn't worth an entry.
+        await db.commit()
+        return await item_revisions(item_id, user, db, space=None)
+    record(
+        db,
+        user,
+        AuditAction.standard_revision_set,
+        space_id=item.space_id,
+        target_type="standard",
+        target_id=family.id,
+        label=family.designation,
+        details={
+            "body": family.body,
+            "revision": payload.label.strip(),
+            "item_id": str(item.id),
+            "item": _item_title(item),
+        },
+    )
     await db.commit()
     return await item_revisions(item_id, user, db, space=None)
+
+
+async def revision_snapshot(
+    db: AsyncSession, item_id: uuid.UUID
+) -> tuple[Any, ...] | None:
+    """What an item is filed as, comparable before and after an upsert —
+    so a no-op re-filing can be told apart from a change."""
+    revision = await db.get(StandardRevision, item_id)
+    if revision is None:
+        return None
+    return (
+        revision.family_id,
+        revision.label,
+        revision.issued_on,
+        revision.superseded,
+    )
 
 
 async def upsert_revision(
@@ -349,6 +394,21 @@ async def unlink_revision(
         )
     ).scalars().all():
         await db.delete(pin)
+    family = await db.get(StandardFamily, revision.family_id)
+    record(
+        db,
+        user,
+        AuditAction.standard_revision_delete,
+        space_id=item.space_id,
+        target_type="standard",
+        target_id=revision.family_id,
+        label=family.designation if family else None,
+        details={
+            "revision": revision.label,
+            "item_id": str(item.id),
+            "item": _item_title(item),
+        },
+    )
     await db.delete(revision)
     await db.commit()
 
@@ -455,6 +515,7 @@ async def set_pin(
         )
 
     pin = await db.get(SpaceStandardPin, (space.id, family.id))
+    previous_item_id = pin.item_id if pin is not None else None
     if pin is None:
         pin = SpaceStandardPin(
             space_id=space.id, family_id=family.id, item_id=item.id
@@ -462,6 +523,24 @@ async def set_pin(
         db.add(pin)
     pin.item_id = item.id
     pin.pinned_by = user.id
+    if previous_item_id != item.id:
+        details: dict[str, Any] = {
+            "revision": revision.label,
+            "item_id": str(item.id),
+        }
+        if previous_item_id is not None:
+            previous = await db.get(StandardRevision, previous_item_id)
+            details["previous_revision"] = previous.label if previous else None
+        record(
+            db,
+            user,
+            AuditAction.standard_pin_set,
+            space_id=space.id,
+            target_type="standard",
+            target_id=family.id,
+            label=family.designation,
+            details=details,
+        )
     await db.commit()
 
     return PinResponse(
@@ -493,6 +572,18 @@ async def clear_pin(
     pin = await db.get(SpaceStandardPin, (space.id, family_id))
     if pin is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not pinned")
+    family = await db.get(StandardFamily, family_id)
+    revision = await db.get(StandardRevision, pin.item_id)
+    record(
+        db,
+        user,
+        AuditAction.standard_pin_remove,
+        space_id=space.id,
+        target_type="standard",
+        target_id=family_id,
+        label=family.designation if family else None,
+        details={"revision": revision.label if revision else None},
+    )
     await db.delete(pin)
     await db.commit()
 

@@ -133,6 +133,7 @@ def _shipped_role_defaults(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     yield
 
 _TABLES_TO_TRUNCATE = (
+    "audit_events",
     "api_tokens",
     "annotations",
     "attachment_derivation",

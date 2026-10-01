@@ -21,6 +21,7 @@ from ..auth.deps import get_current_user
 from ..auth.spaces import SPACE_ROLE_OWNER, require_space_role
 from ..db import get_session
 from ..models import Space, SpaceMembership, User
+from ..services.audit import AuditAction, record
 
 router = APIRouter(tags=["spaces"])
 
@@ -143,6 +144,9 @@ async def add_member(
     db.add(
         SpaceMembership(space_id=space.id, user_id=member.id, role=payload.role)
     )
+    _record_member(
+        db, user, AuditAction.space_member_add, space, member, payload.role
+    )
     await db.commit()
     return MemberResponse(
         user_id=str(member.id),
@@ -167,13 +171,22 @@ async def update_member(
     membership = await db.get(SpaceMembership, (space.id, user_id))
     if membership is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Member not found")
-
-    membership.role = payload.role
-    await db.commit()
-
     member = await db.get(User, user_id)
     if member is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Member not found")
+
+    if membership.role != payload.role:
+        _record_member(
+            db,
+            user,
+            AuditAction.space_member_role,
+            space,
+            member,
+            [membership.role, payload.role],
+        )
+    membership.role = payload.role
+    await db.commit()
+
     return MemberResponse(
         user_id=str(member.id),
         email=member.email,
@@ -197,6 +210,30 @@ async def remove_member(
     membership = await db.get(SpaceMembership, (space.id, user_id))
     if membership is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Member not found")
+    member = await db.get(User, user_id)
     # Content the member created stays; only their access goes away.
     await db.delete(membership)
+    _record_member(
+        db, user, AuditAction.space_member_remove, space, member, membership.role
+    )
     await db.commit()
+
+
+def _record_member(
+    db: AsyncSession,
+    actor: User,
+    action: AuditAction,
+    space: Space,
+    member: User | None,
+    role: str | list[str],
+) -> None:
+    record(
+        db,
+        actor,
+        action,
+        space_id=space.id,
+        target_type="user",
+        target_id=member.id if member is not None else None,
+        label=member.email if member is not None else None,
+        details={"role": role},
+    )

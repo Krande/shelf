@@ -32,6 +32,15 @@ function formatSize(bytes: number | null): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
+/** "Uploaded by Ada on 1 Oct 2026", with whichever halves are known. */
+function uploadedBy(att: Attachment): string | undefined {
+  const who = att.created_by_name ? ` by ${att.created_by_name}` : "";
+  const when = att.uploaded_at
+    ? ` on ${new Date(att.uploaded_at).toLocaleDateString()}`
+    : "";
+  return who || when ? `Uploaded${who}${when}` : undefined;
+}
+
 /**
  * Per-item attachment list with drag-drop + file-picker upload. Each
  * row gets a download (presigned URL minted on click, then opened in
@@ -237,10 +246,12 @@ export default function AttachmentsList({
                   )}
                 </button>
                 <span
-                  className="text-xs"
+                  className="shrink-0 text-xs"
                   style={{ color: "var(--color-text-muted)" }}
+                  title={uploadedBy(a)}
                 >
                   {formatSize(a.size_bytes)}
+                  {a.created_by_name && ` · ${a.created_by_name}`}
                 </span>
                 {pdf && !pending && (
                   <button

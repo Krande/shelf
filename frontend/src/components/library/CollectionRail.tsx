@@ -30,6 +30,7 @@ import {
 } from "@/api/collections";
 import { downloadCollectionPdfsZip } from "@/api/attachments";
 import { canEdit, fetchMySpaces } from "@/api/spaces";
+import { useResizableWidth } from "@/hooks/useResizableWidth";
 import {
   inheritedProfile,
   isColumnKey,
@@ -75,6 +76,14 @@ export default function CollectionRail({
   itemTypes?: string[];
 }) {
   const qc = useQueryClient();
+  // `end`: the rail is to the handle's left, so dragging right widens
+  // it. Deep collection trees are what this is for — long names nested
+  // a few levels in truncate at the default width.
+  const size = useResizableWidth("shelf.collectionRailWidth", {
+    min: 160,
+    maxFraction: 0.4,
+    edge: "end",
+  });
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [adding, setAdding] = useState(false);
   // Parent for the collection being drafted: an id nests it, null puts
@@ -382,208 +391,234 @@ export default function CollectionRail({
 
   return (
     <nav
-      className="flex h-full w-56 shrink-0 flex-col overflow-y-auto border-r text-sm"
+      className="relative flex h-full w-56 shrink-0 flex-col border-r text-sm"
       style={{
         borderColor: "var(--color-border)",
         backgroundColor: "var(--color-bg)",
+        // Unset until dragged, so the CSS default stands.
+        ...(size.width !== null ? { width: size.width } : {}),
       }}
     >
-      <div className="px-2 pt-3">
-        <SpecialEntry
-          icon={LibraryBig}
-          label="All Items"
-          active={isActive({ view: "library", collection: null })}
-          onClick={() => onSelect({ view: "library", collection: null })}
-        />
-        <SpecialEntry
-          icon={Inbox}
-          label="Unfiled"
-          active={isActive({ view: "library", collection: "unfiled" })}
-          onClick={() =>
-            onSelect({ view: "library", collection: "unfiled" })
-          }
-        />
-        <SpecialEntry
-          icon={Trash2}
-          label="Trash"
-          active={isActive({ view: "trash", collection: null })}
-          onClick={() => onSelect({ view: "trash", collection: null })}
-        />
-      </div>
-
-      <div
-        className="my-2 border-t"
-        style={{ borderColor: "var(--color-border)" }}
-      />
-
-      <div className="flex-1 px-2">
-        <div
-          className="flex items-center justify-between px-1 py-1 text-xs uppercase tracking-wider"
-          style={{ color: "var(--color-text-muted)" }}
-        >
-          <span>Collections</span>
-          <button
-            onClick={() => startAdding(selectedCollectionId)}
-            aria-label={
-              selectedCollectionId
-                ? `New collection in ${byId.get(selectedCollectionId)?.name ?? "the open collection"}`
-                : "New collection"
+      {/* The scrolling happens in here rather than on the nav, so the
+          drag handle below spans the rail's full height instead of
+          scrolling away with the tree. */}
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+        <div className="px-2 pt-3">
+          <SpecialEntry
+            icon={LibraryBig}
+            label="All Items"
+            active={isActive({ view: "library", collection: null })}
+            onClick={() => onSelect({ view: "library", collection: null })}
+          />
+          <SpecialEntry
+            icon={Inbox}
+            label="Unfiled"
+            active={isActive({ view: "library", collection: "unfiled" })}
+            onClick={() =>
+              onSelect({ view: "library", collection: "unfiled" })
             }
-            title={
-              selectedCollectionId
-                ? `New collection in ${byId.get(selectedCollectionId)?.name ?? ""}`
-                : "New collection"
-            }
-            className="rounded p-0.5 hover:opacity-70"
-            disabled={!slug}
-          >
-            <Plus className="h-3.5 w-3.5" />
-          </button>
+          />
+          <SpecialEntry
+            icon={Trash2}
+            label="Trash"
+            active={isActive({ view: "trash", collection: null })}
+            onClick={() => onSelect({ view: "trash", collection: null })}
+          />
         </div>
-        {adding && (
-          <form
-            className="mb-1 px-1"
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (draftName.trim()) create.mutate(draftName.trim());
-            }}
-          >
-            <input
-              type="text"
-              autoFocus
-              value={draftName}
-              onChange={(e) => setDraftName(e.target.value)}
-              onBlur={() => {
-                if (!draftName.trim()) {
-                  setAdding(false);
-                  setAddParent(null);
-                  setDraftName("");
-                }
-              }}
-              placeholder={
-                addParent
-                  ? `New collection in ${byId.get(addParent)?.name ?? "…"}`
-                  : "Collection name"
-              }
-              className="w-full rounded border px-2 py-1 text-sm"
-              style={{
-                backgroundColor: "var(--color-surface)",
-                borderColor: "var(--color-border)",
-                color: "var(--color-text)",
-              }}
-            />
-          </form>
-        )}
-        {collections.data && collections.data.length === 0 && !adding && (
-          <p
-            className="px-1 py-2 text-xs italic"
+
+        <div
+          className="my-2 border-t"
+          style={{ borderColor: "var(--color-border)" }}
+        />
+
+        <div className="flex-1 px-2">
+          <div
+            className="flex items-center justify-between px-1 py-1 text-xs uppercase tracking-wider"
             style={{ color: "var(--color-text-muted)" }}
           >
-            No collections yet.
-          </p>
-        )}
-        {tree.map((node, idx) => (
-          <CollectionNode
-            key={node.id}
-            node={node}
-            depth={0}
-            siblingIndex={idx}
-            siblingCount={tree.length}
-            expanded={expanded}
-            onToggle={toggleExpanded}
-            activeId={
-              selection.view === "library" &&
-              selection.collection !== "unfiled"
-                ? selection.collection
-                : null
-            }
-            onSelect={(id) =>
-              onSelect({ view: "library", collection: id })
-            }
-            renamingId={renamingId}
-            onStartRename={(id) => setRenamingId(id)}
-            onCancelRename={() => setRenamingId(null)}
-            onCommitRename={(id, name) => {
-              setRenamingId(null);
-              const trimmed = name.trim();
-              if (!trimmed) return;
-              update.mutate({ id, patch: { name: trimmed } });
-            }}
-            onEditProfile={(c) =>
-              setProfileTarget({ kind: "collection", collection: c })
-            }
-            canEditProfile={canEditProfile}
-            onMoveInto={(c) => setMoveTarget(c)}
-            onMoveBy={moveBy}
-            onDrop={handleDrop}
-            onDelete={(id, name) => {
-              if (
-                window.confirm(
-                  `Delete collection "${name}"? Items inside will be unfiled but not deleted.`,
-                )
-              ) {
-                remove.mutate(id);
+            <span>Collections</span>
+            <button
+              onClick={() => startAdding(selectedCollectionId)}
+              aria-label={
+                selectedCollectionId
+                  ? `New collection in ${byId.get(selectedCollectionId)?.name ?? "the open collection"}`
+                  : "New collection"
               }
-            }}
-            onDownload={(c) => download.mutate(c)}
-            downloadingId={download.isPending ? downloadingId : null}
-            onDropItems={onDropItems}
-            onAddChild={startAdding}
-          />
-        ))}
-
-        {inheritedGroups.map((group) => (
-          <div key={group.name} className="mt-3">
-            <div
-              className="flex items-center gap-1 px-1 py-1 text-xs uppercase tracking-wider"
-              style={{ color: "var(--color-text-muted)" }}
-              title={`Inherited from ${group.name} — read-only here`}
+              title={
+                selectedCollectionId
+                  ? `New collection in ${byId.get(selectedCollectionId)?.name ?? ""}`
+                  : "New collection"
+              }
+              className="rounded p-0.5 hover:opacity-70"
+              disabled={!slug}
             >
-              <Link2 className="h-3 w-3 shrink-0" />
-              <span className="truncate">{group.name}</span>
-            </div>
-            {group.tree.map((node, idx) => (
-              <CollectionNode
-                key={node.id}
-                node={node}
-                depth={0}
-                siblingIndex={idx}
-                siblingCount={group.tree.length}
-                expanded={expanded}
-                onToggle={toggleExpanded}
-                activeId={
-                  selection.view === "library" &&
-                  selection.collection !== "unfiled"
-                    ? selection.collection
-                    : null
-                }
-                onSelect={(id) => onSelect({ view: "library", collection: id })}
-                // The structural writes belong to the collection's own
-                // space and the API refuses them from here, so the row
-                // offers none of them. Its profile and its PDFs are still
-                // reachable.
-                readOnly
-                renamingId={null}
-                onStartRename={() => {}}
-                onCancelRename={() => {}}
-                onCommitRename={() => {}}
-                onEditProfile={(c) =>
-                  setProfileTarget({ kind: "collection", collection: c })
-                }
-                canEditProfile={canEditProfile}
-                onMoveInto={() => {}}
-                onMoveBy={() => {}}
-                onDrop={() => {}}
-                onDelete={() => {}}
-                onDownload={(c) => download.mutate(c)}
-                downloadingId={download.isPending ? downloadingId : null}
-                onDropItems={() => {}}
-                onAddChild={() => {}}
-              />
-            ))}
+              <Plus className="h-3.5 w-3.5" />
+            </button>
           </div>
-        ))}
+          {adding && (
+            <form
+              className="mb-1 px-1"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (draftName.trim()) create.mutate(draftName.trim());
+              }}
+            >
+              <input
+                type="text"
+                autoFocus
+                value={draftName}
+                onChange={(e) => setDraftName(e.target.value)}
+                onBlur={() => {
+                  if (!draftName.trim()) {
+                    setAdding(false);
+                    setAddParent(null);
+                    setDraftName("");
+                  }
+                }}
+                placeholder={
+                  addParent
+                    ? `New collection in ${byId.get(addParent)?.name ?? "…"}`
+                    : "Collection name"
+                }
+                className="w-full rounded border px-2 py-1 text-sm"
+                style={{
+                  backgroundColor: "var(--color-surface)",
+                  borderColor: "var(--color-border)",
+                  color: "var(--color-text)",
+                }}
+              />
+            </form>
+          )}
+          {collections.data && collections.data.length === 0 && !adding && (
+            <p
+              className="px-1 py-2 text-xs italic"
+              style={{ color: "var(--color-text-muted)" }}
+            >
+              No collections yet.
+            </p>
+          )}
+          {tree.map((node, idx) => (
+            <CollectionNode
+              key={node.id}
+              node={node}
+              depth={0}
+              siblingIndex={idx}
+              siblingCount={tree.length}
+              expanded={expanded}
+              onToggle={toggleExpanded}
+              activeId={
+                selection.view === "library" &&
+                selection.collection !== "unfiled"
+                  ? selection.collection
+                  : null
+              }
+              onSelect={(id) =>
+                onSelect({ view: "library", collection: id })
+              }
+              renamingId={renamingId}
+              onStartRename={(id) => setRenamingId(id)}
+              onCancelRename={() => setRenamingId(null)}
+              onCommitRename={(id, name) => {
+                setRenamingId(null);
+                const trimmed = name.trim();
+                if (!trimmed) return;
+                update.mutate({ id, patch: { name: trimmed } });
+              }}
+              onEditProfile={(c) =>
+                setProfileTarget({ kind: "collection", collection: c })
+              }
+              canEditProfile={canEditProfile}
+              onMoveInto={(c) => setMoveTarget(c)}
+              onMoveBy={moveBy}
+              onDrop={handleDrop}
+              onDelete={(id, name) => {
+                if (
+                  window.confirm(
+                    `Delete collection "${name}"? Items inside will be unfiled but not deleted.`,
+                  )
+                ) {
+                  remove.mutate(id);
+                }
+              }}
+              onDownload={(c) => download.mutate(c)}
+              downloadingId={download.isPending ? downloadingId : null}
+              onDropItems={onDropItems}
+              onAddChild={startAdding}
+            />
+          ))}
+
+          {inheritedGroups.map((group) => (
+            <div key={group.name} className="mt-3">
+              <div
+                className="flex items-center gap-1 px-1 py-1 text-xs uppercase tracking-wider"
+                style={{ color: "var(--color-text-muted)" }}
+                title={`Inherited from ${group.name} — read-only here`}
+              >
+                <Link2 className="h-3 w-3 shrink-0" />
+                <span className="truncate">{group.name}</span>
+              </div>
+              {group.tree.map((node, idx) => (
+                <CollectionNode
+                  key={node.id}
+                  node={node}
+                  depth={0}
+                  siblingIndex={idx}
+                  siblingCount={group.tree.length}
+                  expanded={expanded}
+                  onToggle={toggleExpanded}
+                  activeId={
+                    selection.view === "library" &&
+                    selection.collection !== "unfiled"
+                      ? selection.collection
+                      : null
+                  }
+                  onSelect={(id) => onSelect({ view: "library", collection: id })}
+                  // The structural writes belong to the collection's own
+                  // space and the API refuses them from here, so the row
+                  // offers none of them. Its profile and its PDFs are still
+                  // reachable.
+                  readOnly
+                  renamingId={null}
+                  onStartRename={() => {}}
+                  onCancelRename={() => {}}
+                  onCommitRename={() => {}}
+                  onEditProfile={(c) =>
+                    setProfileTarget({ kind: "collection", collection: c })
+                  }
+                  canEditProfile={canEditProfile}
+                  onMoveInto={() => {}}
+                  onMoveBy={() => {}}
+                  onDrop={() => {}}
+                  onDelete={() => {}}
+                  onDownload={(c) => download.mutate(c)}
+                  downloadingId={download.isPending ? downloadingId : null}
+                  onDropItems={() => {}}
+                  onAddChild={() => {}}
+                />
+              ))}
+            </div>
+          ))}
+        </div>
       </div>
+
+      {/* The drag handle, on the rail's own edge. Focusable, so the
+          arrow keys nudge it and Home puts it back. */}
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize the collections panel"
+        tabIndex={0}
+        onPointerDown={size.onPointerDown}
+        onKeyDown={size.onKeyDown}
+        onDoubleClick={size.reset}
+        title="Drag to resize · double-click to reset"
+        className="absolute inset-y-0 right-0 hidden w-1.5 cursor-col-resize md:block"
+        style={{
+          backgroundColor: size.dragging
+            ? "var(--color-accent)"
+            : "transparent",
+        }}
+      />
 
       {profileTarget?.kind === "collection" && (
         <ProfileModal

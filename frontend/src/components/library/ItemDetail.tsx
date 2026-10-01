@@ -359,6 +359,14 @@ export default function ItemDetail({
               style={{ color: "var(--color-text-muted)" }}
             >
               {formatDate(item.created_at)}
+              {item.created_by_name && (
+                <>
+                  {" by "}
+                  <span style={{ color: "var(--color-text)" }}>
+                    {item.created_by_name}
+                  </span>
+                </>
+              )}
             </dd>
           </div>
           <div className="contents">

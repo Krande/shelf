@@ -19,6 +19,12 @@ export interface ResizableWidth {
   /** Double-click the handle to go back to the default. */
   reset: () => void;
   dragging: boolean;
+  /** Bind to the pane when the handle isn't inside it. A drag starts
+   *  from the pane's measured width, and without this the handle's
+   *  parent is measured instead — for a handle that sits beside the
+   *  pane in a flex row, that's the whole row, and the first move
+   *  jumps the pane to its maximum. */
+  paneRef: React.RefObject<HTMLElement | null>;
 }
 
 export function useResizableWidth(
@@ -47,6 +53,17 @@ export function useResizableWidth(
   // Read inside listeners without re-subscribing them on every pixel.
   const latest = useRef<number | null>(width);
   latest.current = width;
+  const paneRef = useRef<HTMLElement | null>(null);
+
+  /** The width to start from: the dragged one, else what's on screen. */
+  const current = useCallback(
+    (handle: HTMLElement) =>
+      latest.current ??
+      (paneRef.current ?? handle.parentElement)?.getBoundingClientRect()
+        .width ??
+      min,
+    [min],
+  );
 
   const clamp = useCallback(
     (value: number) =>
@@ -79,10 +96,7 @@ export function useResizableWidth(
       // +1 when the pane is to the handle's left, so dragging right
       // widens it; -1 when it is to the right.
       const sense = edge === "end" ? 1 : -1;
-      const startWidth =
-        latest.current ??
-        handle.parentElement?.getBoundingClientRect().width ??
-        min;
+      const startWidth = current(handle);
 
       setDragging(true);
       handle.setPointerCapture(e.pointerId);
@@ -102,29 +116,25 @@ export function useResizableWidth(
       handle.addEventListener("pointerup", up);
       handle.addEventListener("pointercancel", up);
     },
-    [clamp, commit, min, edge],
+    [clamp, commit, current, edge],
   );
 
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
-      const current =
-        latest.current ??
-        (e.currentTarget as HTMLElement).parentElement?.getBoundingClientRect()
-          .width ??
-        min;
+      const start = current(e.currentTarget as HTMLElement);
       const sense = edge === "end" ? 1 : -1;
       if (e.key === "ArrowLeft") {
         e.preventDefault();
-        commit(clamp(current - sense * step));
+        commit(clamp(start - sense * step));
       } else if (e.key === "ArrowRight") {
         e.preventDefault();
-        commit(clamp(current + sense * step));
+        commit(clamp(start + sense * step));
       } else if (e.key === "Home") {
         e.preventDefault();
         commit(null);
       }
     },
-    [clamp, commit, min, step, edge],
+    [clamp, commit, current, step, edge],
   );
 
   // A width saved on a wide monitor can exceed the cap on a laptop.
@@ -144,6 +154,7 @@ export function useResizableWidth(
     onKeyDown,
     reset: () => commit(null),
     dragging,
+    paneRef,
   };
 }
 

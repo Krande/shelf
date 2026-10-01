@@ -44,6 +44,7 @@ import {
   useZoomGestures,
 } from "@/hooks/useZoomGestures";
 import { CanvasBudget } from "@/lib/canvasBudget";
+import { isTypingTarget } from "@/lib/isTypingTarget";
 import { RenderQueue } from "@/lib/renderQueue";
 import { pageRows, rowOfPage } from "@/lib/spreads";
 import { PageCanvas } from "@/components/reader/PageCanvas";
@@ -673,7 +674,11 @@ export default function ReaderPage() {
         setFindInput("");
         return;
       }
-      if (e.target instanceof HTMLInputElement) return;
+      // Any field that takes typing, not just <input>: the edit form's
+      // textareas and rich-text note sit over the reader, and Space
+      // turning the page — or Backspace leaving the reader — mid-word
+      // is not what a keypress in a text box means.
+      if (isTypingTarget(e.target)) return;
       if (e.key === "ArrowLeft" || e.key === "PageUp") {
         e.preventDefault();
         goPrev();

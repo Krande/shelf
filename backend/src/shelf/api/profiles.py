@@ -34,6 +34,7 @@ from ..auth.deps import get_current_user
 from ..auth.spaces import SPACE_ROLE_EDITOR, require_space_role
 from ..db import get_session
 from ..models import Space, User
+from ..services.audit import AuditAction, record
 
 router = APIRouter(tags=["profiles"])
 
@@ -103,10 +104,28 @@ async def update_space_profile(
     assert space is not None  # require_space_role raises when it isn't
 
     provided = payload.model_fields_set
+    changed: list[str] = []
     if "description" in provided:
-        space.description = (payload.description or "").strip() or None
+        description = (payload.description or "").strip() or None
+        if description != space.description:
+            changed.append("description")
+        space.description = description
     if "columns" in provided:
-        space.columns = clean_columns(payload.columns)
+        columns = clean_columns(payload.columns)
+        if columns != space.columns:
+            changed.append("columns")
+        space.columns = columns
 
+    if changed:
+        record(
+            db,
+            user,
+            AuditAction.space_update,
+            space_id=space.id,
+            target_type="space",
+            target_id=space.id,
+            label=space.name,
+            details={"fields": changed},
+        )
     await db.commit()
     return SpaceProfile(description=space.description, columns=space.columns)

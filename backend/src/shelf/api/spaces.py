@@ -38,6 +38,7 @@ from ..auth.roles import require_admin
 from ..auth.spaces import SPACE_ROLE_OWNER, effective_role
 from ..db import get_session
 from ..models import Space, User
+from ..services.audit import AuditAction, record
 
 router = APIRouter(tags=["spaces"])
 
@@ -158,6 +159,18 @@ async def create_space(
 
     space = Space(slug=slug, name=name, owner_id=admin.id)
     db.add(space)
+    # Flush first: the audit row needs the new space's id.
+    await db.flush()
+    record(
+        db,
+        admin,
+        AuditAction.space_create,
+        space_id=space.id,
+        target_type="space",
+        target_id=space.id,
+        label=space.name,
+        details={"slug": space.slug},
+    )
     await db.commit()
     await db.refresh(space)
 
@@ -221,10 +234,13 @@ async def update_space(
                 "belongs to",
             )
 
+    changes: dict[str, list[str]] = {}
     if payload.name is not None:
         name = payload.name.strip()
         if not name:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Name required")
+        if name != space.name:
+            changes["name"] = [space.name, name]
         space.name = name
 
     if payload.slug is not None:
@@ -237,8 +253,20 @@ async def update_space(
         new_slug = _validate_slug(payload.slug)
         if new_slug != space.slug:
             await _require_free_slug(db, new_slug, excluding=space)
+            changes["slug"] = [space.slug, new_slug]
             space.slug = new_slug
 
+    if changes:
+        record(
+            db,
+            user,
+            AuditAction.space_update,
+            space_id=space.id,
+            target_type="space",
+            target_id=space.id,
+            label=space.name,
+            details=changes,
+        )
     await db.commit()
     await db.refresh(space)
 

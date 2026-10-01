@@ -30,8 +30,32 @@ from ..auth.spaces import SPACE_ROLE_EDITOR, readable_space_ids, require_space_r
 from ..db import get_session
 from ..models import Attachment, AttachmentProcessing, Item, Space, User
 from ..services import queue, storage
+from ..services.audit import AuditAction, record
 
 router = APIRouter(tags=["processing"])
+
+
+async def _audit(
+    db: AsyncSession,
+    user: User,
+    action: AuditAction,
+    att: Attachment,
+    details: dict[str, Any] | None = None,
+) -> None:
+    """Log a processing action against the attachment. Rides the
+    handler's own commit; the item is already in the identity map from
+    `_resolve_pdf`."""
+    item = await db.get(Item, att.item_id)
+    record(
+        db,
+        user,
+        action,
+        space_id=item.space_id if item else None,
+        target_type="attachment",
+        target_id=att.id,
+        label=att.filename,
+        details=details,
+    )
 
 PDF_CONTENT_TYPE = "application/pdf"
 
@@ -411,6 +435,7 @@ async def trigger_ocr(
     actually fix the text layer (handwriting, exotic scripts)."""
     att = await _resolve_pdf(db, user, attachment_id)
     await _set_status_queued(db, att.id, "ocr")
+    await _audit(db, user, AuditAction.processing_ocr, att, {"engine": "cpu"})
     await db.commit()
     enqueued = await queue.publish_ocr(att.id)
     return TriggerResult(attachment_id=att.id, job="ocr", enqueued=enqueued)
@@ -495,6 +520,7 @@ async def restore_original(
             },
         )
     )
+    await _audit(db, user, AuditAction.processing_restore, att)
     await db.commit()
 
     # Re-run extraction so text_content / per-page rows reflect the
@@ -560,6 +586,13 @@ async def cancel_processing(
             set_={field: "cancelled", "updated_at": now},
         )
     )
+    await _audit(
+        db,
+        user,
+        AuditAction.processing_cancel,
+        att,
+        {"job": payload.job, "previous_status": prev},
+    )
     await db.commit()
     return CancelResult(
         attachment_id=att.id,
@@ -592,6 +625,7 @@ async def trigger_ocr_gpu(
     """
     att = await _resolve_pdf(db, user, attachment_id)
     await _set_status_queued(db, att.id, "ocr")
+    await _audit(db, user, AuditAction.processing_ocr, att, {"engine": "gpu"})
     await db.commit()
     enqueued = await queue.publish_ocr_gpu(att.id)
     return TriggerResult(
@@ -615,6 +649,7 @@ async def trigger_outline(
     when it comes online."""
     att = await _resolve_pdf(db, user, attachment_id)
     await _set_status_queued(db, att.id, "outline")
+    await _audit(db, user, AuditAction.processing_outline, att)
     await db.commit()
     enqueued = await queue.publish_outline(att.id)
     return TriggerResult(

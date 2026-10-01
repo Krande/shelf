@@ -39,6 +39,7 @@ from ..auth.spaces import (
 )
 from ..db import get_session
 from ..models import Space, SpaceInheritance, User
+from ..services.audit import AuditAction, record
 
 router = APIRouter(tags=["spaces"])
 
@@ -158,6 +159,7 @@ async def subscribe(
             child_space_id=child.id, parent_space_id=parent.id, added_by=user.id
         )
     )
+    _record_subscription(db, user, AuditAction.space_subscribe, child, parent)
     await db.commit()
     return _to_response(parent)
 
@@ -188,6 +190,7 @@ async def unsubscribe(
     # chose is worth more than tidiness. The pin listing filters to what
     # is actually visible.
     await db.delete(link)
+    _record_subscription(db, user, AuditAction.space_unsubscribe, child, parent)
     await db.commit()
 
 
@@ -233,6 +236,9 @@ async def remove_subscriber(
     if link is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Subscription not found")
     await db.delete(link)
+    _record_subscription(
+        db, user, AuditAction.space_subscriber_remove, child, parent
+    )
     await db.commit()
 
 
@@ -282,10 +288,42 @@ async def update_space_settings(
             "A personal space cannot be inherited. Create a shared space for "
             "anything meant to be read by other spaces.",
         )
+    if space.subscribable != payload.subscribable:
+        record(
+            db,
+            user,
+            AuditAction.space_update,
+            space_id=space.id,
+            target_type="space",
+            target_id=space.id,
+            label=space.name,
+            details={"subscribable": [space.subscribable, payload.subscribable]},
+        )
     space.subscribable = payload.subscribable
     await db.commit()
     await db.refresh(space)
     return _to_response(space)
+
+
+def _record_subscription(
+    db: AsyncSession, user: User, action: AuditAction, child: Space, parent: Space
+) -> None:
+    """Log a subscription change against the subscribing space.
+
+    Whoever acted — the child's owner subscribing or leaving, or the
+    parent's owner dropping a subscriber — the space whose library
+    changed is the child, so that is where the entry is filed.
+    """
+    record(
+        db,
+        user,
+        action,
+        space_id=child.id,
+        target_type="space",
+        target_id=child.id,
+        label=child.name,
+        details={"source_space": parent.name, "source_space_id": str(parent.id)},
+    )
 
 
 def _to_response(space: Space) -> SubscriptionResponse:
