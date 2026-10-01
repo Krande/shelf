@@ -18,6 +18,7 @@ import {
   Plus,
   SlidersHorizontal,
   Trash2,
+  Upload,
   X,
 } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -28,7 +29,15 @@ import {
   listCollections,
   updateCollection,
 } from "@/api/collections";
-import { downloadCollectionPdfsZip } from "@/api/attachments";
+import {
+  downloadCollectionPdfsZip,
+  downloadSpacePdfsZip,
+} from "@/api/attachments";
+import {
+  type ArchiveImportProgress,
+  describeImport,
+  importArchive,
+} from "@/api/archive";
 import { canEdit, fetchMySpaces } from "@/api/spaces";
 import { useResizableWidth } from "@/hooks/useResizableWidth";
 import {
@@ -153,6 +162,45 @@ export default function CollectionRail({
     },
     onError: (e: Error) => window.alert(`Download failed: ${e.message}`),
   });
+
+  // "Download space": every document of the space being browsed, its
+  // collections as folders. Inherited documents belong to the space
+  // they live in and are downloaded from there.
+  const downloadSpace = useMutation({
+    mutationFn: () => downloadSpacePdfsZip(slug!),
+    onSuccess: ({ files }) => {
+      if (files === 0) {
+        window.alert("Nothing to download — no PDFs in this space.");
+      }
+    },
+    onError: (e: Error) => window.alert(`Download failed: ${e.message}`),
+  });
+
+  // "Import archive": a ZIP from any of the downloads above, from this
+  // instance or another. The target is chosen first (a collection's menu,
+  // or the header's for the top level), then the file picker opens.
+  const archiveInput = useRef<HTMLInputElement>(null);
+  const importTarget = useRef<string | null>(null);
+  const [importProgress, setImportProgress] =
+    useState<ArchiveImportProgress | null>(null);
+  const pickArchive = useCallback((collectionId: string | null) => {
+    importTarget.current = collectionId;
+    archiveInput.current?.click();
+  }, []);
+  const runImport = useMutation({
+    mutationFn: (file: File) =>
+      importArchive(slug!, file, importTarget.current, setImportProgress),
+    onSettled: () => {
+      setImportProgress(null);
+      qc.invalidateQueries({ queryKey: ["collections", slug] });
+      qc.invalidateQueries({ queryKey: ["items", slug] });
+      qc.invalidateQueries({ queryKey: ["tags", slug] });
+    },
+    onSuccess: (r) => window.alert(`Import finished.\n\n${describeImport(r)}`),
+    onError: (e: Error) => window.alert(`Import failed: ${e.message}`),
+  });
+  const [headerMenuAt, setHeaderMenuAt] = useState<MenuAnchor | null>(null);
+  const headerMenuButton = useRef<HTMLButtonElement>(null);
 
   // Own collections and inherited ones are built into separate trees and
   // rendered as separate groups. Merging them would put a borrowed
@@ -428,24 +476,102 @@ export default function CollectionRail({
             style={{ color: "var(--color-text-muted)" }}
           >
             <span>Collections</span>
-            <button
-              onClick={() => startAdding(selectedCollectionId)}
-              aria-label={
-                selectedCollectionId
-                  ? `New collection in ${byId.get(selectedCollectionId)?.name ?? "the open collection"}`
-                  : "New collection"
-              }
-              title={
-                selectedCollectionId
-                  ? `New collection in ${byId.get(selectedCollectionId)?.name ?? ""}`
-                  : "New collection"
-              }
-              className="rounded p-0.5 hover:opacity-70"
-              disabled={!slug}
-            >
-              <Plus className="h-3.5 w-3.5" />
-            </button>
+            <span className="flex items-center gap-0.5">
+              <button
+                ref={headerMenuButton}
+                onClick={(e) => {
+                  if (headerMenuAt) {
+                    setHeaderMenuAt(null);
+                    return;
+                  }
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setHeaderMenuAt({
+                    top: rect.bottom + 4,
+                    right: window.innerWidth - rect.right,
+                  });
+                }}
+                aria-label="Space actions"
+                aria-haspopup="menu"
+                aria-expanded={!!headerMenuAt}
+                title="Download or import the whole space"
+                className="rounded p-0.5 hover:opacity-70"
+                disabled={!slug}
+              >
+                <MoreHorizontal className="h-3.5 w-3.5" />
+              </button>
+              {headerMenuAt && (
+                <ActionMenu
+                  at={headerMenuAt}
+                  onClose={() => setHeaderMenuAt(null)}
+                  ignore={headerMenuButton}
+                >
+                  <MenuItem
+                    icon={Download}
+                    label={downloadSpace.isPending ? "Zipping…" : "Download space"}
+                    disabled={downloadSpace.isPending}
+                    onClick={() => {
+                      setHeaderMenuAt(null);
+                      downloadSpace.mutate();
+                    }}
+                  />
+                  {canEdit(browsedSpace) && (
+                    <MenuItem
+                      icon={Upload}
+                      label="Import archive…"
+                      disabled={runImport.isPending}
+                      onClick={() => {
+                        setHeaderMenuAt(null);
+                        pickArchive(null);
+                      }}
+                    />
+                  )}
+                </ActionMenu>
+              )}
+              <button
+                onClick={() => startAdding(selectedCollectionId)}
+                aria-label={
+                  selectedCollectionId
+                    ? `New collection in ${byId.get(selectedCollectionId)?.name ?? "the open collection"}`
+                    : "New collection"
+                }
+                title={
+                  selectedCollectionId
+                    ? `New collection in ${byId.get(selectedCollectionId)?.name ?? ""}`
+                    : "New collection"
+                }
+                className="rounded p-0.5 hover:opacity-70"
+                disabled={!slug}
+              >
+                <Plus className="h-3.5 w-3.5" />
+              </button>
+            </span>
           </div>
+          <input
+            ref={archiveInput}
+            type="file"
+            accept=".zip,application/zip"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              // Cleared first so picking the same archive again -- the
+              // way to finish an interrupted import -- still fires.
+              e.target.value = "";
+              if (file) runImport.mutate(file);
+            }}
+          />
+          {importProgress && (
+            <p
+              className="px-1 py-1 text-xs"
+              style={{ color: "var(--color-text-muted)" }}
+              role="status"
+            >
+              {importProgress.phase === "uploading"
+                ? `Importing archive: ${importProgress.done} of ${importProgress.total} PDFs…`
+                : importProgress.phase === "planning"
+                  ? "Importing archive: creating documents…"
+                  : "Importing archive: reading…"}
+            </p>
+          )}
           {adding && (
             <form
               className="mb-1 px-1"
@@ -533,6 +659,7 @@ export default function CollectionRail({
               }}
               onDownload={(c) => download.mutate(c)}
               downloadingId={download.isPending ? downloadingId : null}
+              onImport={(c) => pickArchive(c.id)}
               onDropItems={onDropItems}
               onAddChild={startAdding}
             />
@@ -583,6 +710,7 @@ export default function CollectionRail({
                   onDelete={() => {}}
                   onDownload={(c) => download.mutate(c)}
                   downloadingId={download.isPending ? downloadingId : null}
+                  onImport={() => {}}
                   onDropItems={() => {}}
                   onAddChild={() => {}}
                 />
@@ -728,6 +856,7 @@ function CollectionNode({
   onDelete,
   onDownload,
   downloadingId,
+  onImport,
   onDropItems,
   onAddChild,
   canEditProfile,
@@ -757,6 +886,8 @@ function CollectionNode({
   onDownload: (c: Collection) => void;
   /** Collection whose zip is currently being built, if any. */
   downloadingId: string | null;
+  /** Import a Shelf archive into this collection. */
+  onImport: (c: Collection) => void;
   /** Documents dragged from the table onto this folder. */
   onDropItems: (collectionId: string, itemIds: string[]) => void;
   /** Start drafting a collection nested inside this one. */
@@ -919,6 +1050,7 @@ function CollectionNode({
             onMoveDown={() => onMoveBy(node, +1)}
             onDownload={() => onDownload(node)}
             downloading={downloadingId === node.id}
+            onImport={() => onImport(node)}
             onDelete={() => onDelete(node.id, node.name)}
           />
         )}
@@ -947,6 +1079,7 @@ function CollectionNode({
               onDelete={onDelete}
               onDownload={onDownload}
               downloadingId={downloadingId}
+              onImport={onImport}
               onDropItems={onDropItems}
               onAddChild={onAddChild}
               canEditProfile={canEditProfile}
@@ -1118,6 +1251,7 @@ function NodeMenu({
   onMoveDown,
   onDownload,
   downloading,
+  onImport,
   onDelete,
 }: {
   node: Collection;
@@ -1137,6 +1271,7 @@ function NodeMenu({
   /** A zip is being built for this folder; the entry says so and stops
    *  a second click starting another. */
   downloading: boolean;
+  onImport: () => void;
   onDelete: () => void;
 }) {
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -1224,6 +1359,11 @@ function NodeMenu({
               />
               <MenuDivider />
               {download}
+              <MenuItem
+                icon={Upload}
+                label="Import archive here…"
+                onClick={run(onImport)}
+              />
               <MenuDivider />
               <MenuItem
                 icon={Trash2}

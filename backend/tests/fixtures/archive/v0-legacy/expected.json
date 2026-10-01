@@ -1,0 +1,5 @@
+{
+  "items": 3,
+  "uploads": ["Root document.pdf", "Sub/b.pdf", "Sub/Deeper/c.pdf"],
+  "tree": ["Sub", "Sub/Deeper"]
+}

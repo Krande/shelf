@@ -1,0 +1,356 @@
+{
+  "$defs": {
+    "ArchiveCollection": {
+      "description": "One collection of the exported tree.\n\n``id`` and ``parent_id`` are the source's ids and only mean anything\ninside this archive: they tie items to collections and collections\nto each other. ``parent_id`` is null for a top-level collection of\nthe archive -- the exported collection, or each of a space's\ntop-level ones -- and otherwise names another collection in the list.",
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parent Id"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "folder": {
+          "default": "",
+          "title": "Folder",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "title": "ArchiveCollection",
+      "type": "object"
+    },
+    "ArchiveFile": {
+      "description": "One PDF in the ZIP.",
+      "properties": {
+        "path": {
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "filename": {
+          "minLength": 1,
+          "title": "Filename",
+          "type": "string"
+        },
+        "content_type": {
+          "default": "application/pdf",
+          "title": "Content Type",
+          "type": "string"
+        },
+        "size": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Size"
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sha256"
+        },
+        "version": {
+          "default": "original",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "filename"
+      ],
+      "title": "ArchiveFile",
+      "type": "object"
+    },
+    "ArchiveItem": {
+      "description": "One document: its metadata, and the files that belong to it.",
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "origin_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Origin Id"
+        },
+        "item_type": {
+          "minLength": 1,
+          "title": "Item Type",
+          "type": "string"
+        },
+        "data": {
+          "additionalProperties": true,
+          "title": "Data",
+          "type": "object"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Tags",
+          "type": "array"
+        },
+        "collection_ids": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "title": "Collection Ids",
+          "type": "array"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/ArchiveFile"
+          },
+          "title": "Files",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "item_type"
+      ],
+      "title": "ArchiveItem",
+      "type": "object"
+    },
+    "ArchiveMissing": {
+      "description": "A PDF that belonged in the archive but couldn't be read from\nstorage when it was made.",
+      "properties": {
+        "item_id": {
+          "format": "uuid",
+          "title": "Item Id",
+          "type": "string"
+        },
+        "filename": {
+          "title": "Filename",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_id",
+        "filename"
+      ],
+      "title": "ArchiveMissing",
+      "type": "object"
+    },
+    "ArchiveSource": {
+      "description": "Where the archive was made. Informational; an import never\ndepends on it.",
+      "properties": {
+        "space": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArchiveSpace"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "ArchiveSource",
+      "type": "object"
+    },
+    "ArchiveSpace": {
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "slug": {
+          "title": "Slug",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "slug",
+        "name"
+      ],
+      "title": "ArchiveSpace",
+      "type": "object"
+    },
+    "ArchiveTag": {
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "color": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Color"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "ArchiveTag",
+      "type": "object"
+    }
+  },
+  "$id": "https://github.com/Krande/shelf/blob/main/docs/schemas/shelf-archive-1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "format": {
+      "const": "shelf.archive",
+      "title": "Format",
+      "type": "string"
+    },
+    "version": {
+      "pattern": "^(\\d+)\\.(\\d+)$",
+      "title": "Version",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "generator": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Generator"
+    },
+    "source": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ArchiveSource"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "scope": {
+      "default": "items",
+      "title": "Scope",
+      "type": "string"
+    },
+    "root_collection_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Root Collection Id"
+    },
+    "collections": {
+      "items": {
+        "$ref": "#/$defs/ArchiveCollection"
+      },
+      "title": "Collections",
+      "type": "array"
+    },
+    "tags": {
+      "items": {
+        "$ref": "#/$defs/ArchiveTag"
+      },
+      "title": "Tags",
+      "type": "array"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/$defs/ArchiveItem"
+      },
+      "title": "Items",
+      "type": "array"
+    },
+    "missing": {
+      "items": {
+        "$ref": "#/$defs/ArchiveMissing"
+      },
+      "title": "Missing",
+      "type": "array"
+    }
+  },
+  "required": [
+    "format",
+    "version",
+    "created_at"
+  ],
+  "title": "Shelf archive index (shelf.archive 1.x)",
+  "type": "object"
+}

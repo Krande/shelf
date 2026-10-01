@@ -18,7 +18,7 @@ import logging
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, NamedTuple
 from urllib.parse import quote
 
 import httpx
@@ -297,19 +297,27 @@ async def resolve_version(
             )
         return row.storage_key, str(row.id)
 
-    return (await current_versions(db, [attachment]))[attachment.id]
+    current = (await current_versions(db, [attachment]))[attachment.id]
+    return current.storage_key, current.label
 
 
 # Which derivation kinds outrank the original, best first.
 _CURRENT_KINDS = ("outline", "ocr")
 
 
+class CurrentVersion(NamedTuple):
+    storage_key: str
+    # As resolve_version labels it: "original" or the derivation's id.
+    label: str
+    # "original", or the derivation's kind.
+    kind: str
+
+
 async def current_versions(
     db: AsyncSession, attachments: list[Attachment]
-) -> dict[uuid.UUID, tuple[str, str]]:
+) -> dict[uuid.UUID, CurrentVersion]:
     """``resolve_version(..., None)`` for many attachments in one query:
-    latest outline > latest ocr > original, as ``(storage_key,
-    version_label)`` per attachment id.
+    latest outline > latest ocr > original, per attachment id.
 
     A bulk download of a few hundred PDFs would otherwise spend up to two
     round trips per file deciding which blob to read.
@@ -333,9 +341,11 @@ async def current_versions(
         if cur is None or rank(d.kind) < rank(cur.kind):
             best[d.attachment_id] = d
     return {
-        a.id: (best[a.id].storage_key, str(best[a.id].id))
+        a.id: CurrentVersion(
+            best[a.id].storage_key, str(best[a.id].id), best[a.id].kind
+        )
         if a.id in best
-        else (a.storage_key, "original")
+        else CurrentVersion(a.storage_key, "original", "original")
         for a in attachments
     }
 

@@ -175,6 +175,16 @@ export async function downloadCollectionPdfsZip(
 }
 
 /**
+ * Every document of a space: its collections as folders, unfiled
+ * documents at the root.
+ */
+export async function downloadSpacePdfsZip(
+  slug: string,
+): Promise<{ files: number }> {
+  return downloadPdfsZip(slug, "whole_space=true");
+}
+
+/**
  * The server streams the archive (`/api/spaces/{slug}/attachments-zip`)
  * as it reads each PDF from storage, so it is handed to the browser as
  * an ordinary download: it goes straight to disk with the browser's own
