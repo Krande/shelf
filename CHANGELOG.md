@@ -2,6 +2,13 @@
 
 
 
+## v0.16.1 (2026-10-01)
+
+### Fix
+
+* fix(export): include subcollections when downloading a collection&#39;s PDFs (#25) ([`affc246`](https://github.com/Krande/shelf/commit/affc2465f419b2c2634a181aadb69d00cc5812ad))
+
+
 ## v0.16.0 (2026-10-01)
 
 ### Feature
