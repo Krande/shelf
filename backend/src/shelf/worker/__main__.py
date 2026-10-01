@@ -6,7 +6,7 @@ by the ``SHELF_WORKER_CONSUMERS`` env var (comma-separated) so the
 same image can run as the CPU pod (extract + ocr) or the GPU pod
 (outline) without a custom command line.
 
-Default = ``extract,ocr`` so existing CPU pods keep their behaviour.
+Default = ``extract,ocr,outline,convert`` — everything the CPU pod runs.
 
 Each consumer loop fetches its own subject and dispatches to the
 matching ``*_attachment`` coroutine. The actual handler logic lives
@@ -110,6 +110,17 @@ SPECS: dict[str, ConsumerSpec] = {
         handler_path="shelf.worker.outline:outline_attachment",
         terminal_path="shelf.worker.outline:mark_failed_terminal",
     ),
+    "convert": ConsumerSpec(
+        name="convert",
+        durable="convert",
+        subject=queue_svc.SUBJECT_CONVERT,
+        # LibreOffice (behind Gotenberg) renders one document at a time
+        # per instance anyway; pulling more would only park them in this
+        # pod's prefetch buffer.
+        fetch_batch=1,
+        handler_path="shelf.worker.convert:convert_attachment",
+        terminal_path="shelf.worker.convert:mark_failed_terminal",
+    ),
 }
 
 
@@ -130,7 +141,12 @@ def _selected_consumers() -> list[ConsumerSpec]:
     # when it was Marker), but the new font-heuristic engine has no
     # GPU need and runs cheaply alongside extract / ocr. The GPU pod
     # overrides this with SHELF_WORKER_CONSUMERS=ocr-gpu.
-    raw = os.environ.get("SHELF_WORKER_CONSUMERS", "extract,ocr,outline")
+    #
+    # `convert` renders non-PDF uploads; it needs SHELF_GOTENBERG_URL to
+    # reach a Gotenberg for office files (images it handles itself).
+    raw = os.environ.get(
+        "SHELF_WORKER_CONSUMERS", "extract,ocr,outline,convert"
+    )
     names = [n.strip() for n in raw.split(",") if n.strip()]
     out: list[ConsumerSpec] = []
     for n in names:

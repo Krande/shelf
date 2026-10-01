@@ -59,7 +59,7 @@ from ..models import (
     Tag,
     User,
 )
-from ..services import storage
+from ..services import conversion, storage
 from ..services.audit import AuditAction, item_label, record_read
 from ..services.export_renderers import (
     attachment_zip_path,
@@ -402,13 +402,16 @@ async def export_space(
     )
 
 
-def _is_pdf(att: Attachment) -> bool:
-    """A PDF attachment by declared type or filename extension. Uploads
-    always carry ``application/pdf``; the filename check covers rows
-    imported with a generic ``application/octet-stream`` content type."""
+def _is_document(att: Attachment) -> bool:
+    """An attachment the PDF archive carries: a PDF by declared type or
+    filename extension (the name covers rows imported with a generic
+    ``application/octet-stream``), or an upload shelf renders to one.
+    The latter go in as uploaded -- the ``.docx``, not its rendering --
+    since the importing instance converts it again itself."""
     return (
-        att.content_type == "application/pdf"
+        att.content_type == conversion.PDF_CONTENT_TYPE
         or att.filename.lower().endswith(".pdf")
+        or conversion.is_convertible(att)
     )
 
 
@@ -671,7 +674,7 @@ async def _plan_pdf_zip(
                 .order_by(Attachment.created_at)
             )
         ).scalars():
-            if _is_pdf(att):
+            if _is_document(att):
                 atts_by_item.setdefault(att.item_id, []).append(att)
         for item_id, name, color in (
             await db.execute(
@@ -857,7 +860,11 @@ async def _stream_pdf_zip(plan: _ZipPlan) -> AsyncIterator[bytes]:
     async with storage.object_client() as client:
         for f in plan.files:
             name = _safe_zip_name(f.filename, f"{f.attachment_id.hex[:8]}.pdf")
-            if not name.lower().endswith(".pdf"):
+            # A converted upload keeps its own extension: the entry is the
+            # original file, not its rendering.
+            if conversion.is_pdf(f.content_type) and not name.lower().endswith(
+                ".pdf"
+            ):
                 name += ".pdf"
             arcname = _dedupe_name(
                 f"{f.folder}/{name}" if f.folder else name, used

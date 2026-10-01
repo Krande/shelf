@@ -96,6 +96,9 @@ import {
   type ArchiveOptions,
   downloadItemPdfsZip,
   listAttachments,
+  opensInReader,
+  UPLOAD_ACCEPT,
+  UPLOAD_EXTENSION,
   uploadAttachment,
 } from "@/api/attachments";
 import { itemTypeLabel, type ItemType } from "@/api/itemFields";
@@ -1235,7 +1238,7 @@ export default function LibraryPage() {
       setSelectedId(item.id);
       try {
         const atts = await listAttachments(item.id);
-        const pdf = atts.find((a) => a.content_type === "application/pdf");
+        const pdf = atts.find(opensInReader);
         if (pdf) nav(`/reader/${encodeURIComponent(pdf.id)}`);
       } catch {
         // Nothing to add — they're on the detail panel either way.
@@ -1310,8 +1313,9 @@ export default function LibraryPage() {
       ?.scrollIntoView({ block: "nearest" });
   }, [selectedId]);
 
-  // One-tap PDF upload: mint a bare "document" item titled from the
-  // filename, then attach the file. No metadata form in between — the
+  // One-tap upload: mint a bare "document" item titled from the
+  // filename, then attach the file. PDFs, or anything the worker renders
+  // to one (Word, PowerPoint, spreadsheets, images). No metadata form in between — the
   // profile can be filled in afterwards from the detail panel. Accepts a
   // whole selection; each file becomes its own document.
   const pdfInput = useRef<HTMLInputElement>(null);
@@ -1323,10 +1327,10 @@ export default function LibraryPage() {
     total: number;
   } | null>(null);
 
-  /** Create one document item from one PDF, rolling the item back if the
+  /** Create one document item from one file, rolling the item back if the
    *  upload half fails. */
   async function uploadOnePdf(file: File) {
-    const title = file.name.replace(/\.pdf$/i, "") || file.name;
+    const title = file.name.replace(UPLOAD_EXTENSION, "") || file.name;
     const item = await createItem(slug!, {
       item_type: "document",
       data: { title },
@@ -1916,7 +1920,11 @@ export default function LibraryPage() {
                       borderColor: "var(--color-border)",
                       color: "var(--color-text)",
                     }}
-                    title="Upload one or more PDFs, one new document each"
+                    title={
+                      "Upload one or more files, one new document each — " +
+                      "PDFs, or Word, PowerPoint, spreadsheets and images, " +
+                      "which are converted to PDF"
+                    }
                   >
                     {uploadPdf.isPending ? (
                       <Loader2 className="h-4 w-4 animate-spin" />
@@ -1934,14 +1942,14 @@ export default function LibraryPage() {
                               pdfProgress.total,
                             )}/${pdfProgress.total}…`
                           : "Uploading…"
-                        : "Upload PDFs"}
+                        : "Upload"}
                     </span>
                   </button>
                   <input
                     ref={pdfInput}
                     type="file"
                     multiple
-                    accept="application/pdf,.pdf"
+                    accept={UPLOAD_ACCEPT}
                     onChange={onPickPdf}
                     className="hidden"
                   />

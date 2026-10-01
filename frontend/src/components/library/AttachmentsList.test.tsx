@@ -36,4 +36,47 @@ describe("AttachmentsList", () => {
     expect(screen.getByRole("button", { name: "Download" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Delete attachment" })).toBeNull();
   });
+
+  it("opens a converted upload in the reader", async () => {
+    const docx = {
+      ...PDF,
+      filename: "report.docx",
+      content_type:
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      pdf_status: "converted",
+    };
+    mockFetch({ "/api/items/item-1/attachments": { body: [docx] } });
+    renderWithProviders(<AttachmentsList itemId="item-1" />);
+    await screen.findByText("report.docx");
+
+    expect(screen.getByRole("button", { name: "Open in reader" })).toBeInTheDocument();
+  });
+
+  it("says when an upload is still converting, or failed to", async () => {
+    const base = { ...PDF, content_type: "application/msword" };
+    mockFetch({
+      "/api/items/item-1/attachments": {
+        body: [
+          { ...base, id: "a", filename: "a.doc", pdf_status: "converting" },
+          {
+            ...base,
+            id: "b",
+            filename: "b.doc",
+            pdf_status: "failed",
+            convert_error: "gotenberg 400: password-protected",
+          },
+        ],
+      },
+    });
+    renderWithProviders(<AttachmentsList itemId="item-1" />);
+    await screen.findByText("a.doc");
+
+    expect(screen.getByText("(converting to PDF…)")).toBeInTheDocument();
+    expect(screen.getByText("(PDF conversion failed)")).toHaveAttribute(
+      "title",
+      "gotenberg 400: password-protected",
+    );
+    // Neither has a PDF yet, so neither opens in the reader.
+    expect(screen.queryByRole("button", { name: "Open in reader" })).toBeNull();
+  });
 });

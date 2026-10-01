@@ -14,15 +14,9 @@ import {
   deleteAttachment,
   getStreamUrl,
   listAttachments,
+  opensInReader,
   uploadAttachment,
 } from "@/api/attachments";
-
-function isPdf(att: Attachment): boolean {
-  return (
-    att.content_type === "application/pdf" ||
-    att.filename.toLowerCase().endsWith(".pdf")
-  );
-}
 
 function formatSize(bytes: number | null): string {
   if (bytes === null) return "";
@@ -73,6 +67,10 @@ export default function AttachmentsList({
   const attachments = useQuery({
     queryKey: ["attachments", itemId],
     queryFn: () => listAttachments(itemId),
+    // Poll while the worker is rendering an upload to PDF, so the reader
+    // button appears when it's done without a reload.
+    refetchInterval: (q) =>
+      q.state.data?.some((a) => a.pdf_status === "converting") ? 3_000 : false,
   });
 
   const upload = useMutation({
@@ -206,7 +204,7 @@ export default function AttachmentsList({
       {attachments.data && attachments.data.length > 0 && (
         <ul className="flex flex-col gap-1">
           {attachments.data.map((a) => {
-            const pdf = isPdf(a);
+            const pdf = opensInReader(a);
             const pending = a.uploaded_at === null;
             const primaryAction = () => {
               if (pending) return;
@@ -242,6 +240,22 @@ export default function AttachmentsList({
                       style={{ color: "var(--color-text-muted)" }}
                     >
                       (pending)
+                    </span>
+                  )}
+                  {!pending && a.pdf_status === "converting" && (
+                    <span
+                      className="ml-1 text-xs italic"
+                      style={{ color: "var(--color-text-muted)" }}
+                    >
+                      (converting to PDF…)
+                    </span>
+                  )}
+                  {!pending && a.pdf_status === "failed" && (
+                    <span
+                      className="ml-1 text-xs italic text-red-500"
+                      title={a.convert_error ?? undefined}
+                    >
+                      (PDF conversion failed)
                     </span>
                   )}
                 </button>

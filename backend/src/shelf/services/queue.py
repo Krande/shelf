@@ -43,6 +43,7 @@ SUBJECT_EXTRACT = "shelf.jobs.attachment.extract"
 SUBJECT_OCR = "shelf.jobs.attachment.ocr"
 SUBJECT_OCR_GPU = "shelf.jobs.attachment.ocr.gpu"
 SUBJECT_OUTLINE = "shelf.jobs.attachment.outline"
+SUBJECT_CONVERT = "shelf.jobs.attachment.convert"
 
 _nc: NatsClient | None = None
 _js: JetStreamContext | None = None
@@ -115,6 +116,14 @@ async def publish_outline(attachment_id: uuid.UUID) -> bool:
     holds the message and the next time the consumer subscribes
     it'll drain the backlog."""
     return await _publish(SUBJECT_OUTLINE, attachment_id)
+
+
+async def publish_convert(attachment_id: uuid.UUID) -> bool:
+    """Enqueue a render-to-PDF job for a non-PDF upload (Word,
+    PowerPoint, an image, …). Caller has set
+    ``convert_status='queued'``; the worker chains into extraction once
+    the PDF exists."""
+    return await _publish(SUBJECT_CONVERT, attachment_id)
 
 
 async def _publish(subject: str, attachment_id: uuid.UUID) -> bool:

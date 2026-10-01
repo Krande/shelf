@@ -39,7 +39,7 @@ import obstore
 
 from .. import config
 from ..services import queue, storage
-from ._db_client import get_db
+from ._db_client import get_db, pdf_base_key
 
 log = logging.getLogger("shelf.worker.olmocr")
 
@@ -86,9 +86,11 @@ async def olmocr_attachment(attachment_id: str | uuid.UUID) -> None:
     if att.uploaded_at is None:
         log.warning("attachment %s not uploaded; skipping ocr-gpu", aid)
         return
-    if att.content_type != "application/pdf":
+    # The PDF to OCR: the upload, or a converted upload's rendering.
+    parent_key = await pdf_base_key(db, att)
+    if parent_key is None:
         log.warning(
-            "attachment %s is %s; skipping ocr-gpu",
+            "attachment %s (%s) has no PDF; skipping ocr-gpu",
             aid,
             att.content_type,
         )
@@ -103,11 +105,10 @@ async def olmocr_attachment(attachment_id: str | uuid.UUID) -> None:
         aid,
         {"ocr_status": "running", "ocr_engine": _engine_label()},
     )
-    # OCR always runs against the attachment's original PDF, never
-    # against a previous OCR pass — re-running OCR is meant to
-    # produce a fresh comparison candidate, not a chain of OCRs on
-    # OCRs. The previous OCR derivation row stays intact for the UI.
-    parent_key = att.storage_key
+    # OCR always runs against ``parent_key`` (the original PDF, or a
+    # converted upload's rendering), never a previous OCR pass —
+    # re-running is for producing a fresh comparison candidate, not
+    # chaining OCRs.
 
     body = await _fetch_body(parent_key)
     new_body = await _run_olmocr_async(aid, body)

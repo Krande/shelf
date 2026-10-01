@@ -41,7 +41,7 @@ services:
     command:
       - gotenberg
       - --chromium-disable-routes=true
-      - --api-timeout=120s
+      - --api-timeout=300s
 
   # Job queue for the background workers (text extraction, OCR, outline).
   # Without it the API still accepts uploads and records

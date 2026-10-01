@@ -83,6 +83,10 @@ class WorkerProcessingDTO(BaseModel):
     outline_engine: str | None
     outline_completed_at: datetime | None
     outline_json: Any | None
+    convert_status: str
+    convert_engine: str | None
+    convert_completed_at: datetime | None
+    convert_error: str | None
     progress_done: int | None
     progress_total: int | None
     original_preserved_at: datetime | None
@@ -102,6 +106,10 @@ _WRITABLE_FIELDS = frozenset(
         "outline_engine",
         "outline_completed_at",
         "outline_json",
+        "convert_status",
+        "convert_engine",
+        "convert_completed_at",
+        "convert_error",
         "progress_done",
         "progress_total",
         "original_preserved_at",
@@ -123,6 +131,10 @@ class WorkerProcessingUpsert(BaseModel):
     outline_engine: str | None = None
     outline_completed_at: datetime | None = None
     outline_json: Any | None = None
+    convert_status: str | None = None
+    convert_engine: str | None = None
+    convert_completed_at: datetime | None = None
+    convert_error: str | None = None
     progress_done: int | None = None
     progress_total: int | None = None
     original_preserved_at: datetime | None = None
