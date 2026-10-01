@@ -7,14 +7,20 @@ to whatever filtered view they had in the UI.
 """
 
 import io
+import json
 import logging
 import re
 import uuid
 import zipfile
+from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -39,7 +45,8 @@ from ..services.export_renderers import (
     render_csl_json,
     render_zotero_rdf,
 )
-from .attachments import resolve_version
+from ..services.zip_stream import ZipStream
+from .attachments import current_versions
 
 log = logging.getLogger(__name__)
 
@@ -482,33 +489,41 @@ async def _collection_item_folders(
     return placed
 
 
-@router.get("/api/spaces/{slug}/attachments-zip")
-async def download_attachments_zip(
-    slug: str,
-    user: Annotated[User, Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(get_session)],
-    item: Annotated[
-        list[uuid.UUID] | None,
-        Query(description="Item ids to bundle; repeat the param per id."),
-    ] = None,
-    collection: Annotated[
-        uuid.UUID | None,
-        Query(
-            description=(
-                "Bundle every item filed under this collection or any of "
-                "its subcollections (one ZIP folder per subcollection), "
-                "instead of naming ids. Mutually exclusive with `item`."
-            )
-        ),
-    ] = None,
-) -> Response:
-    """Bundle every PDF attachment of the selected items into one ZIP --
-    flat for an item selection, one folder per subcollection for a
-    collection. Used by the library's bulk-select "Download PDFs" action and by
-    "Download PDFs" on a collection. Non-PDF attachments are skipped; a
-    missing blob is logged and left out rather than failing the whole
-    download. 404 if none of the selected items yields a PDF."""
-    space = await _resolve_space(db, user, slug)
+@dataclass
+class _ZipFile:
+    """One PDF the archive will hold, resolved before streaming starts.
+
+    Plain values rather than ORM rows, so nothing in the stream can
+    reach back into the session.
+    """
+
+    item_id: uuid.UUID
+    title: str
+    attachment_id: uuid.UUID
+    filename: str
+    storage_key: str
+    folder: str
+
+
+@dataclass
+class _ZipPlan:
+    items: list[Item]
+    files: list[_ZipFile]
+
+
+async def _plan_pdf_zip(
+    db: AsyncSession,
+    space: Space,
+    item: list[uuid.UUID] | None,
+    collection: uuid.UUID | None,
+) -> _ZipPlan:
+    """Everything the archive needs from the database, in a handful of
+    bulk queries, so streaming touches storage only.
+
+    That split matters beyond speed: the response outlives the request
+    handler, and a download that held a database session open for as
+    long as a slow client takes to pull a few GB would starve the pool.
+    """
     if collection is not None and item:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
@@ -542,74 +557,204 @@ async def download_attachments_zip(
     )
     items_by_id = {i.id: i for i in rows.scalars().all()}
     ordered = [items_by_id[i] for i in ids if i in items_by_id]
+    if collection is not None:
+        # Folder by folder, root first, rather than interleaved by
+        # recency; sorted() is stable, so each folder keeps that order.
+        ordered.sort(key=lambda it: item_folders[it.id])
     if not ordered:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "No matching items")
+        return _ZipPlan(items=[], files=[])
 
     att_rows = await db.execute(
-        select(Attachment).where(
-            Attachment.item_id.in_([i.id for i in ordered])
-        )
+        select(Attachment)
+        .where(Attachment.item_id.in_([i.id for i in ordered]))
+        .order_by(Attachment.created_at)
     )
     atts_by_item: dict[uuid.UUID, list[Attachment]] = {}
     for att in att_rows.scalars().all():
         if _is_pdf(att):
             atts_by_item.setdefault(att.item_id, []).append(att)
 
-    buf = io.BytesIO()
+    # The same "current best" blob the single-file download serves
+    # (latest outline > latest OCR > original). Reading ``storage_key``
+    # directly would miss every attachment whose original was superseded
+    # by a derivation -- its original object may no longer exist.
+    pdfs = [a for it in ordered for a in atts_by_item.get(it.id, [])]
+    keys = await current_versions(db, pdfs)
+    return _ZipPlan(
+        items=ordered,
+        files=[
+            _ZipFile(
+                item_id=it.id,
+                title=item_label(it),
+                attachment_id=att.id,
+                filename=att.filename,
+                storage_key=keys[att.id][0],
+                folder=item_folders[it.id],
+            )
+            for it in ordered
+            for att in atts_by_item.get(it.id, [])
+        ],
+    )
+
+
+async def _stream_pdf_zip(
+    files: list[_ZipFile], *, with_collections: bool
+) -> AsyncIterator[bytes]:
+    """The archive, one chunk at a time.
+
+    Memory stays at roughly one storage chunk however big the archive
+    gets: each PDF is copied from storage into the response as it
+    arrives, and the ASGI server's flow control holds the copy back to
+    the pace the client downloads at.
+
+    A PDF that can't be opened is left out and listed in
+    _MISSING_FILES.txt. One that fails partway through (after its
+    resumes are used up) can't be taken back out of bytes already sent,
+    so the stream is aborted and the browser reports the download as
+    failed rather than saving a corrupt archive.
+    """
+    zs = ZipStream()
     used: set[str] = set()
-    written = 0
+    index: list[dict[str, str]] = []
     missing: list[str] = []
-    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
-        for it in ordered:
-            for att in atts_by_item.get(it.id, []):
-                name = _safe_zip_name(att.filename, f"{att.id.hex[:8]}.pdf")
-                if not name.lower().endswith(".pdf"):
-                    name += ".pdf"
-                folder = item_folders[it.id]
-                arcname = _dedupe_name(
-                    f"{folder}/{name}" if folder else name, used
-                )
-                # Fetch the same "current best" blob the single-file
-                # download serves (latest outline > latest OCR >
-                # original). Reading ``storage_key`` directly would miss
-                # every attachment whose original was superseded by a
-                # derivation — its original object may no longer exist.
-                storage_key, _ = await resolve_version(db, att, None)
+    async with storage.object_client() as client:
+        for f in files:
+            name = _safe_zip_name(f.filename, f"{f.attachment_id.hex[:8]}.pdf")
+            if not name.lower().endswith(".pdf"):
+                name += ".pdf"
+            arcname = _dedupe_name(
+                f"{f.folder}/{name}" if f.folder else name, used
+            )
+            async with AsyncExitStack() as stack:
                 try:
-                    body = await storage.read_object(storage_key)
+                    size, chunks = await stack.enter_async_context(
+                        storage.stream_object(f.storage_key, client)
+                    )
                 except Exception as exc:
-                    # A missing blob shouldn't sink the whole download —
-                    # but don't drop it silently either: record it so the
-                    # ZIP and a response header tell the user what's gone.
                     used.discard(arcname)
-                    missing.append(att.filename)
+                    missing.append(
+                        f"{f.folder}/{f.filename}" if f.folder else f.filename
+                    )
                     log.warning(
                         "pdf-zip: skipping attachment %s (%s) key=%s: %s",
-                        att.id,
-                        att.filename,
-                        storage_key,
+                        f.attachment_id,
+                        f.filename,
+                        f.storage_key,
                         exc,
                     )
                     continue
-                z.writestr(arcname, body)
-                written += 1
-        if missing:
-            listing = "\n".join(sorted(missing))
-            z.writestr(
-                "_MISSING_FILES.txt",
-                "These PDFs could not be fetched from storage and were "
-                "left out of this archive:\n\n" + listing + "\n",
-            )
+                try:
+                    async for out in zs.add(arcname, size, chunks):
+                        yield out
+                except Exception:
+                    log.exception(
+                        "pdf-zip: aborting; attachment %s (%s) key=%s failed "
+                        "mid-stream",
+                        f.attachment_id,
+                        f.filename,
+                        f.storage_key,
+                    )
+                    raise
+            entry = {
+                "path": arcname,
+                "title": f.title,
+                "item_id": str(f.item_id),
+            }
+            if with_collections:
+                entry["collection"] = f.folder
+            index.append(entry)
 
-    if written == 0:
+    if missing:
+        yield zs.add_bytes(
+            "_MISSING_FILES.txt",
+            (
+                "These PDFs could not be fetched from storage and were "
+                "left out of this archive:\n\n"
+                + "\n".join(sorted(missing))
+                + "\n"
+            ).encode(),
+        )
+    # Last, so it lists what actually made it in.
+    yield zs.add_bytes(
+        "index.json",
+        json.dumps(index, indent=2, ensure_ascii=False).encode(),
+    )
+    yield zs.close()
+
+
+_ITEM_QUERY = Query(description="Item ids to bundle; repeat the param per id.")
+_COLLECTION_QUERY = Query(
+    description=(
+        "Bundle every item filed under this collection or any of its "
+        "subcollections (one ZIP folder per subcollection), instead of "
+        "naming ids. Mutually exclusive with `item`."
+    )
+)
+
+
+class PdfZipSummary(BaseModel):
+    items: int
+    files: int
+
+
+@router.get("/api/spaces/{slug}/attachments-zip/summary")
+async def summarize_attachments_zip(
+    slug: str,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+    item: Annotated[list[uuid.UUID] | None, _ITEM_QUERY] = None,
+    collection: Annotated[uuid.UUID | None, _COLLECTION_QUERY] = None,
+) -> PdfZipSummary:
+    """What `attachments-zip` would bundle for the same parameters,
+    without fetching anything from storage.
+
+    The SPA asks this first and then hands the archive itself to the
+    browser as a plain download, which streams it to disk with the
+    browser's own progress UI. A navigation can't report an error
+    readably, so the cases worth a message -- nothing to download, a
+    bad selection -- are caught here instead.
+    """
+    space = await _resolve_space(db, user, slug)
+    plan = await _plan_pdf_zip(db, space, item, collection)
+    return PdfZipSummary(items=len(plan.items), files=len(plan.files))
+
+
+@router.get("/api/spaces/{slug}/attachments-zip")
+async def download_attachments_zip(
+    slug: str,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+    item: Annotated[list[uuid.UUID] | None, _ITEM_QUERY] = None,
+    collection: Annotated[uuid.UUID | None, _COLLECTION_QUERY] = None,
+) -> StreamingResponse:
+    """Bundle every PDF attachment of the selected items into one ZIP --
+    flat for an item selection, one folder per subcollection for a
+    collection -- with an ``index.json`` listing each file's title and
+    item. Used by the library's bulk-select "Download PDFs" action and by
+    "Download PDFs" on a collection.
+
+    Streamed: the first bytes go out as soon as the first PDF is opened,
+    and nothing is held beyond the chunk in flight. Non-PDF attachments
+    are skipped; a missing blob is logged and listed in
+    _MISSING_FILES.txt rather than failing the whole download. 404 if
+    none of the selected items has a PDF."""
+    space = await _resolve_space(db, user, slug)
+    plan = await _plan_pdf_zip(db, space, item, collection)
+    if not plan.items:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No matching items")
+    if not plan.files:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
-            "No PDF attachments could be fetched for the selected items",
+            "No PDF attachments in the selected items",
         )
 
-    details: dict[str, object] = {"items": len(ordered), "files": written}
-    if missing:
-        details["skipped"] = len(missing)
+    # Recorded before streaming: the handler returns once the response
+    # starts, and what was asked for is what the log is about. A PDF
+    # missing from storage shows up in the archive's _MISSING_FILES.txt.
+    details: dict[str, object] = {
+        "items": len(plan.items),
+        "files": len(plan.files),
+    }
     if collection is not None:
         coll = await db.get(Collection, collection)
         await record_read(
@@ -635,13 +780,15 @@ async def download_attachments_zip(
         )
 
     filename = f"{slug}-pdfs.zip"
-    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
-    if missing:
-        # Surfaced to the SPA so it can warn instead of the loss being
-        # invisible until the user counts the files.
-        headers["X-Shelf-Skipped"] = str(len(missing))
-    return Response(
-        content=buf.getvalue(),
+    return StreamingResponse(
+        _stream_pdf_zip(plan.files, with_collections=collection is not None),
         media_type="application/zip",
-        headers=headers,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            # A reverse proxy that buffers the response would hold the
+            # whole archive again -- in its memory or on its disk -- and
+            # the client would see nothing until it was done.
+            "X-Accel-Buffering": "no",
+            "Cache-Control": "no-store",
+        },
     )

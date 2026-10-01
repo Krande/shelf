@@ -12,7 +12,7 @@ from httpx import AsyncClient
 from shelf.config import settings
 from shelf.services import storage
 
-from .helpers import login
+from .helpers import login, serve_objects
 
 
 async def _login(client: AsyncClient, email: str = "alice@example.com") -> str:
@@ -253,7 +253,7 @@ async def test_rdf_bundle_zip_layout(
     async def fake_presign_upload(key: str, **_: object) -> str:
         return f"https://stub/upload/{key}"
 
-    monkeypatch.setattr(storage, "read_object", fake_read_object)
+    serve_objects(monkeypatch, fake_read_object)
     monkeypatch.setattr(storage, "presign_upload", fake_presign_upload)
 
     slug = await _login(client)
@@ -321,7 +321,7 @@ async def test_bulk_pdf_zip_bundles_selected_items(
     async def fake_read_object(key: str) -> bytes:
         return f"bytes-of-{key}".encode()
 
-    monkeypatch.setattr(storage, "read_object", fake_read_object)
+    serve_objects(monkeypatch, fake_read_object)
 
     slug = await _login(client)
     a = await _make_paper(client, slug, title="Paper A")
@@ -348,10 +348,16 @@ async def test_bulk_pdf_zip_bundles_selected_items(
 
     zf = zipfile.ZipFile(io.BytesIO(r.content))
     names = zf.namelist()
-    assert names == ["report.pdf", "report (2).pdf"]
+    assert names == ["report.pdf", "report (2).pdf", "index.json"]
     # No non-PDF and nothing from the unselected item.
     assert not any(n.endswith(".txt") for n in names)
     assert "other.pdf" not in names
+    # The index ties each file back to its document; no collection key,
+    # since an item selection has no folders.
+    assert json.loads(zf.read("index.json")) == [
+        {"path": "report.pdf", "title": "Paper A", "item_id": a["id"]},
+        {"path": "report (2).pdf", "title": "Paper B", "item_id": b["id"]},
+    ]
 
 
 async def test_bulk_pdf_zip_reports_unfetchable_blobs(
@@ -359,8 +365,9 @@ async def test_bulk_pdf_zip_reports_unfetchable_blobs(
 ) -> None:
     """A PDF whose blob can't be fetched (e.g. its original object was
     superseded and the key is gone) must not silently vanish: the good
-    files still come through, the missing one is listed in
-    _MISSING_FILES.txt, and X-Shelf-Skipped reports the count."""
+    files still come through and the missing one is listed in
+    _MISSING_FILES.txt. (No count header: the archive is streamed, so
+    the headers are gone before the first blob is opened.)"""
     slug = await _login(client)
     good = await _make_paper(client, slug, title="Good")
     bad = await _make_paper(client, slug, title="Bad")
@@ -372,20 +379,23 @@ async def test_bulk_pdf_zip_reports_unfetchable_blobs(
             raise FileNotFoundError(key)
         return b"good-bytes"
 
-    monkeypatch.setattr(storage, "read_object", flaky_read_object)
+    serve_objects(monkeypatch, flaky_read_object)
 
     r = await client.get(
         f"/api/spaces/{slug}/attachments-zip",
         params={"item": [good["id"], bad["id"]]},
     )
     assert r.status_code == 200, r.text
-    assert r.headers["x-shelf-skipped"] == "1"
     zf = zipfile.ZipFile(io.BytesIO(r.content))
     names = zf.namelist()
     assert "good.pdf" in names
     assert "gone.pdf" not in names
     assert "_MISSING_FILES.txt" in names
     assert "gone.pdf" in zf.read("_MISSING_FILES.txt").decode()
+    # The index lists only what actually made it in.
+    assert [e["path"] for e in json.loads(zf.read("index.json"))] == [
+        "good.pdf"
+    ]
 
 
 async def test_bulk_pdf_zip_404_when_no_pdfs(
@@ -394,7 +404,7 @@ async def test_bulk_pdf_zip_404_when_no_pdfs(
     async def fake_read_object(key: str) -> bytes:
         return b"x"
 
-    monkeypatch.setattr(storage, "read_object", fake_read_object)
+    serve_objects(monkeypatch, fake_read_object)
     slug = await _login(client)
     item = await _make_paper(client, slug, title="No PDF here")
     await _attach(client, item["id"], "notes.txt", content_type="text/plain")
@@ -417,7 +427,7 @@ async def test_bulk_pdf_zip_isolated_between_users(
     async def fake_read_object(key: str) -> bytes:
         return b"x"
 
-    monkeypatch.setattr(storage, "read_object", fake_read_object)
+    serve_objects(monkeypatch, fake_read_object)
 
     a_slug = await _login(client, email="alice@example.com")
     a_item = await _make_paper(client, a_slug, title="Alice paper")
@@ -488,7 +498,7 @@ async def test_collection_zip_bundles_everything_filed_under_it(
     async def fake_read_object(key: str) -> bytes:
         return f"bytes-of-{key}".encode()
 
-    monkeypatch.setattr(storage, "read_object", fake_read_object)
+    serve_objects(monkeypatch, fake_read_object)
 
     slug = await _login(client)
     a = await _make_paper(client, slug, title="Filed A")
@@ -505,7 +515,7 @@ async def test_collection_zip_bundles_everything_filed_under_it(
     )
     assert r.status_code == 200, r.text
     names = zipfile.ZipFile(io.BytesIO(r.content)).namelist()
-    assert sorted(names) == ["a.pdf", "b.pdf"]
+    assert sorted(names) == ["a.pdf", "b.pdf", "index.json"]
     assert "loose.pdf" not in names
 
 
@@ -521,7 +531,7 @@ async def test_collection_zip_includes_subcollections_as_folders(
     async def fake_read_object(key: str) -> bytes:
         return b"x"
 
-    monkeypatch.setattr(storage, "read_object", fake_read_object)
+    serve_objects(monkeypatch, fake_read_object)
 
     slug = await _login(client)
     top = (
@@ -559,9 +569,135 @@ async def test_collection_zip_includes_subcollections_as_folders(
         f"/api/spaces/{slug}/attachments-zip", params={"collection": top}
     )
     assert r.status_code == 200, r.text
-    names = zipfile.ZipFile(io.BytesIO(r.content)).namelist()
+    zf = zipfile.ZipFile(io.BytesIO(r.content))
     # Filed twice in the tree → written once, under the shallower folder.
-    assert sorted(names) == ["Mid/Leaf/b.pdf", "Mid/a.pdf", "Mid/both.pdf"]
+    assert sorted(zf.namelist()) == [
+        "Mid/Leaf/b.pdf",
+        "Mid/a.pdf",
+        "Mid/both.pdf",
+        "index.json",
+    ]
+    index = {e["path"]: e for e in json.loads(zf.read("index.json"))}
+    assert index["Mid/Leaf/b.pdf"] == {
+        "path": "Mid/Leaf/b.pdf",
+        "title": "In leaf",
+        "item_id": b["id"],
+        "collection": "Mid/Leaf",
+    }
+    assert index["Mid/both.pdf"]["collection"] == "Mid"
+
+
+async def test_collection_zip_streams_bodies_intact(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Entries are streamed chunk by chunk with data descriptors; the
+    archive must still verify (CRCs) and every body come back whole."""
+    bodies = {
+        "big.pdf": bytes(range(256)) * 1000,
+        "small.pdf": b"%PDF-1.4 tiny",
+    }
+    slug = await _login(client)
+    keys: dict[str, str] = {}
+    ids = []
+    for fname in bodies:
+        it = await _make_paper(client, slug, title=fname)
+        att = await _attach(client, it["id"], fname)
+        keys[att["id"].replace("-", "")] = fname
+        ids.append(it["id"])
+
+    async def read(key: str) -> bytes:
+        for hex_id, fname in keys.items():
+            if hex_id in key.replace("-", ""):
+                return bodies[fname]
+        raise FileNotFoundError(key)
+
+    serve_objects(monkeypatch, read, chunk_size=4096)
+    coll = await _file_under(client, slug, "Streamed", ids)
+
+    r = await client.get(
+        f"/api/spaces/{slug}/attachments-zip", params={"collection": coll}
+    )
+    assert r.status_code == 200, r.text
+    assert r.headers["x-accel-buffering"] == "no"
+    zf = zipfile.ZipFile(io.BytesIO(r.content))
+    assert zf.testzip() is None
+    for fname, body in bodies.items():
+        assert zf.read(fname) == body
+        assert zf.getinfo(fname).compress_type == zipfile.ZIP_STORED
+
+
+async def test_pdf_zip_summary_counts_without_fetching(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The SPA's preflight: counts what the archive would hold, reads
+    nothing from storage, and reports an empty collection as zero rather
+    than an error."""
+
+    async def must_not_read(key: str) -> bytes:
+        raise AssertionError("summary must not touch storage")
+
+    serve_objects(monkeypatch, must_not_read)
+    slug = await _login(client)
+    a = await _make_paper(client, slug, title="With PDF")
+    b = await _make_paper(client, slug, title="Text only")
+    await _attach(client, a["id"], "a.pdf")
+    await _attach(client, a["id"], "a2.pdf")
+    await _attach(client, b["id"], "b.txt", content_type="text/plain")
+    coll = await _file_under(client, slug, "Counted", [a["id"], b["id"]])
+    empty = await _file_under(client, slug, "Empty", [])
+
+    url = f"/api/spaces/{slug}/attachments-zip/summary"
+    r = await client.get(url, params={"collection": coll})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"items": 2, "files": 2}
+    r = await client.get(url, params={"collection": empty})
+    assert r.json() == {"items": 0, "files": 0}
+    r = await client.get(url, params={"item": [b["id"]]})
+    assert r.json() == {"items": 1, "files": 0}
+    assert (await client.get(url)).status_code == 400
+
+
+async def test_stream_object_resumes_a_dropped_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A storage read that drops mid-object picks up where it left off
+    with a Range request, so the archive entry isn't cut short."""
+    import httpx
+
+    body = bytes(range(256)) * 4096  # 1 MiB: several stream chunks
+    cut = 300_000
+    ranges: list[str | None] = []
+
+    class Dropping(httpx.AsyncByteStream):
+        async def __aiter__(self):  # type: ignore[no-untyped-def]
+            yield body[:cut]
+            raise httpx.ReadError("connection reset")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        rng = request.headers.get("range")
+        ranges.append(rng)
+        if rng is None:
+            return httpx.Response(
+                200,
+                headers={"content-length": str(len(body))},
+                stream=Dropping(),
+            )
+        start = int(rng.removeprefix("bytes=").rstrip("-"))
+        return httpx.Response(206, content=body[start:])
+
+    async def fake_presign(key: str, **_: object) -> str:
+        return f"http://store/{key}"
+
+    monkeypatch.setattr(storage, "presign_download_internal", fake_presign)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+        async with storage.stream_object("k", c) as (size, chunks):
+            got = b"".join([chunk async for chunk in chunks])
+    assert size == len(body)
+    assert got == body
+    # The resume asked for exactly the bytes not yet delivered.
+    assert ranges[0] is None
+    assert ranges[1] is not None
+    assert int(ranges[1].removeprefix("bytes=").rstrip("-")) <= cut
 
 
 async def test_collection_zip_ignores_a_trashed_member(
@@ -570,7 +706,7 @@ async def test_collection_zip_ignores_a_trashed_member(
     async def fake_read_object(key: str) -> bytes:
         return b"x"
 
-    monkeypatch.setattr(storage, "read_object", fake_read_object)
+    serve_objects(monkeypatch, fake_read_object)
 
     slug = await _login(client)
     keep = await _make_paper(client, slug, title="Keep")
@@ -587,7 +723,10 @@ async def test_collection_zip_ignores_a_trashed_member(
         f"/api/spaces/{slug}/attachments-zip", params={"collection": coll}
     )
     assert r.status_code == 200, r.text
-    assert zipfile.ZipFile(io.BytesIO(r.content)).namelist() == ["keep.pdf"]
+    assert zipfile.ZipFile(io.BytesIO(r.content)).namelist() == [
+        "keep.pdf",
+        "index.json",
+    ]
 
 
 async def test_collection_zip_404s_for_another_space_collection(

@@ -5,8 +5,11 @@ regardless of whether the backend is S3-compatible (Garage, AWS, MinIO),
 Azure Blob, GCS, or a local filesystem. The backend is chosen by config.
 """
 
+import logging
 import secrets
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import timedelta
 
 import httpx
@@ -23,6 +26,8 @@ from obstore.store import (
 from ..config import settings
 
 DEFAULT_PRESIGN_TTL = timedelta(minutes=15)
+
+log = logging.getLogger(__name__)
 
 
 def _build_store(endpoint: str) -> ObjectStore:
@@ -140,6 +145,90 @@ async def read_object(key: str) -> bytes:
         r = await c.get(url)
         r.raise_for_status()
         return r.content
+
+
+# Small enough that a stream of hundreds of objects stays within a few
+# hundred KiB of buffering, large enough that per-chunk overhead (one CRC
+# update and one socket write each) is noise.
+STREAM_CHUNK_SIZE = 256 * 1024
+
+# How often a read that drops mid-object is resumed with a Range request
+# before the stream gives up.
+_RESUME_ATTEMPTS = 3
+
+
+def object_client() -> httpx.AsyncClient:
+    """A pooled HTTP client for reading many objects in a row.
+
+    One per bulk download rather than one per object, so hundreds of
+    reads share a handful of connections. The timeout applies to each
+    network operation, not the whole transfer: a large object read at
+    the pace of a slow downloader must not be cut off just for taking a
+    while.
+    """
+    return httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(60.0))
+
+
+@asynccontextmanager
+async def stream_object(
+    key: str, client: httpx.AsyncClient
+) -> AsyncIterator[tuple[int | None, AsyncIterator[bytes]]]:
+    """Open an object for streaming: yields ``(size, chunks)``.
+
+    Entering raises if the object can't be fetched at all (missing key,
+    store down), before a single byte is handed out, so a caller can skip
+    it cleanly. ``size`` is the Content-Length when the store sends one.
+
+    Once chunks are flowing, a dropped connection is resumed from the
+    last byte delivered with a Range request (re-signed, since a long
+    download can outlive the URL's TTL). Only after that fails repeatedly
+    does iteration raise -- by then the caller has already written part
+    of the object and can only abort.
+    """
+    url = await presign_download_internal(key)
+    async with client.stream("GET", url) as first:
+        first.raise_for_status()
+        length = first.headers.get("content-length")
+        size = int(length) if length is not None else None
+        yield size, _resumable_chunks(key, client, first)
+
+
+async def _resumable_chunks(
+    key: str, client: httpx.AsyncClient, first: httpx.Response
+) -> AsyncIterator[bytes]:
+    resp = first
+    sent = 0
+    attempts = 0
+    while True:
+        try:
+            async for chunk in resp.aiter_bytes(STREAM_CHUNK_SIZE):
+                sent += len(chunk)
+                yield chunk
+            return
+        except httpx.TransportError as exc:
+            if attempts >= _RESUME_ATTEMPTS:
+                raise
+            attempts += 1
+            log.warning(
+                "storage: read of %s dropped at byte %d (%s); resuming",
+                key,
+                sent,
+                exc,
+            )
+        finally:
+            if resp is not first:
+                await resp.aclose()
+        url = await presign_download_internal(key)
+        resp = await client.send(
+            client.build_request("GET", url, headers={"Range": f"bytes={sent}-"}),
+            stream=True,
+        )
+        if resp.status_code != 206:
+            await resp.aclose()
+            raise OSError(
+                f"resuming {key} at byte {sent}: store answered "
+                f"{resp.status_code}, not a partial response"
+            )
 
 
 async def delete_object(key: str) -> None:
@@ -263,6 +352,7 @@ async def restore_from_original(storage_key: str) -> bool:
 
 __all__ = [
     "ORIGINAL_SUFFIX",
+    "STREAM_CHUNK_SIZE",
     "AzureStore",
     "GCSStore",
     "LocalStore",
@@ -275,6 +365,7 @@ __all__ = [
     "ensure_original",
     "get_store",
     "head_object",
+    "object_client",
     "object_exists",
     "original_key",
     "presign_download",
@@ -283,4 +374,5 @@ __all__ = [
     "read_object",
     "reset_store",
     "restore_from_original",
+    "stream_object",
 ]

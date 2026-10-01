@@ -141,21 +141,15 @@ export function getPageDims(
 }
 
 /**
- * Download the PDFs of several items as one ZIP.
+ * Download the PDFs of several items as one flat ZIP.
  *
- * Server-side assembly (`/api/spaces/{slug}/attachments-zip`) reads
- * each PDF blob and streams back a flat `application/zip`. We fetch it
- * as a blob (rather than a plain `<a href>` navigation) so the caller
- * gets a busy state while the archive is built and a thrown error on
- * failure instead of the browser rendering the JSON error body.
- *
- * The saved filename comes from the response's Content-Disposition,
- * falling back to `<slug>-pdfs.zip`.
+ * Resolves to the number of PDFs the archive will hold; 0 means there
+ * was nothing to download and no download was started.
  */
 export async function downloadItemPdfsZip(
   slug: string,
   itemIds: string[],
-): Promise<{ skipped: number }> {
+): Promise<{ files: number }> {
   return downloadPdfsZip(
     slug,
     itemIds.map((id) => `item=${encodeURIComponent(id)}`).join("&"),
@@ -173,21 +167,35 @@ export async function downloadItemPdfsZip(
 export async function downloadCollectionPdfsZip(
   slug: string,
   collectionId: string,
-): Promise<{ skipped: number }> {
+): Promise<{ files: number }> {
   return downloadPdfsZip(
     slug,
     `collection=${encodeURIComponent(collectionId)}`,
   );
 }
 
+/**
+ * The server streams the archive (`/api/spaces/{slug}/attachments-zip`)
+ * as it reads each PDF from storage, so it is handed to the browser as
+ * an ordinary download: it goes straight to disk with the browser's own
+ * progress and cancel, however many GB it comes to. Fetching it into a
+ * blob instead would hold the whole archive in the tab's memory and
+ * show nothing until the last byte arrived.
+ *
+ * A navigation can't report an error readably, so the `summary`
+ * preflight checks the selection first: a bad request throws with the
+ * server's message, and an empty one resolves to 0 without downloading.
+ * A PDF missing from storage doesn't fail the download; the archive
+ * lists it in _MISSING_FILES.txt.
+ */
 async function downloadPdfsZip(
   slug: string,
   query: string,
-): Promise<{ skipped: number }> {
-  const res = await fetch(
-    `/api/spaces/${encodeURIComponent(slug)}/attachments-zip?${query}`,
-    { credentials: "include" },
-  );
+): Promise<{ files: number }> {
+  const base = `/api/spaces/${encodeURIComponent(slug)}/attachments-zip`;
+  const res = await fetch(`${base}/summary?${query}`, {
+    credentials: "include",
+  });
   if (!res.ok) {
     let message = res.statusText;
     try {
@@ -198,23 +206,17 @@ async function downloadPdfsZip(
     }
     throw new Error(message);
   }
-  const blob = await res.blob();
-  const disposition = res.headers.get("Content-Disposition") ?? "";
-  const match = /filename="?([^"]+)"?/.exec(disposition);
-  const filename = match ? match[1] : `${slug}-pdfs.zip`;
-  const url = URL.createObjectURL(blob);
+  const { files } = (await res.json()) as { items: number; files: number };
+  if (files === 0) return { files };
   const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
+  a.href = `${base}?${query}`;
+  // The server's Content-Disposition names the file; `download` just
+  // keeps a failed response from replacing the app in this tab.
+  a.download = "";
   document.body.appendChild(a);
   a.click();
   a.remove();
-  URL.revokeObjectURL(url);
-  // The server left out any PDF it couldn't fetch from storage and
-  // listed them in _MISSING_FILES.txt; report the count so a partial
-  // archive doesn't look complete.
-  const skipped = Number(res.headers.get("X-Shelf-Skipped") ?? "0");
-  return { skipped: Number.isFinite(skipped) ? skipped : 0 };
+  return { files };
 }
 
 /**

@@ -16,7 +16,7 @@ from shelf.api import attachments as attachments_api
 from shelf.config import settings
 from shelf.services import storage
 
-from .helpers import login
+from .helpers import login, serve_objects
 
 ADMIN = "admin@example.com"
 
@@ -34,7 +34,7 @@ def memory_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(storage, "presign_upload", fake_presign)
     monkeypatch.setattr(storage, "presign_download", fake_presign)
     monkeypatch.setattr(storage, "presign_download_internal", fake_presign)
-    monkeypatch.setattr(storage, "read_object", fake_read_object)
+    serve_objects(monkeypatch, fake_read_object)
     yield
     storage.reset_store()
 

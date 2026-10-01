@@ -146,22 +146,12 @@ export default function CollectionRail({
       return downloadCollectionPdfsZip(homeSpace(c)?.slug ?? slug!, c.id);
     },
     onSettled: () => setDownloadingId(null),
-    onSuccess: ({ skipped }) => {
-      if (skipped > 0) {
-        window.alert(
-          `${skipped} PDF${skipped === 1 ? "" : "s"} could not be fetched ` +
-            "from storage and were left out (see _MISSING_FILES.txt in the " +
-            "ZIP).",
-        );
+    onSuccess: ({ files }) => {
+      if (files === 0) {
+        window.alert("Nothing to download — no PDFs in that collection.");
       }
     },
-    onError: (e: Error) =>
-      window.alert(
-        // The server's 404 detail, which replaces the status text.
-        e.message === "No matching items"
-          ? "Nothing to download — no PDFs in that collection."
-          : `Download failed: ${e.message}`,
-      ),
+    onError: (e: Error) => window.alert(`Download failed: ${e.message}`),
   });
 
   // Own collections and inherited ones are built into separate trees and
