@@ -60,6 +60,7 @@ from ..models import (
     User,
 )
 from ..services import storage
+from ..services.audit import AuditAction, item_label, record
 
 router = APIRouter(tags=["items"])
 
@@ -157,6 +158,23 @@ async def copy_item(
             db, source_id=source.id, copy=copy, target_space_id=target.id, user=user
         )
 
+    # Logged against the copy, where the write landed; the source is in
+    # the details so the trail leads back to it.
+    record(
+        db,
+        user,
+        AuditAction.item_copy,
+        space_id=target.id,
+        target_type="item",
+        target_id=copy.id,
+        label=item_label(copy),
+        details={
+            "from_item": str(source.id),
+            "from_space": source_space.slug if source_space else None,
+            "to_space": target.slug,
+            "attachments": copied,
+        },
+    )
     await db.commit()
     return CopyItemResponse(
         item_id=str(copy.id),

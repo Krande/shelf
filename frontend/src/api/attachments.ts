@@ -7,6 +7,9 @@ export interface Attachment {
   content_type: string;
   size_bytes: number | null;
   uploaded_at: string | null;
+  /** Id of the user who uploaded the file, and their current display name. */
+  created_by?: string | null;
+  created_by_name?: string | null;
 }
 
 interface RegisterResponse {

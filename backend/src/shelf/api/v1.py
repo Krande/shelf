@@ -53,10 +53,16 @@ from ..models import (
     StandardRevision,
 )
 from ..services import extraction, storage
+from ..services.audit import AuditAction, item_label, record, record_read
 from ..services.storage import attachment_storage_key
 from .attachments import resolve_version
 from .items import _SNIPPET_PAD, ScopeQuery, SearchScope, _escape_ilike, _parse_search
-from .standards import LinkRevisionRequest, item_revisions, upsert_revision
+from .standards import (
+    LinkRevisionRequest,
+    item_revisions,
+    revision_snapshot,
+    upsert_revision,
+)
 
 router = APIRouter(tags=["v1"], prefix="/api/v1")
 
@@ -354,6 +360,36 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def _audit_item_create(db: AsyncSession, auth: TokenAuth, item: Item) -> None:
+    record(
+        db,
+        auth.user,
+        AuditAction.item_create,
+        space_id=item.space_id,
+        target_type="item",
+        target_id=item.id,
+        label=item_label(item),
+        details={"item_type": item.item_type},
+        via="api",
+    )
+
+
+def _audit_upload(
+    db: AsyncSession, auth: TokenAuth, item: Item, att: Attachment
+) -> None:
+    record(
+        db,
+        auth.user,
+        AuditAction.attachment_upload,
+        space_id=item.space_id,
+        target_type="attachment",
+        target_id=att.id,
+        label=att.filename,
+        details={"item_id": str(item.id), "size_bytes": att.size_bytes},
+        via="api",
+    )
+
+
 # ── collections ───────────────────────────────────────────────────────────
 
 
@@ -560,6 +596,21 @@ async def create_collection(
         position=len(sibling_count),
     )
     db.add(coll)
+    await db.flush()
+    # The parent's name, as the web route records it, so the log reads
+    # the same whichever way the folder was made.
+    parent_coll = await db.get(Collection, parent_id) if parent_id else None
+    record(
+        db,
+        auth.user,
+        AuditAction.collection_create,
+        space_id=space_id,
+        target_type="collection",
+        target_id=coll.id,
+        label=coll.name,
+        details={"parent": parent_coll.name} if parent_coll else None,
+        via="api",
+    )
     await db.commit()
     await db.refresh(coll)
 
@@ -615,6 +666,16 @@ async def delete_collection(
 
     space_id = coll.space_id
     parent_id = coll.parent_id
+    record(
+        db,
+        auth.user,
+        AuditAction.collection_delete,
+        space_id=space_id,
+        target_type="collection",
+        target_id=coll.id,
+        label=coll.name,
+        via="api",
+    )
     await db.delete(coll)
     await db.flush()
 
@@ -675,11 +736,47 @@ async def set_item_collections(
                 f"Token cannot file items in collection {cid}",
             )
 
+    current = set(
+        (
+            await db.execute(
+                select(ItemCollection.collection_id).where(
+                    ItemCollection.item_id == item_id
+                )
+            )
+        ).scalars().all()
+    )
     await db.execute(
         delete(ItemCollection).where(ItemCollection.item_id == item_id)
     )
     for cid in requested:
         db.add(ItemCollection(item_id=item_id, collection_id=cid))
+    if requested != current:
+        # Names, not ids, matching the web route's entries.
+        names = dict(
+            (
+                await db.execute(
+                    select(Collection.id, Collection.name).where(
+                        Collection.id.in_(requested ^ current)
+                    )
+                )
+            ).tuples().all()
+        )
+        record(
+            db,
+            auth.user,
+            AuditAction.item_collections,
+            space_id=item.space_id,
+            target_type="item",
+            target_id=item.id,
+            label=item_label(item),
+            details={
+                "added": sorted(names[c] for c in requested - current if c in names),
+                "removed": sorted(
+                    names[c] for c in current - requested if c in names
+                ),
+            },
+            via="api",
+        )
     await db.commit()
     return sorted(requested)
 
@@ -761,6 +858,9 @@ async def upload(
     )
     db.add(att)
     await extraction.mark_and_enqueue(att)
+    if created_item is not None:
+        _audit_item_create(db, auth, created_item)
+    _audit_upload(db, auth, item, att)
     await db.commit()
     await db.refresh(att)
     if created_item is not None:
@@ -849,6 +949,10 @@ async def uploads_register(
         created_by=auth.user.id,
     )
     db.add(att)
+    # Not an upload yet — the bytes haven't arrived; /complete logs that.
+    # A minted item is real as of now, though.
+    if created_item is not None:
+        _audit_item_create(db, auth, created_item)
     await db.commit()
     await db.refresh(att)
 
@@ -926,6 +1030,7 @@ async def uploads_complete(
     if att.uploaded_at is None:
         att.uploaded_at = _utcnow()
         await extraction.mark_and_enqueue(att)
+        _audit_upload(db, auth, item, att)
         await db.commit()
         await db.refresh(att)
     return att
@@ -1075,6 +1180,7 @@ async def create_item(
     if payload.collection_id:
         await _link_collections(db, auth, item, payload.collection_id)
 
+    _audit_item_create(db, auth, item)
     await db.commit()
     await db.refresh(item)
     return await _item_summary(db, auth, item)
@@ -1094,6 +1200,8 @@ async def update_item(
     """Update an item this token can write to."""
     item = await _resolve_owned_item(db, auth, item_id, SPACE_ROLE_EDITOR)
     await _enforce_collection_scope(db, auth, item)
+    old_type = item.item_type
+    old_data = dict(item.data) if isinstance(item.data, dict) else {}
 
     if payload.item_type is not None:
         item.item_type = payload.item_type
@@ -1113,6 +1221,29 @@ async def update_item(
         else:
             item.data = payload.data
 
+    # Field names only: the values can be whole documents' worth of
+    # metadata, and the item itself holds the current ones.
+    new_data = item.data if isinstance(item.data, dict) else {}
+    missing = object()
+    fields = sorted(
+        k
+        for k in old_data.keys() | new_data.keys()
+        if old_data.get(k, missing) != new_data.get(k, missing)
+    )
+    if item.item_type != old_type:
+        fields.insert(0, "item_type")
+    if fields:
+        record(
+            db,
+            auth.user,
+            AuditAction.item_update,
+            space_id=item.space_id,
+            target_type="item",
+            target_id=item.id,
+            label=item_label(item),
+            details={"fields": fields},
+            via="api",
+        )
     await db.commit()
     await db.refresh(item)
     return await _item_summary(db, auth, item)
@@ -1179,7 +1310,24 @@ async def set_item_revision(
     """
     item = await _resolve_owned_item(db, auth, item_id, SPACE_ROLE_EDITOR)
     await _enforce_collection_scope(db, auth, item)
+    before = await revision_snapshot(db, item.id)
     family = await upsert_revision(db, item, payload)
+    if before is None or await revision_snapshot(db, item.id) != before:
+        record(
+            db,
+            auth.user,
+            AuditAction.item_revision,
+            space_id=item.space_id,
+            target_type="item",
+            target_id=item.id,
+            label=item_label(item),
+            details={
+                "body": family.body,
+                "designation": family.designation,
+                "revision": payload.label.strip(),
+            },
+            via="api",
+        )
     await db.commit()
     return {
         "item_id": item.id,
@@ -1833,6 +1981,22 @@ async def download(
         db, att, None if version == "latest" else version
     )
     url = await storage.presign_download(storage_key)
+    # After every check and the presign, so only a download that is
+    # actually handed out gets logged. The item is already in the
+    # session's identity map from the access check.
+    item = await db.get(Item, att.item_id)
+    assert item is not None
+    await record_read(
+        db,
+        auth.user,
+        AuditAction.attachment_download,
+        space_id=item.space_id,
+        target_type="attachment",
+        target_id=att.id,
+        label=att.filename,
+        details={"item_id": str(item.id), "version": served},
+        via="api",
+    )
     return RedirectResponse(
         url,
         status_code=status.HTTP_302_FOUND,

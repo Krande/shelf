@@ -25,6 +25,7 @@ from ..auth.deps import get_current_user
 from ..auth.spaces import SPACE_ROLE_EDITOR, SPACE_ROLE_VIEWER, require_space_role
 from ..db import get_session
 from ..models import Item, ItemTag, Space, Tag, User
+from ..services.audit import AuditAction, item_label, record
 
 router = APIRouter(tags=["tags"])
 
@@ -126,6 +127,18 @@ async def create_tag(
     tag = Tag(space_id=space.id, name=name, color=payload.color)
     db.add(tag)
     try:
+        # Flush first: a duplicate name fails here, before anything is
+        # logged, and the audit row needs the new tag's id.
+        await db.flush()
+        record(
+            db,
+            user,
+            AuditAction.tag_create,
+            space_id=space.id,
+            target_type="tag",
+            target_id=tag.id,
+            label=tag.name,
+        )
         await db.commit()
     except IntegrityError as e:
         await db.rollback()
@@ -144,14 +157,31 @@ async def update_tag(
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> Tag:
     tag = await _resolve_tag(db, user, tag_id, SPACE_ROLE_EDITOR)
+    changes: dict[str, list[str | None]] = {}
     if payload.name is not None:
         name = payload.name.strip()
         if not name:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Name required")
+        if name != tag.name:
+            changes["name"] = [tag.name, name]
         tag.name = name
     if payload.color is not None:
-        tag.color = payload.color or None
+        color = payload.color or None
+        if color != tag.color:
+            changes["color"] = [tag.color, color]
+        tag.color = color
     tag.updated_at = datetime.now(UTC)
+    if changes:
+        record(
+            db,
+            user,
+            AuditAction.tag_update,
+            space_id=tag.space_id,
+            target_type="tag",
+            target_id=tag.id,
+            label=tag.name,
+            details=changes,
+        )
     try:
         await db.commit()
     except IntegrityError as e:
@@ -170,6 +200,15 @@ async def delete_tag(
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
     tag = await _resolve_tag(db, user, tag_id, SPACE_ROLE_EDITOR)
+    record(
+        db,
+        user,
+        AuditAction.tag_delete,
+        space_id=tag.space_id,
+        target_type="tag",
+        target_id=tag.id,
+        label=tag.name,
+    )
     # ON DELETE CASCADE drops item_tags rows for us.
     await db.delete(tag)
     await db.commit()
@@ -197,8 +236,35 @@ async def set_item_tags(
                 "Tag lives in a different space than the item",
             )
 
+    current = set(
+        (
+            await db.execute(
+                select(ItemTag.tag_id).where(ItemTag.item_id == item_id)
+            )
+        ).scalars()
+    )
+    added, removed = requested - current, current - requested
+
     await db.execute(delete(ItemTag).where(ItemTag.item_id == item_id))
     for tid in requested:
         db.add(ItemTag(item_id=item_id, tag_id=tid))
+    if added or removed:
+        rows = await db.execute(
+            select(Tag.id, Tag.name).where(Tag.id.in_(added | removed))
+        )
+        names = {tag_id: name for tag_id, name in rows.all()}
+        record(
+            db,
+            user,
+            AuditAction.item_tags,
+            space_id=item.space_id,
+            target_type="item",
+            target_id=item.id,
+            label=item_label(item),
+            details={
+                "added": sorted(names[t] for t in added if t in names),
+                "removed": sorted(names[t] for t in removed if t in names),
+            },
+        )
     await db.commit()
     return sorted(requested)

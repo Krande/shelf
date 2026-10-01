@@ -36,6 +36,9 @@ export interface Item {
    * single-item routes have no "here" to be inherited into.
    */
   is_inherited?: boolean;
+  /** Id of the user who created the item, and their current display name. */
+  created_by?: string | null;
+  created_by_name?: string | null;
 }
 
 export type ItemStatus = "active" | "trashed" | "all";

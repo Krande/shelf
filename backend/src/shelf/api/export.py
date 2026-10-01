@@ -32,6 +32,7 @@ from ..models import (
     User,
 )
 from ..services import storage
+from ..services.audit import AuditAction, item_label, record_read
 from ..services.export_renderers import (
     attachment_zip_path,
     render_bibtex,
@@ -227,7 +228,21 @@ async def export_item(
     attachment — same shape as Zotero's native export."""
     item = await _resolve_item(db, user, item_id)
     att, tags, colls, idx = await _hydrate(db, [item])
-    if format is ExportFormat.rdf and bundle:
+    bundled = format is ExportFormat.rdf and bundle
+    details: dict[str, object] = {"format": format.value}
+    if bundled:
+        details["files"] = sum(len(v) for v in att.values())
+    await record_read(
+        db,
+        user,
+        AuditAction.export_item,
+        space_id=item.space_id,
+        target_type="item",
+        target_id=item.id,
+        label=item_label(item),
+        details=details,
+    )
+    if bundled:
         zip_bytes = await _build_rdf_bundle(
             base_name=f"item-{item.id.hex[:8]}",
             items=[item],
@@ -307,7 +322,25 @@ async def export_space(
     rows = await db.execute(stmt)
     items = list(rows.scalars().all())
     att, tags, colls, idx = await _hydrate(db, items)
-    if format is ExportFormat.rdf and bundle:
+    bundled = format is ExportFormat.rdf and bundle
+    details: dict[str, object] = {"format": format.value, "items": len(items)}
+    if bundled:
+        details["files"] = sum(len(v) for v in att.values())
+    if collection:
+        details["collection_id"] = collection
+    if tag:
+        details["tags"] = [t.strip() for t in tag if t.strip()]
+    await record_read(
+        db,
+        user,
+        AuditAction.export_space,
+        space_id=space.id,
+        target_type="space",
+        target_id=space.id,
+        label=space.name,
+        details=details,
+    )
+    if bundled:
         zip_bytes = await _build_rdf_bundle(
             base_name=slug,
             items=items,
@@ -535,6 +568,33 @@ async def download_attachments_zip(
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
             "No PDF attachments could be fetched for the selected items",
+        )
+
+    details: dict[str, object] = {"items": len(ordered), "files": written}
+    if missing:
+        details["skipped"] = len(missing)
+    if collection is not None:
+        coll = await db.get(Collection, collection)
+        await record_read(
+            db,
+            user,
+            AuditAction.collection_download,
+            space_id=space.id,
+            target_type="collection",
+            target_id=collection,
+            label=coll.name if coll is not None else None,
+            details=details,
+        )
+    else:
+        await record_read(
+            db,
+            user,
+            AuditAction.export_zip,
+            space_id=space.id,
+            target_type="space",
+            target_id=space.id,
+            label=space.name,
+            details=details,
         )
 
     filename = f"{slug}-pdfs.zip"

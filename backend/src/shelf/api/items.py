@@ -53,8 +53,22 @@ from ..models import (
     Tag,
     User,
 )
+from ..services.audit import AuditAction, item_label, record
 
 router = APIRouter(tags=["items"])
+
+
+async def user_names(
+    db: AsyncSession, user_ids: Any
+) -> dict[uuid.UUID, str]:
+    """Current display names for a set of user ids, in one query."""
+    wanted = {uid for uid in user_ids if uid is not None}
+    if not wanted:
+        return {}
+    rows = await db.execute(
+        select(User.id, User.display_name).where(User.id.in_(wanted))
+    )
+    return {uid: name for uid, name in rows.all()}
 
 
 def _escape_ilike(s: str) -> str:
@@ -125,6 +139,9 @@ class ItemResponse(BaseModel):
     # rather than living in the space that was asked for. Read-only here;
     # `space_id` says where it actually lives.
     is_inherited: bool = False
+    # Who created the item, and their display name as it is now.
+    created_by: uuid.UUID | None = None
+    created_by_name: str | None = None
 
 
 class ListItemsResponse(BaseModel):
@@ -187,6 +204,7 @@ async def _attach_collection_ids(
     tag_by_item: dict[uuid.UUID, list[uuid.UUID]] = {iid: [] for iid in ids}
     for item_id, tag_id in tag_rows.all():
         tag_by_item[item_id].append(tag_id)
+    names = await user_names(db, (it.created_by for it in items))
     return [
         {
             "id": it.id,
@@ -200,6 +218,10 @@ async def _attach_collection_ids(
             "tag_ids": tag_by_item.get(it.id, []),
             "is_inherited": home_space_id is not None
             and it.space_id != home_space_id,
+            "created_by": it.created_by,
+            "created_by_name": names.get(it.created_by)
+            if it.created_by is not None
+            else None,
         }
         for it in items
     ]
@@ -808,6 +830,17 @@ async def create_item(
         created_by=user.id,
     )
     db.add(item)
+    await db.flush()
+    record(
+        db,
+        user,
+        AuditAction.item_create,
+        space_id=space.id,
+        target_type="item",
+        target_id=item.id,
+        label=item_label(item),
+        details={"item_type": item.item_type},
+    )
     await db.commit()
     await db.refresh(item)
     return (await _attach_collection_ids(db, [item]))[0]
@@ -911,10 +944,31 @@ async def update_item(
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict[str, Any]:
     item = await _resolve_item(db, user, item_id, minimum=SPACE_ROLE_EDITOR)
+    changed: list[str] = []
+    if payload.item_type is not None and payload.item_type != item.item_type:
+        changed.append("item_type")
+    if payload.data is not None:
+        old = item.data if isinstance(item.data, dict) else {}
+        new = payload.data
+        changed.extend(
+            sorted(k for k in old.keys() | new.keys() if old.get(k) != new.get(k))
+        )
     if payload.item_type is not None:
         item.item_type = payload.item_type
     if payload.data is not None:
         item.data = payload.data
+    # A save that changed nothing is not worth an entry.
+    if changed:
+        record(
+            db,
+            user,
+            AuditAction.item_update,
+            space_id=item.space_id,
+            target_type="item",
+            target_id=item.id,
+            label=item_label(item),
+            details={"fields": changed},
+        )
     await db.commit()
     await db.refresh(item)
     return (await _attach_collection_ids(db, [item]))[0]
@@ -945,6 +999,21 @@ async def delete_item(
                 status.HTTP_400_BAD_REQUEST,
                 "Item must be trashed before it can be permanently deleted",
             )
+        action = AuditAction.item_delete
+    else:
+        action = AuditAction.item_trash
+    # Captured before the row goes: the label has to outlive it.
+    record(
+        db,
+        user,
+        action,
+        space_id=item.space_id,
+        target_type="item",
+        target_id=item.id,
+        label=item_label(item),
+        details={"item_type": item.item_type},
+    )
+    if permanent:
         await db.delete(item)
     else:
         item.deleted_at = datetime.now(UTC)
@@ -956,14 +1025,23 @@ async def restore_item(
     item_id: uuid.UUID,
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
-) -> Item:
+) -> dict[str, Any]:
     item = await _resolve_item(
         db, user, item_id, minimum=SPACE_ROLE_EDITOR, include_trashed=True
     )
     if item.deleted_at is None:
         # No-op restore is fine to expose; just don't write.
-        return item
+        return (await _attach_collection_ids(db, [item]))[0]
     item.deleted_at = None
+    record(
+        db,
+        user,
+        AuditAction.item_restore,
+        space_id=item.space_id,
+        target_type="item",
+        target_id=item.id,
+        label=item_label(item),
+    )
     await db.commit()
     await db.refresh(item)
-    return item
+    return (await _attach_collection_ids(db, [item]))[0]

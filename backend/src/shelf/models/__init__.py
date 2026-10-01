@@ -6,6 +6,7 @@ from .attachments import (
     AttachmentProcessing,
     ExtractionStatus,
 )
+from .audit import AuditEvent
 from .base import UUIDPK, Base, Timestamps
 from .collections import Collection, ItemCollection
 from .items import Item
@@ -36,6 +37,7 @@ __all__ = [
     "AttachmentDerivation",
     "AttachmentPage",
     "AttachmentProcessing",
+    "AuditEvent",
     "Base",
     "Collection",
     "ExtractionStatus",

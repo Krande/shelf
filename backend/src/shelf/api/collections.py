@@ -27,6 +27,7 @@ from ..auth.spaces import (
 )
 from ..db import get_session
 from ..models import Collection, Item, ItemCollection, Space, User
+from ..services.audit import AuditAction, item_label, record
 from .profiles import clean_columns
 
 router = APIRouter(tags=["collections"])
@@ -143,6 +144,15 @@ async def _siblings(
     return list((await db.execute(stmt)).scalars().all())
 
 
+async def _collection_name(
+    db: AsyncSession, collection_id: uuid.UUID | None
+) -> str | None:
+    if collection_id is None:
+        return None
+    coll = await db.get(Collection, collection_id)
+    return coll.name if coll is not None else None
+
+
 async def _renumber(siblings: list[Collection]) -> None:
     """Assign dense 0..N-1 positions to the given (already-ordered) list."""
     for idx, sib in enumerate(siblings):
@@ -247,6 +257,20 @@ async def create_collection(
         position=sibling_count,
     )
     db.add(coll)
+    # Flush first: the audit row needs the new collection's id.
+    await db.flush()
+    record(
+        db,
+        user,
+        AuditAction.collection_create,
+        space_id=space.id,
+        target_type="collection",
+        target_id=coll.id,
+        label=coll.name,
+        details={"parent": await _collection_name(db, coll.parent_id)}
+        if coll.parent_id
+        else None,
+    )
     await db.commit()
     await db.refresh(coll)
     return coll
@@ -263,21 +287,34 @@ async def update_collection(
 ) -> Collection:
     coll = await _resolve_collection(db, user, collection_id, SPACE_ROLE_EDITOR)
     provided = payload.model_fields_set
+    # What the audit entry says changed: old -> new for the name and the
+    # parent, just the field name for long text, lists and position.
+    changes: dict[str, object] = {}
+    fields: list[str] = []
+    old_parent_id = coll.parent_id
+    old_position = coll.position
 
     if "name" in provided and payload.name is not None:
         name = payload.name.strip()
         if not name:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Name required")
+        if name != coll.name:
+            changes["name"] = [coll.name, name]
         coll.name = name
 
     if "description" in provided:
         # Strip + treat empty as NULL so "clear" and "set to whitespace"
         # collapse to the same canonical state.
-        desc = (payload.description or "").strip()
-        coll.description = desc or None
+        desc = (payload.description or "").strip() or None
+        if desc != coll.description:
+            fields.append("description")
+        coll.description = desc
 
     if "columns" in provided:
-        coll.columns = clean_columns(payload.columns)
+        columns = clean_columns(payload.columns)
+        if columns != coll.columns:
+            fields.append("columns")
+        coll.columns = columns
 
     # parent_id / position handling. Both can be set independently:
     # - parent_id only → append to new parent's end.
@@ -343,6 +380,29 @@ async def update_collection(
         new_siblings.insert(target, coll)
         await _renumber(new_siblings)
 
+    if coll.parent_id != old_parent_id:
+        # By name, so the entry still reads after a folder is deleted;
+        # None is the space's root.
+        changes["parent"] = [
+            await _collection_name(db, old_parent_id),
+            await _collection_name(db, coll.parent_id),
+        ]
+    elif coll.position != old_position:
+        fields.append("position")
+    if fields:
+        changes["fields"] = fields
+
+    if changes:
+        record(
+            db,
+            user,
+            AuditAction.collection_update,
+            space_id=coll.space_id,
+            target_type="collection",
+            target_id=coll.id,
+            label=coll.name,
+            details=changes,
+        )
     coll.updated_at = datetime.now(UTC)
     await db.commit()
     await db.refresh(coll)
@@ -361,6 +421,15 @@ async def delete_collection(
     coll = await _resolve_collection(db, user, collection_id, SPACE_ROLE_EDITOR)
     space_id = coll.space_id
     parent_id = coll.parent_id
+    record(
+        db,
+        user,
+        AuditAction.collection_delete,
+        space_id=space_id,
+        target_type="collection",
+        target_id=coll.id,
+        label=coll.name,
+    )
     # ON DELETE CASCADE drops both the children (via parent_id) and the
     # item_collections rows; the items themselves stay put.
     await db.delete(coll)
@@ -393,6 +462,17 @@ async def set_item_collections(
                 "Collection lives in a different space than the item",
             )
 
+    current = set(
+        (
+            await db.execute(
+                select(ItemCollection.collection_id).where(
+                    ItemCollection.item_id == item_id
+                )
+            )
+        ).scalars()
+    )
+    added, removed = requested - current, current - requested
+
     # Replace the set wholesale — easier to reason about than diff +
     # add/remove and the row counts stay tiny.
     await db.execute(
@@ -400,5 +480,25 @@ async def set_item_collections(
     )
     for cid in requested:
         db.add(ItemCollection(item_id=item_id, collection_id=cid))
+    if added or removed:
+        rows = await db.execute(
+            select(Collection.id, Collection.name).where(
+                Collection.id.in_(added | removed)
+            )
+        )
+        names = {coll_id: name for coll_id, name in rows.all()}
+        record(
+            db,
+            user,
+            AuditAction.item_collections,
+            space_id=item.space_id,
+            target_type="item",
+            target_id=item.id,
+            label=item_label(item),
+            details={
+                "added": sorted(names[c] for c in added if c in names),
+                "removed": sorted(names[c] for c in removed if c in names),
+            },
+        )
     await db.commit()
     return sorted(requested)

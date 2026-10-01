@@ -42,7 +42,9 @@ from ..models import (
     User,
 )
 from ..services import extraction, storage
+from ..services.audit import AuditAction, record, record_read
 from ..services.storage import attachment_storage_key
+from .items import user_names
 
 log = logging.getLogger(__name__)
 
@@ -64,6 +66,24 @@ class AttachmentResponse(BaseModel):
     content_type: str
     size_bytes: int | None
     uploaded_at: datetime | None = None
+    # Who uploaded it, and their display name as it is now.
+    created_by: uuid.UUID | None = None
+    created_by_name: str | None = None
+
+
+async def attachment_responses(
+    db: AsyncSession, atts: list[Attachment]
+) -> list[AttachmentResponse]:
+    """Serialise attachments with their uploader's name — one user
+    lookup for the whole list, not one per row."""
+    names = await user_names(db, (a.created_by for a in atts))
+    out = []
+    for a in atts:
+        r = AttachmentResponse.model_validate(a)
+        if a.created_by is not None:
+            r.created_by_name = names.get(a.created_by)
+        out.append(r)
+    return out
 
 
 class AttachmentRegisterResponse(BaseModel):
@@ -140,12 +160,31 @@ async def _resolve_attachment(
     attachment_id: uuid.UUID,
     minimum: str = SPACE_ROLE_VIEWER,
 ) -> Attachment:
+    att, _item = await _resolve_attachment_and_item(db, user, attachment_id, minimum)
+    return att
+
+
+async def _resolve_attachment_and_item(
+    db: AsyncSession,
+    user: User,
+    attachment_id: uuid.UUID,
+    minimum: str = SPACE_ROLE_VIEWER,
+) -> tuple[Attachment, Item]:
+    """`_resolve_attachment`, plus the item — whose space the audit log
+    files attachment events under."""
     att = await db.get(Attachment, attachment_id)
     if att is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Attachment not found")
     # Re-using the item resolver keeps the auth check in one place.
-    await _resolve_item(db, user, att.item_id, minimum)
-    return att
+    item = await _resolve_item(db, user, att.item_id, minimum)
+    return att, item
+
+
+def _read_details(item: Item, version: str | None) -> dict[str, str]:
+    details = {"item_id": str(item.id)}
+    if version is not None:
+        details["version"] = version
+    return details
 
 
 @router.get(
@@ -156,14 +195,14 @@ async def list_attachments(
     item_id: uuid.UUID,
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
-) -> list[Attachment]:
+) -> list[AttachmentResponse]:
     await _resolve_item(db, user, item_id)
     result = await db.execute(
         select(Attachment)
         .where(Attachment.item_id == item_id)
         .order_by(Attachment.created_at)
     )
-    return list(result.scalars().all())
+    return await attachment_responses(db, list(result.scalars().all()))
 
 
 @router.post(
@@ -194,7 +233,7 @@ async def register_attachment(
     await db.refresh(att)
     upload_url = await storage.presign_upload(storage_key)
     return AttachmentRegisterResponse(
-        attachment=AttachmentResponse.model_validate(att),
+        attachment=(await attachment_responses(db, [att]))[0],
         upload_url=upload_url,
     )
 
@@ -281,10 +320,11 @@ async def get_attachment(
     attachment_id: uuid.UUID,
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
-) -> Attachment:
+) -> AttachmentResponse:
     """One attachment's row. The reader is addressed by attachment id
     alone, and this is how it finds the item the PDF belongs to."""
-    return await _resolve_attachment(db, user, attachment_id)
+    att = await _resolve_attachment(db, user, attachment_id)
+    return (await attachment_responses(db, [att]))[0]
 
 
 @router.get(
@@ -307,9 +347,27 @@ async def download_attachment(
         ),
     ] = None,
 ) -> AttachmentDownloadResponse:
-    att = await _resolve_attachment(db, user, attachment_id)
+    """A presigned URL for the reader to load the PDF from.
+
+    Logged as a *view*: the reader is this route's only caller in the
+    SPA, and it asks once per document open (or version switch) — pdf.js
+    then fetches pages and ranges straight from storage, so nothing here
+    repeats per page. The explicit Download button goes through `/file`,
+    which is logged as a download.
+    """
+    att, item = await _resolve_attachment_and_item(db, user, attachment_id)
     storage_key, _ = await resolve_version(db, att, version)
     url = await storage.presign_download(storage_key)
+    await record_read(
+        db,
+        user,
+        AuditAction.attachment_view,
+        space_id=item.space_id,
+        target_type="attachment",
+        target_id=att.id,
+        label=att.filename,
+        details=_read_details(item, version),
+    )
     return AttachmentDownloadResponse(url=url)
 
 
@@ -328,7 +386,7 @@ async def stream_attachment(
 
     Signs for the server-side endpoint, not the browser-facing one: this
     process performs the GET itself, so the URL never leaves the server."""
-    att = await _resolve_attachment(db, user, attachment_id)
+    att, item = await _resolve_attachment_and_item(db, user, attachment_id)
     storage_key, _ = await resolve_version(db, att, version)
     presigned = await storage.presign_download_internal(storage_key)
 
@@ -341,6 +399,23 @@ async def stream_attachment(
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY, "Failed to fetch from storage"
         )
+    # Logged once storage has answered, so a failed fetch isn't recorded
+    # as a file that left.
+    try:
+        await record_read(
+            db,
+            user,
+            AuditAction.attachment_download,
+            space_id=item.space_id,
+            target_type="attachment",
+            target_id=att.id,
+            label=att.filename,
+            details=_read_details(item, version),
+        )
+    except BaseException:
+        await upstream.aclose()
+        await client.aclose()
+        raise
 
     async def body() -> AsyncIterator[bytes]:
         try:
@@ -455,13 +530,31 @@ async def complete_attachment(
     attachment_id: uuid.UUID,
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
-) -> Attachment:
+) -> AttachmentResponse:
     """SPA-side parity with /api/v1/uploads/{id}/complete: the browser
     PUTs the body to the presigned URL, then calls this so the row
     stops looking pending."""
-    att = await _resolve_attachment(db, user, attachment_id, SPACE_ROLE_EDITOR)
+    att, item = await _resolve_attachment_and_item(
+        db, user, attachment_id, SPACE_ROLE_EDITOR
+    )
     if att.uploaded_at is None:
         att.uploaded_at = datetime.now(UTC)
+        # The upload is logged here, when it's confirmed — registering a
+        # row is only an intent, and a repeat /complete is a no-op.
+        record(
+            db,
+            user,
+            AuditAction.attachment_upload,
+            space_id=item.space_id,
+            target_type="attachment",
+            target_id=att.id,
+            label=att.filename,
+            details={
+                "item_id": str(item.id),
+                "content_type": att.content_type,
+                "size_bytes": att.size_bytes,
+            },
+        )
         await extraction.mark_and_enqueue(att)
         # Eagerly snapshot the just-uploaded blob to its `.original`
         # sibling so any later worker rewrite (OCR, future passes) is
@@ -499,7 +592,7 @@ async def complete_attachment(
                 )
         await db.commit()
         await db.refresh(att)
-    return att
+    return (await attachment_responses(db, [att]))[0]
 
 
 @router.delete(
@@ -511,7 +604,9 @@ async def delete_attachment(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
-    att = await _resolve_attachment(db, user, attachment_id, SPACE_ROLE_EDITOR)
+    att, item = await _resolve_attachment_and_item(
+        db, user, attachment_id, SPACE_ROLE_EDITOR
+    )
     # Best-effort: if an object isn't there, drop the row anyway so
     # the user can recover from a half-done upload. The processing
     # row + derivation rows cascade via FK; we just have to clean up
@@ -536,5 +631,15 @@ async def delete_attachment(
             # land when we wire structlog in the broader observability
             # pass.
             pass
+    record(
+        db,
+        user,
+        AuditAction.attachment_delete,
+        space_id=item.space_id,
+        target_type="attachment",
+        target_id=att.id,
+        label=att.filename,
+        details={"item_id": str(item.id)},
+    )
     await db.delete(att)
     await db.commit()

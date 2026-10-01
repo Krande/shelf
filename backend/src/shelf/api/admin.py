@@ -14,17 +14,19 @@ declines to serve index.html for a fixed prefix tuple; a top-level
 """
 
 import uuid
-from typing import Annotated, Literal
+from datetime import datetime
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth.provisioning import create_user_with_personal_space
 from ..auth.roles import require_admin
 from ..db import get_session
-from ..models import ROLE_ADMIN, User
+from ..models import ROLE_ADMIN, AuditEvent, Space, User
+from ..services.audit import AuditAction, record
 
 router = APIRouter(tags=["admin"])
 
@@ -122,7 +124,7 @@ def _clean_email(raw: str) -> str:
 )
 async def create_user(
     payload: CreateUserRequest,
-    _admin: Annotated[User, Depends(require_admin)],
+    admin: Annotated[User, Depends(require_admin)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> AdminUserResponse:
     """Pre-provision an account from an email address.
@@ -157,6 +159,15 @@ async def create_user(
     user = await create_user_with_personal_space(
         db, email=email, display_name=display_name, role=payload.role
     )
+    record(
+        db,
+        admin,
+        AuditAction.user_create,
+        target_type="user",
+        target_id=user.id,
+        label=user.email,
+        details={"role": payload.role},
+    )
     await db.commit()
     await db.refresh(user)
     return _to_response(user)
@@ -189,12 +200,15 @@ async def update_user(
     if user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
 
+    changes: dict[str, Any] = {}
     if payload.display_name is not None:
         display_name = payload.display_name.strip()
         if not display_name:
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST, "A display name cannot be empty"
             )
+        if display_name != user.display_name:
+            changes["display_name"] = [user.display_name, display_name]
         user.display_name = display_name
 
     if payload.role is not None and user.role != payload.role:
@@ -215,8 +229,144 @@ async def update_user(
                     status.HTTP_409_CONFLICT,
                     "Cannot demote the last remaining admin",
                 )
+        changes["role"] = [user.role, payload.role]
         user.role = payload.role
 
+    if changes:
+        record(
+            db,
+            admin,
+            AuditAction.user_update,
+            target_type="user",
+            target_id=user.id,
+            label=user.email,
+            details=changes,
+        )
     await db.commit()
     await db.refresh(user)
     return _to_response(user)
+
+
+# ── Audit log ────────────────────────────────────────────────────────────────
+
+
+class AuditEventResponse(BaseModel):
+    id: str
+    created_at: str
+    action: str
+    via: str
+    actor_id: str | None
+    # The account's current name when it still exists, else the email
+    # captured when the event was written.
+    actor_name: str | None
+    actor_email: str | None
+    space_id: str | None
+    space_name: str | None
+    target_type: str | None
+    target_id: str | None
+    target_label: str | None
+    details: dict[str, Any] | None
+
+
+class AuditPage(BaseModel):
+    events: list[AuditEventResponse]
+    # Pass back as `before` for the next (older) page; null at the end.
+    next: str | None
+
+
+def _cursor(event: AuditEvent) -> str:
+    return f"{event.created_at.isoformat()}_{event.id}"
+
+
+def _parse_cursor(raw: str) -> tuple[datetime, uuid.UUID]:
+    try:
+        stamp, _, ident = raw.rpartition("_")
+        return datetime.fromisoformat(stamp), uuid.UUID(ident)
+    except ValueError:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Bad cursor") from None
+
+
+@router.get("/api/admin/audit/actions", response_model=list[str])
+async def list_audit_actions(
+    _admin: Annotated[User, Depends(require_admin)],
+) -> list[str]:
+    """Every action the log can hold, for the filter picker."""
+    return [str(a) for a in AuditAction]
+
+
+@router.get("/api/admin/audit", response_model=AuditPage)
+async def list_audit_events(
+    _admin: Annotated[User, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    before: str | None = None,
+    # An exact action, or a family when it ends in "." (`item.`).
+    action: str | None = None,
+    actor_id: uuid.UUID | None = None,
+    space_id: uuid.UUID | None = None,
+    target_id: uuid.UUID | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> AuditPage:
+    """Newest first, a page at a time.
+
+    Keyset-paginated on (created_at, id) rather than by offset: the log
+    only ever grows, and an offset would shift under the reader as new
+    events arrive at the top.
+    """
+    stmt = (
+        select(AuditEvent, User.display_name, Space.name)
+        .outerjoin(User, User.id == AuditEvent.actor_id)
+        .outerjoin(Space, Space.id == AuditEvent.space_id)
+    )
+    if action:
+        if action.endswith("."):
+            stmt = stmt.where(AuditEvent.action.startswith(action, autoescape=True))
+        else:
+            stmt = stmt.where(AuditEvent.action == action)
+    if actor_id:
+        stmt = stmt.where(AuditEvent.actor_id == actor_id)
+    if space_id:
+        stmt = stmt.where(AuditEvent.space_id == space_id)
+    if target_id:
+        stmt = stmt.where(AuditEvent.target_id == target_id)
+    if since:
+        stmt = stmt.where(AuditEvent.created_at >= since)
+    if until:
+        stmt = stmt.where(AuditEvent.created_at < until)
+    if before:
+        at, ident = _parse_cursor(before)
+        stmt = stmt.where(
+            or_(
+                AuditEvent.created_at < at,
+                and_(AuditEvent.created_at == at, AuditEvent.id < ident),
+            )
+        )
+    stmt = stmt.order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
+    # One extra row says whether there is a next page without a count.
+    rows = (await db.execute(stmt.limit(limit + 1))).all()
+    more = len(rows) > limit
+    rows = rows[:limit]
+
+    events = [
+        AuditEventResponse(
+            id=str(e.id),
+            created_at=e.created_at.isoformat(),
+            action=e.action,
+            via=e.via,
+            actor_id=str(e.actor_id) if e.actor_id else None,
+            actor_name=actor_name or e.actor_email,
+            actor_email=e.actor_email,
+            space_id=str(e.space_id) if e.space_id else None,
+            space_name=space_name,
+            target_type=e.target_type,
+            target_id=str(e.target_id) if e.target_id else None,
+            target_label=e.target_label,
+            details=e.details,
+        )
+        for e, actor_name, space_name in rows
+    ]
+    return AuditPage(
+        events=events,
+        next=_cursor(rows[-1][0]) if more and rows else None,
+    )

@@ -13,6 +13,7 @@ import {
   KeyRound,
   Library,
   Palette,
+  ScrollText,
   SlidersHorizontal,
   UserRound,
   Users,
@@ -21,6 +22,7 @@ import AppShell from "@/components/layout/AppShell";
 import AccountSection from "@/components/settings/AccountSection";
 import AdminSection from "@/components/settings/AdminSection";
 import AppearanceSection from "@/components/settings/AppearanceSection";
+import AuditSection from "@/components/settings/AuditSection";
 import OptionsSection from "@/components/settings/OptionsSection";
 import ExtractionSection from "@/components/settings/ExtractionSection";
 import ProcessingSection from "@/components/settings/ProcessingSection";
@@ -45,6 +47,7 @@ const TABS = [
   // the role it takes to see it — that's what `adminOnly` is for. The
   // route segment stays "admin" so existing links keep working.
   { id: "admin", label: "Users", Icon: Users, adminOnly: true },
+  { id: "audit", label: "Audit log", Icon: ScrollText, adminOnly: true },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
@@ -121,6 +124,7 @@ export default function SettingsPage() {
         )}
         {active.id === "tokens" && <TokenSection />}
         {active.id === "admin" && <AdminSection user={me} />}
+        {active.id === "audit" && <AuditSection />}
 
         <p className="mt-6 text-xs" style={{ color: "var(--color-text-muted)" }}>
           Shelf {__APP_VERSION__}
