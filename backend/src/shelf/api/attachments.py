@@ -297,22 +297,47 @@ async def resolve_version(
             )
         return row.storage_key, str(row.id)
 
-    # Default: latest outline > latest ocr > original.
-    for kind in ("outline", "ocr"):
-        latest = (
-            await db.execute(
-                select(AttachmentDerivation)
-                .where(
-                    AttachmentDerivation.attachment_id == attachment.id,
-                    AttachmentDerivation.kind == kind,
-                )
-                .order_by(AttachmentDerivation.created_at.desc())
-                .limit(1)
-            )
-        ).scalar_one_or_none()
-        if latest is not None:
-            return latest.storage_key, str(latest.id)
-    return attachment.storage_key, "original"
+    return (await current_versions(db, [attachment]))[attachment.id]
+
+
+# Which derivation kinds outrank the original, best first.
+_CURRENT_KINDS = ("outline", "ocr")
+
+
+async def current_versions(
+    db: AsyncSession, attachments: list[Attachment]
+) -> dict[uuid.UUID, tuple[str, str]]:
+    """``resolve_version(..., None)`` for many attachments in one query:
+    latest outline > latest ocr > original, as ``(storage_key,
+    version_label)`` per attachment id.
+
+    A bulk download of a few hundred PDFs would otherwise spend up to two
+    round trips per file deciding which blob to read.
+    """
+    if not attachments:
+        return {}
+    rows = await db.execute(
+        select(AttachmentDerivation)
+        .where(
+            AttachmentDerivation.attachment_id.in_([a.id for a in attachments]),
+            AttachmentDerivation.kind.in_(_CURRENT_KINDS),
+        )
+        .order_by(AttachmentDerivation.created_at.desc())
+    )
+    best: dict[uuid.UUID, AttachmentDerivation] = {}
+    for d in rows.scalars().all():
+        # Newest first, so the first of each kind is its latest; a
+        # better-ranked kind replaces whatever was picked before it.
+        cur = best.get(d.attachment_id)
+        rank = _CURRENT_KINDS.index
+        if cur is None or rank(d.kind) < rank(cur.kind):
+            best[d.attachment_id] = d
+    return {
+        a.id: (best[a.id].storage_key, str(best[a.id].id))
+        if a.id in best
+        else (a.storage_key, "original")
+        for a in attachments
+    }
 
 
 @router.get("/api/attachments/{attachment_id}", response_model=AttachmentResponse)

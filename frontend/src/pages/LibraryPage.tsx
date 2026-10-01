@@ -1399,13 +1399,9 @@ export default function LibraryPage() {
   // Bulk-download the PDFs of every checked document as a single ZIP.
   const downloadPdfs = useMutation({
     mutationFn: () => downloadItemPdfsZip(slug!, [...checkedIds]),
-    onSuccess: ({ skipped }) => {
-      if (skipped > 0) {
-        window.alert(
-          `${skipped} PDF${skipped === 1 ? "" : "s"} could not be fetched ` +
-            "from storage and were left out (see _MISSING_FILES.txt in the " +
-            "ZIP).",
-        );
+    onSuccess: ({ files }) => {
+      if (files === 0) {
+        window.alert("Nothing to download — no PDFs in the selection.");
       }
     },
     onError: (e: Error) => window.alert(`Download failed: ${e.message}`),
