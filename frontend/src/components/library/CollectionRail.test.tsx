@@ -236,6 +236,30 @@ describe("profiles", () => {
 
 });
 
+describe("resizing", () => {
+  it("widens from the keyboard, remembers it, and resets on Home", async () => {
+    localStorage.removeItem("shelf.collectionRailWidth");
+    render(null);
+    await screen.findByText("Reports");
+    const handle = screen.getByRole("separator", {
+      name: /resize the collections panel/i,
+    });
+    const rail = handle.parentElement!;
+    expect(rail.style.width).toBe("");
+
+    handle.focus();
+    // jsdom lays nothing out, so the rail measures 0 and the nudge
+    // lands on the minimum.
+    await userEvent.keyboard("{ArrowRight}");
+    expect(rail.style.width).toBe("160px");
+    expect(localStorage.getItem("shelf.collectionRailWidth")).toBe("160");
+
+    await userEvent.keyboard("{Home}");
+    expect(rail.style.width).toBe("");
+    expect(localStorage.getItem("shelf.collectionRailWidth")).toBeNull();
+  });
+});
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
