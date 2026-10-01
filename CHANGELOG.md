@@ -2,6 +2,13 @@
 
 
 
+## v0.17.0 (2026-10-01)
+
+### Feature
+
+* feat: re-importable archives, whole-space download, versioned index.json (#27) ([`b9f38aa`](https://github.com/Krande/shelf/commit/b9f38aa103a2388b496c8ddc6c05e27eedf35a42))
+
+
 ## v0.16.2 (2026-10-01)
 
 ### Fix
