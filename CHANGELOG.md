@@ -2,6 +2,15 @@
 
 
 
+## v0.18.0 (2026-10-01)
+
+### Feature
+
+* feat: convert Word, PowerPoint, spreadsheet and image uploads to PDF (#28)
+
+Co-authored-by: Claude Opus 5.5 &lt;noreply@anthropic.com&gt; ([`3837b9a`](https://github.com/Krande/shelf/commit/3837b9a7051a68d6f0a6fc889589b2ab5d89edaf))
+
+
 ## v0.17.0 (2026-10-01)
 
 ### Feature
