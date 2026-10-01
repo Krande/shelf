@@ -16,12 +16,23 @@ import { uploadAttachment } from "./attachments";
  * the server answers with only what isn't there yet.
  */
 
+export interface ArchiveUploadAnnotation {
+  kind: string;
+  page_number: number;
+  rects: number[][];
+  color: string;
+  text: string | null;
+  visibility: string;
+}
+
 export interface ArchiveUpload {
   path: string;
   item_id: string;
   filename: string;
   content_type: string;
   size: number | null;
+  /** Restored onto the new attachment right after it uploads. */
+  annotations: ArchiveUploadAnnotation[];
 }
 
 export interface ArchiveImportPlan {
@@ -31,6 +42,8 @@ export interface ArchiveImportPlan {
   items_created: number;
   items_existing: number;
   files_existing: number;
+  notes_created: number;
+  revisions_linked: number;
   uploads: ArchiveUpload[];
 }
 
@@ -39,6 +52,9 @@ export interface ArchiveImportResult {
   uploaded: number;
   /** "path: reason" for each PDF that didn't make it. */
   failed: string[];
+  /** "path: reason" for each PDF that uploaded but whose highlights
+   *  couldn't be restored. */
+  unannotated: string[];
 }
 
 export interface ArchiveImportProgress {
@@ -110,6 +126,7 @@ export async function importArchive(
     const plan = await planArchiveImport(slug, index, collectionId);
 
     const failed: string[] = [];
+    const unannotated: string[] = [];
     let uploaded = 0;
     let next = 0;
     const total = plan.uploads.length;
@@ -123,11 +140,26 @@ export async function importArchive(
           const blob = await entry.getData(
             new zip.BlobWriter(up.content_type),
           );
-          await uploadAttachment(
+          const att = await uploadAttachment(
             up.item_id,
             new File([blob], up.filename, { type: up.content_type }),
           );
           uploaded += 1;
+          if (up.annotations?.length) {
+            try {
+              await apiFetch(
+                `/api/attachments/${encodeURIComponent(att.id)}/annotations/bulk`,
+                {
+                  method: "POST",
+                  body: JSON.stringify({ annotations: up.annotations }),
+                },
+              );
+            } catch (e) {
+              // The PDF itself is in; say what didn't come with it. A
+              // re-import won't retry these: the file is there now.
+              unannotated.push(`${up.path}: ${(e as Error).message}`);
+            }
+          }
         } catch (e) {
           failed.push(`${up.path}: ${(e as Error).message}`);
         }
@@ -141,7 +173,7 @@ export async function importArchive(
     await Promise.all(
       Array.from({ length: Math.min(UPLOAD_SLOTS, total) }, worker),
     );
-    return { plan, uploaded, failed };
+    return { plan, uploaded, failed, unannotated };
   } finally {
     await reader.close();
   }
@@ -158,6 +190,18 @@ export function describeImport(r: ArchiveImportResult): string {
     `PDFs: ${r.uploaded} uploaded` +
       (p.files_existing ? `, ${p.files_existing} already here` : ""),
   ];
+  if (p.notes_created) lines.push(`Notes: ${p.notes_created} restored`);
+  if (p.revisions_linked) {
+    lines.push(`Standard revisions: ${p.revisions_linked} linked`);
+  }
+  if (r.unannotated.length > 0) {
+    lines.push(
+      "",
+      `${r.unannotated.length} PDF${r.unannotated.length === 1 ? "" : "s"} ` +
+        "uploaded without their highlights:",
+      ...r.unannotated.slice(0, 10),
+    );
+  }
   if (r.failed.length > 0) {
     lines.push(
       "",

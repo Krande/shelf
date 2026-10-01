@@ -141,6 +141,25 @@ export function getPageDims(
 }
 
 /**
+ * Optional parts of an archive, all off unless asked for. Notes and
+ * annotations are only ever the downloading user's own; private ones
+ * stay marked private in the archive.
+ */
+export interface ArchiveOptions {
+  notes?: boolean;
+  annotations?: boolean;
+  revisions?: boolean;
+}
+
+function archiveOptionsQuery(o: ArchiveOptions): string {
+  return (
+    (o.notes ? "&include_notes=true" : "") +
+    (o.annotations ? "&include_annotations=true" : "") +
+    (o.revisions ? "&include_revisions=true" : "")
+  );
+}
+
+/**
  * Download the PDFs of several items as one flat ZIP.
  *
  * Resolves to the number of PDFs the archive will hold; 0 means there
@@ -149,10 +168,12 @@ export function getPageDims(
 export async function downloadItemPdfsZip(
   slug: string,
   itemIds: string[],
+  options: ArchiveOptions = {},
 ): Promise<{ files: number }> {
   return downloadPdfsZip(
     slug,
     itemIds.map((id) => `item=${encodeURIComponent(id)}`).join("&"),
+    options,
   );
 }
 
@@ -167,10 +188,12 @@ export async function downloadItemPdfsZip(
 export async function downloadCollectionPdfsZip(
   slug: string,
   collectionId: string,
+  options: ArchiveOptions = {},
 ): Promise<{ files: number }> {
   return downloadPdfsZip(
     slug,
     `collection=${encodeURIComponent(collectionId)}`,
+    options,
   );
 }
 
@@ -180,8 +203,9 @@ export async function downloadCollectionPdfsZip(
  */
 export async function downloadSpacePdfsZip(
   slug: string,
+  options: ArchiveOptions = {},
 ): Promise<{ files: number }> {
-  return downloadPdfsZip(slug, "whole_space=true");
+  return downloadPdfsZip(slug, "whole_space=true", options);
 }
 
 /**
@@ -201,6 +225,7 @@ export async function downloadSpacePdfsZip(
 async function downloadPdfsZip(
   slug: string,
   query: string,
+  options: ArchiveOptions,
 ): Promise<{ files: number }> {
   const base = `/api/spaces/${encodeURIComponent(slug)}/attachments-zip`;
   const res = await fetch(`${base}/summary?${query}`, {
@@ -219,7 +244,7 @@ async function downloadPdfsZip(
   const { files } = (await res.json()) as { items: number; files: number };
   if (files === 0) return { files };
   const a = document.createElement("a");
-  a.href = `${base}?${query}`;
+  a.href = `${base}?${query}${archiveOptionsQuery(options)}`;
   // The server's Content-Disposition names the file; `download` just
   // keeps a failed response from replacing the app in this tab.
   a.download = "";

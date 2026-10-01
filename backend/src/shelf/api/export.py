@@ -28,11 +28,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import __version__, archive_format
 from ..archive_format import (
+    ArchiveAnnotation,
     ArchiveCollection,
     ArchiveFile,
+    ArchiveIncluded,
     ArchiveIndex,
     ArchiveItem,
     ArchiveMissing,
+    ArchiveNote,
+    ArchiveRevision,
     ArchiveSource,
     ArchiveSpace,
     ArchiveTag,
@@ -41,12 +45,17 @@ from ..auth.deps import get_current_user
 from ..auth.spaces import SPACE_ROLE_VIEWER, require_space_role
 from ..db import get_session
 from ..models import (
+    Annotation,
     Attachment,
+    AttachmentProcessing,
     Collection,
     Item,
     ItemCollection,
     ItemTag,
+    Note,
     Space,
+    StandardFamily,
+    StandardRevision,
     Tag,
     User,
 )
@@ -59,7 +68,6 @@ from ..services.export_renderers import (
     render_zotero_rdf,
 )
 from ..services.zip_stream import ZipStream
-from .attachments import current_versions
 
 log = logging.getLogger(__name__)
 
@@ -562,9 +570,9 @@ class _ZipFile:
     attachment_id: uuid.UUID
     filename: str
     content_type: str
+    # Of the original as uploaded; see _plan_pdf_zip.
     storage_key: str
-    # "original", or the derivation kind the bytes come from.
-    version: str
+    annotations: list[ArchiveAnnotation]
     folder: str
 
 
@@ -582,14 +590,22 @@ async def _plan_pdf_zip(
     item: list[uuid.UUID] | None,
     collection: uuid.UUID | None,
     whole_space: bool = False,
+    *,
+    user: User,
+    extras: ArchiveIncluded | None = None,
 ) -> _ZipPlan:
     """Everything the archive needs from the database, in a handful of
     bulk queries, so streaming touches storage only.
+
+    ``extras`` opts into the user's own notes and annotations and the
+    documents' standard revision links; off by default, since an archive
+    is often made to hand to someone else.
 
     That split matters beyond speed: the response outlives the request
     handler, and a download that held a database session open for as
     long as a slow client takes to pull a few GB would starve the pool.
     """
+    extras = extras or ArchiveIncluded()
     if sum([bool(item), collection is not None, whole_space]) != 1:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
@@ -668,14 +684,90 @@ async def _plan_pdf_zip(
             tags_by_item.setdefault(item_id, []).append(name)
             tags.setdefault(name, ArchiveTag(name=name, color=color))
 
-    # The same "current best" blob the single-file download serves
-    # (latest outline > latest OCR > original). Reading ``storage_key``
-    # directly would miss every attachment whose original was superseded
-    # by a derivation -- its original object may no longer exist.
+    # Always the original as uploaded, never Shelf's own OCR'd or
+    # outlined derivation: an archive is the documents, and the instance
+    # that imports it does its own processing. The as-uploaded bytes are
+    # snapshotted to ``<key>.original`` when an upload completes, so that
+    # copy is preferred where one was made -- older versions rewrote the
+    # live object in place. Otherwise the live object is the original;
+    # derivations have their own keys and never touch it.
     pdfs = [a for it in ordered for a in atts_by_item.get(it.id, [])]
-    current = {}
-    for att_batch in batched(pdfs, _IN_BATCH):
-        current.update(await current_versions(db, list(att_batch)))
+    preserved: set[uuid.UUID] = set()
+    annotations: dict[uuid.UUID, list[ArchiveAnnotation]] = {}
+    for att_batch in batched([a.id for a in pdfs], _IN_BATCH):
+        preserved.update(
+            (
+                await db.execute(
+                    select(AttachmentProcessing.attachment_id).where(
+                        AttachmentProcessing.attachment_id.in_(att_batch),
+                        AttachmentProcessing.original_preserved_at.is_not(None),
+                    )
+                )
+            ).scalars()
+        )
+        if extras.annotations:
+            for a in (
+                await db.execute(
+                    select(Annotation)
+                    .where(
+                        Annotation.attachment_id.in_(att_batch),
+                        Annotation.created_by == user.id,
+                    )
+                    .order_by(Annotation.page_number, Annotation.created_at)
+                )
+            ).scalars():
+                annotations.setdefault(a.attachment_id, []).append(
+                    ArchiveAnnotation(
+                        kind=a.kind,
+                        page_number=a.page_number,
+                        rects=a.rects,
+                        color=a.color,
+                        text=a.text,
+                        visibility=a.visibility,
+                        created_at=a.created_at,
+                        updated_at=a.updated_at,
+                    )
+                )
+
+    notes: dict[uuid.UUID, list[ArchiveNote]] = {}
+    revisions: dict[uuid.UUID, ArchiveRevision] = {}
+    for batch in batched(item_ids, _IN_BATCH):
+        if extras.notes:
+            for n in (
+                await db.execute(
+                    select(Note)
+                    .where(Note.item_id.in_(batch), Note.author_id == user.id)
+                    .order_by(Note.created_at)
+                )
+            ).scalars():
+                notes.setdefault(n.item_id, []).append(
+                    ArchiveNote(
+                        content_html=n.content_html,
+                        content_text=n.content_text,
+                        visibility=n.visibility,
+                        created_at=n.created_at,
+                        updated_at=n.updated_at,
+                    )
+                )
+        if extras.standard_revisions:
+            for rev, fam in (
+                await db.execute(
+                    select(StandardRevision, StandardFamily)
+                    .join(
+                        StandardFamily,
+                        StandardFamily.id == StandardRevision.family_id,
+                    )
+                    .where(StandardRevision.item_id.in_(batch))
+                )
+            ).tuples():
+                revisions[rev.item_id] = ArchiveRevision(
+                    body=fam.body,
+                    designation=fam.designation,
+                    family_title=fam.title,
+                    label=rev.label,
+                    issued_on=rev.issued_on,
+                    superseded=rev.superseded,
+                )
 
     index = ArchiveIndex(
         format=archive_format.FORMAT,
@@ -688,6 +780,7 @@ async def _plan_pdf_zip(
         scope=(
             "space" if whole_space else "collection" if collection else "items"
         ),
+        included=extras,
         root_collection_id=collection,
         collections=tree.collections if tree else [],
         tags=sorted(tags.values(), key=lambda t: t.name.casefold()),
@@ -699,6 +792,8 @@ async def _plan_pdf_zip(
                 data=dict(it.data) if isinstance(it.data, dict) else {},
                 tags=tags_by_item.get(it.id, []),
                 collection_ids=tree.memberships.get(it.id, []) if tree else [],
+                notes=notes.get(it.id, []),
+                revision=revisions.get(it.id),
             )
             for it in ordered
         ],
@@ -711,8 +806,12 @@ async def _plan_pdf_zip(
                 attachment_id=att.id,
                 filename=att.filename,
                 content_type=att.content_type,
-                storage_key=current[att.id].storage_key,
-                version=current[att.id].kind,
+                storage_key=(
+                    storage.original_key(att.storage_key)
+                    if att.id in preserved
+                    else att.storage_key
+                ),
+                annotations=annotations.get(att.id, []),
                 folder=folder[it.id],
             )
             for it in ordered
@@ -804,7 +903,7 @@ async def _stream_pdf_zip(plan: _ZipPlan) -> AsyncIterator[bytes]:
                     content_type=f.content_type,
                     size=tally.size,
                     sha256=tally.sha256.hexdigest(),
-                    version=f.version,
+                    annotations=f.annotations,
                 )
             )
 
@@ -865,7 +964,9 @@ async def summarize_attachments_zip(
     bad selection -- are caught here instead.
     """
     space = await _resolve_space(db, user, slug)
-    plan = await _plan_pdf_zip(db, space, item, collection, whole_space)
+    plan = await _plan_pdf_zip(
+        db, space, item, collection, whole_space, user=user
+    )
     return PdfZipSummary(items=len(plan.items), files=len(plan.files))
 
 
@@ -877,6 +978,17 @@ async def download_attachments_zip(
     item: Annotated[list[uuid.UUID] | None, _ITEM_QUERY] = None,
     collection: Annotated[uuid.UUID | None, _COLLECTION_QUERY] = None,
     whole_space: Annotated[bool, _WHOLE_SPACE_QUERY] = False,
+    include_notes: Annotated[
+        bool, Query(description="Add the caller's own notes on each document.")
+    ] = False,
+    include_annotations: Annotated[
+        bool,
+        Query(description="Add the caller's own highlights and pins on each PDF."),
+    ] = False,
+    include_revisions: Annotated[
+        bool,
+        Query(description="Add each standard's family and edition details."),
+    ] = False,
 ) -> StreamingResponse:
     """Bundle the PDFs of a selection of documents, a collection, or a
     whole space into one ZIP, with an ``index.json`` (format
@@ -886,13 +998,24 @@ async def download_attachments_zip(
     otherwise. Used by the library's bulk-select "Download PDFs", by
     "Download PDFs" on a collection, and by "Download space".
 
+    Every PDF is the original as uploaded, never an OCR'd or outlined
+    derivation. The caller's own notes and annotations, and standard
+    revision links, are added on request.
+
     Streamed: the first bytes go out as soon as the first PDF is opened,
     and nothing is held beyond the chunk in flight. Non-PDF attachments
     are skipped; a missing blob is logged and listed in
     _MISSING_FILES.txt rather than failing the whole download. 404 if
     none of the selected items has a PDF."""
     space = await _resolve_space(db, user, slug)
-    plan = await _plan_pdf_zip(db, space, item, collection, whole_space)
+    extras = ArchiveIncluded(
+        notes=include_notes,
+        annotations=include_annotations,
+        standard_revisions=include_revisions,
+    )
+    plan = await _plan_pdf_zip(
+        db, space, item, collection, whole_space, user=user, extras=extras
+    )
     if not plan.items:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No matching items")
     if not plan.files:
@@ -908,6 +1031,9 @@ async def download_attachments_zip(
         "items": len(plan.items),
         "files": len(plan.files),
     }
+    included = [k for k, v in extras.model_dump().items() if v]
+    if included:
+        details["included"] = included
     if collection is not None:
         coll = await db.get(Collection, collection)
         await record_read(

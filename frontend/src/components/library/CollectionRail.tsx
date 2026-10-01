@@ -30,6 +30,7 @@ import {
   updateCollection,
 } from "@/api/collections";
 import {
+  type ArchiveOptions,
   downloadCollectionPdfsZip,
   downloadSpacePdfsZip,
 } from "@/api/attachments";
@@ -45,6 +46,7 @@ import {
   isColumnKey,
   type ColumnKey,
 } from "@/lib/libraryColumns";
+import ArchiveDownloadDialog from "./ArchiveDownloadDialog";
 import ProfileModal from "./ProfileModal";
 
 /** Drag payload: a JSON array of item ids being filed into a folder. */
@@ -147,12 +149,16 @@ export default function CollectionRail({
   // long enough to be refused.
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const download = useMutation({
-    mutationFn: (c: Collection) => {
+    mutationFn: ({ c, options }: { c: Collection; options: ArchiveOptions }) => {
       setDownloadingId(c.id);
       // Zipped by the space the folder lives in: the archive is built
       // from that space's items, and an inherited folder's aren't this
       // one's.
-      return downloadCollectionPdfsZip(homeSpace(c)?.slug ?? slug!, c.id);
+      return downloadCollectionPdfsZip(
+        homeSpace(c)?.slug ?? slug!,
+        c.id,
+        options,
+      );
     },
     onSettled: () => setDownloadingId(null),
     onSuccess: ({ files }) => {
@@ -167,7 +173,8 @@ export default function CollectionRail({
   // collections as folders. Inherited documents belong to the space
   // they live in and are downloaded from there.
   const downloadSpace = useMutation({
-    mutationFn: () => downloadSpacePdfsZip(slug!),
+    mutationFn: (options: ArchiveOptions) =>
+      downloadSpacePdfsZip(slug!, options),
     onSuccess: ({ files }) => {
       if (files === 0) {
         window.alert("Nothing to download — no PDFs in this space.");
@@ -175,6 +182,11 @@ export default function CollectionRail({
     },
     onError: (e: Error) => window.alert(`Download failed: ${e.message}`),
   });
+
+  // Either download asks which optional parts to include first.
+  const [pendingDownload, setPendingDownload] = useState<
+    { kind: "collection"; c: Collection } | { kind: "space" } | null
+  >(null);
 
   // "Import archive": a ZIP from any of the downloads above, from this
   // instance or another. The target is chosen first (a collection's menu,
@@ -511,7 +523,7 @@ export default function CollectionRail({
                     disabled={downloadSpace.isPending}
                     onClick={() => {
                       setHeaderMenuAt(null);
-                      downloadSpace.mutate();
+                      setPendingDownload({ kind: "space" });
                     }}
                   />
                   {canEdit(browsedSpace) && (
@@ -559,6 +571,24 @@ export default function CollectionRail({
               if (file) runImport.mutate(file);
             }}
           />
+          {pendingDownload && (
+            <ArchiveDownloadDialog
+              title={
+                pendingDownload.kind === "space"
+                  ? `Download ${browsedSpace?.name ?? "this space"}`
+                  : `Download "${pendingDownload.c.name}"`
+              }
+              onCancel={() => setPendingDownload(null)}
+              onConfirm={(options) => {
+                if (pendingDownload.kind === "space") {
+                  downloadSpace.mutate(options);
+                } else {
+                  download.mutate({ c: pendingDownload.c, options });
+                }
+                setPendingDownload(null);
+              }}
+            />
+          )}
           {importProgress && (
             <p
               className="px-1 py-1 text-xs"
@@ -657,7 +687,7 @@ export default function CollectionRail({
                   remove.mutate(id);
                 }
               }}
-              onDownload={(c) => download.mutate(c)}
+              onDownload={(c) => setPendingDownload({ kind: "collection", c })}
               downloadingId={download.isPending ? downloadingId : null}
               onImport={(c) => pickArchive(c.id)}
               onDropItems={onDropItems}
@@ -708,7 +738,7 @@ export default function CollectionRail({
                   onMoveBy={() => {}}
                   onDrop={() => {}}
                   onDelete={() => {}}
-                  onDownload={(c) => download.mutate(c)}
+                  onDownload={(c) => setPendingDownload({ kind: "collection", c })}
                   downloadingId={download.isPending ? downloadingId : null}
                   onImport={() => {}}
                   onDropItems={() => {}}

@@ -9,17 +9,28 @@ each new version and the old ones are never edited.
 import hashlib
 import io
 import json
+import uuid
 import zipfile
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 from httpx import AsyncClient
 from obstore.store import MemoryStore
+from sqlalchemy import select
 
 from shelf.archive_format import ArchiveIndex, parse_index
 from shelf.config import settings
+from shelf.db import session_factory
+from shelf.models import (
+    Attachment,
+    AttachmentDerivation,
+    AttachmentProcessing,
+    StandardFamily,
+    StandardRevision,
+)
 from shelf.services import storage
 
 from .helpers import login, serve_objects
@@ -130,8 +141,10 @@ async def _import(
     return body
 
 
-async def _upload_all(client: AsyncClient, plan: dict[str, Any]) -> None:
-    """What the browser does with an import's answer."""
+async def _upload_all(client: AsyncClient, plan: dict[str, Any]) -> list[str]:
+    """What the browser does with an import's answer: upload each PDF,
+    then restore its annotations. Returns the new attachment ids."""
+    ids = []
     for up in plan["uploads"]:
         r = await client.post(
             f"/api/items/{up['item_id']}/attachments",
@@ -140,6 +153,14 @@ async def _upload_all(client: AsyncClient, plan: dict[str, Any]) -> None:
         assert r.status_code == 201, r.text
         att = r.json()["attachment"]["id"]
         assert (await client.post(f"/api/attachments/{att}/complete")).status_code == 200
+        if up.get("annotations"):
+            r = await client.post(
+                f"/api/attachments/{att}/annotations/bulk",
+                json={"annotations": up["annotations"]},
+            )
+            assert r.status_code == 201, r.text
+        ids.append(str(att))
+    return ids
 
 
 async def _tree(client: AsyncClient, slug: str) -> set[str]:
@@ -232,9 +253,201 @@ async def test_export_index_is_a_complete_v1_archive(
             body = zf.read(f.path)
             assert f.size == len(body)
             assert f.sha256 == hashlib.sha256(body).hexdigest()
-            assert f.version == "original"
+    # Nothing optional unless asked for.
+    assert index.included.model_dump() == {
+        "notes": False,
+        "annotations": False,
+        "standard_revisions": False,
+    }
     assert [f.path for f in alpha.files] == ["alpha.pdf"]
     assert [f.path for f in items[src["b"]].files] == ["Mid/Leaf/beta.pdf"]
+
+
+async def test_archives_hold_the_original_never_a_derivation(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The PDF in an archive is the one that was uploaded: not Shelf's
+    OCR'd or outlined version, and, where the live object was rewritten
+    in place by an older version, the preserved .original copy."""
+    await _admin(client, monkeypatch)
+    slug = await _space(client, "src")
+    item = await _item(client, slug, {"title": "Scanned"})
+    att_id = await _pdf(client, item, "scan.pdf")
+    async with session_factory() as db:
+        att = await db.get(Attachment, uuid.UUID(att_id))
+        assert att is not None
+        key = att.storage_key
+        db.add(
+            AttachmentDerivation(
+                attachment_id=att.id,
+                kind="ocr",
+                storage_key=storage.derived_key(key, "ocr"),
+                parent_storage_key=key,
+                engine="test",
+            )
+        )
+        await db.commit()
+
+    zf, _ = await _download(client, slug, item=[item])
+    assert zf.read("scan.pdf") == f"%PDF-1.4 bytes of {key}".encode()
+
+    async with session_factory() as db:
+        proc = await db.get(AttachmentProcessing, uuid.UUID(att_id))
+        if proc is None:
+            proc = AttachmentProcessing(attachment_id=uuid.UUID(att_id))
+            db.add(proc)
+        proc.original_preserved_at = datetime.now(UTC)
+        await db.commit()
+
+    zf, _ = await _download(client, slug, item=[item])
+    assert zf.read("scan.pdf") == f"%PDF-1.4 bytes of {key}.original".encode()
+
+
+async def _extras_source(client: AsyncClient) -> dict[str, str]:
+    """A standard with the admin's note and highlight on it, plus a note
+    by another member of the space."""
+    await login(client, "bob@example.com")
+    await login(client, ADMIN)
+    slug = await _space(client, "src")
+    r = await client.post(
+        f"/api/spaces/{slug}/members",
+        json={"email": "bob@example.com", "role": "editor"},
+    )
+    assert r.status_code in (200, 201), r.text
+    item = await _item(client, slug, {"title": "Design code"}, "standard")
+    att = await _pdf(client, item, "code.pdf")
+    r = await client.put(
+        f"/api/items/{item}/revision",
+        json={
+            "body": "EX",
+            "designation": "EX-100",
+            "label": "2023",
+            "issued_on": "2023-05-01",
+            "title": "Example design code",
+        },
+    )
+    assert r.status_code == 200, r.text
+    for html, vis in (("<p>Mine, shared</p>", "space"), ("<p>Mine, private</p>", "private")):
+        r = await client.post(
+            f"/api/items/{item}/notes", json={"content_html": html, "visibility": vis}
+        )
+        assert r.status_code == 201, r.text
+    r = await client.post(
+        f"/api/attachments/{att}/annotations",
+        json={
+            "kind": "highlight",
+            "page_number": 2,
+            "rects": [[10, 20, 30, 5]],
+            "color": "#00ff00",
+            "text": "key clause",
+            "visibility": "private",
+        },
+    )
+    assert r.status_code == 201, r.text
+
+    await login(client, "bob@example.com")
+    r = await client.post(
+        f"/api/items/{item}/notes", json={"content_html": "<p>Bob's</p>"}
+    )
+    assert r.status_code == 201, r.text
+    await login(client, ADMIN)
+    return {"slug": slug, "item": item, "att": att}
+
+
+async def test_notes_annotations_and_revisions_are_opt_in_and_your_own(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "admin_emails", [ADMIN])
+    src = await _extras_source(client)
+
+    _, plain = await _download(client, src["slug"], item=[src["item"]])
+    [it] = plain["items"]
+    assert it["notes"] == [] and it["revision"] is None
+    assert it["files"][0]["annotations"] == []
+
+    _, full = await _download(
+        client,
+        src["slug"],
+        item=[src["item"]],
+        include_notes=True,
+        include_annotations=True,
+        include_revisions=True,
+    )
+    assert full["included"] == {
+        "notes": True,
+        "annotations": True,
+        "standard_revisions": True,
+    }
+    [it] = full["items"]
+    # The exporter's own notes, private ones included; never Bob's.
+    assert sorted((n["content_html"], n["visibility"]) for n in it["notes"]) == [
+        ("<p>Mine, private</p>", "private"),
+        ("<p>Mine, shared</p>", "space"),
+    ]
+    [ann] = it["files"][0]["annotations"]
+    assert ann["page_number"] == 2 and ann["text"] == "key clause"
+    assert ann["visibility"] == "private"
+    assert it["revision"] == {
+        "body": "EX",
+        "designation": "EX-100",
+        "family_title": "Example design code",
+        "label": "2023",
+        "issued_on": "2023-05-01",
+        "superseded": False,
+    }
+
+
+async def test_import_restores_notes_annotations_and_revisions_once(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "admin_emails", [ADMIN])
+    src = await _extras_source(client)
+    _, index = await _download(
+        client,
+        src["slug"],
+        item=[src["item"]],
+        include_notes=True,
+        include_annotations=True,
+        include_revisions=True,
+    )
+    dst = await _space(client, "dst")
+
+    plan = await _import(client, dst, index)
+    assert plan["notes_created"] == 2
+    assert plan["revisions_linked"] == 1
+    [up] = plan["uploads"]
+    assert [a["text"] for a in up["annotations"]] == ["key clause"]
+    [new_att] = await _upload_all(client, plan)
+
+    new_item = up["item_id"]
+    notes = (await client.get(f"/api/items/{new_item}/notes")).json()
+    assert sorted((n["content_html"], n["visibility"]) for n in notes) == [
+        ("<p>Mine, private</p>", "private"),
+        ("<p>Mine, shared</p>", "space"),
+    ]
+    assert all(n["is_mine"] for n in notes)
+    anns = (await client.get(f"/api/attachments/{new_att}/annotations")).json()
+    assert [(a["page_number"], a["color"], a["visibility"]) for a in anns] == [
+        (2, "#00ff00", "private")
+    ]
+    # Joined the instance's existing family for EX-100, not a second one.
+    async with session_factory() as db:
+        rev = await db.get(StandardRevision, uuid.UUID(new_item))
+        assert rev is not None and rev.label == "2023"
+        fams = (
+            await db.execute(
+                select(StandardFamily).where(
+                    StandardFamily.body == "ex", StandardFamily.designation == "ex-100"
+                )
+            )
+        ).scalars().all()
+        assert len(fams) == 1 and rev.family_id == fams[0].id
+
+    again = await _import(client, dst, index)
+    assert again["notes_created"] == 0
+    assert again["revisions_linked"] == 0
+    assert again["uploads"] == []
+    assert len((await client.get(f"/api/items/{new_item}/notes")).json()) == 2
 
 
 def test_schema_file_matches_the_models() -> None:
@@ -540,6 +753,11 @@ async def test_every_released_format_still_imports(
     assert plan["items_created"] == expected["items"]
     assert sorted(u["path"] for u in plan["uploads"]) == sorted(expected["uploads"])
     assert await _tree(client, dst) == set(expected["tree"])
+    assert plan["notes_created"] == expected.get("notes", 0)
+    assert plan["revisions_linked"] == expected.get("revisions", 0)
+    assert sum(len(u["annotations"]) for u in plan["uploads"]) == expected.get(
+        "annotations", 0
+    )
 
 
 # ── Access ──────────────────────────────────────────────────────────────────

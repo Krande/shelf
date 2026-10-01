@@ -190,6 +190,45 @@ async def create_annotation(
     to it.
     """
     att, _role, inherited = await _resolve_attachment(db, user, attachment_id)
+    ann = _new_annotation(att, payload, user, inherited)
+    db.add(ann)
+    await db.commit()
+    await db.refresh(ann)
+    return _to_response(ann, user.id)
+
+
+class AnnotationBulkCreate(BaseModel):
+    annotations: list[AnnotationCreate]
+
+
+class AnnotationBulkResult(BaseModel):
+    created: int
+
+
+@router.post(
+    "/api/attachments/{attachment_id}/annotations/bulk",
+    response_model=AnnotationBulkResult,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_annotations_bulk(
+    attachment_id: uuid.UUID,
+    payload: AnnotationBulkCreate,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+) -> AnnotationBulkResult:
+    """Many annotations on one PDF, all or none -- how an archive import
+    restores a document's highlights in one request rather than one per
+    highlight. Same rules as creating them one at a time."""
+    att, _role, inherited = await _resolve_attachment(db, user, attachment_id)
+    rows = [_new_annotation(att, a, user, inherited) for a in payload.annotations]
+    db.add_all(rows)
+    await db.commit()
+    return AnnotationBulkResult(created=len(rows))
+
+
+def _new_annotation(
+    att: Attachment, payload: AnnotationCreate, user: User, inherited: bool
+) -> Annotation:
     if payload.page_number < 1:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, "page_number must be >= 1"
@@ -204,8 +243,7 @@ async def create_annotation(
                 status.HTTP_400_BAD_REQUEST,
                 "each rect must be [x, y, w, h]",
             )
-
-    ann = Annotation(
+    return Annotation(
         attachment_id=att.id,
         kind=payload.kind.value,
         page_number=payload.page_number,
@@ -215,10 +253,6 @@ async def create_annotation(
         created_by=user.id,
         visibility=payload.visibility or default_visibility(inherited=inherited),
     )
-    db.add(ann)
-    await db.commit()
-    await db.refresh(ann)
-    return _to_response(ann, user.id)
 
 
 @router.patch(

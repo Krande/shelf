@@ -1,5 +1,84 @@
 {
   "$defs": {
+    "ArchiveAnnotation": {
+      "description": "A highlight or pin on a PDF, by the person who made the archive.\n\nCoordinates are PDF user space (origin bottom-left), so they mean\nthe same thing on the original bytes the archive carries.",
+      "properties": {
+        "kind": {
+          "minLength": 1,
+          "title": "Kind",
+          "type": "string"
+        },
+        "page_number": {
+          "minimum": 1,
+          "title": "Page Number",
+          "type": "integer"
+        },
+        "rects": {
+          "items": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "title": "Rects",
+          "type": "array"
+        },
+        "color": {
+          "default": "#ffd400",
+          "title": "Color",
+          "type": "string"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text"
+        },
+        "visibility": {
+          "default": "space",
+          "title": "Visibility",
+          "type": "string"
+        },
+        "created_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Created At"
+        },
+        "updated_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Updated At"
+        }
+      },
+      "required": [
+        "kind",
+        "page_number"
+      ],
+      "title": "ArchiveAnnotation",
+      "type": "object"
+    },
     "ArchiveCollection": {
       "description": "One collection of the exported tree.\n\n``id`` and ``parent_id`` are the source's ids and only mean anything\ninside this archive: they tie items to collections and collections\nto each other. ``parent_id`` is null for a top-level collection of\nthe archive -- the exported collection, or each of a space's\ntop-level ones -- and otherwise names another collection in the list.",
       "properties": {
@@ -52,7 +131,7 @@
       "type": "object"
     },
     "ArchiveFile": {
-      "description": "One PDF in the ZIP.",
+      "description": "One PDF in the ZIP: always the attachment's original, as uploaded.\n\nDerived versions (OCR'd, outlined) are never archived. They are\nShelf's own processing, rebuilt by the instance that imports the\noriginal.",
       "properties": {
         "path": {
           "minLength": 1,
@@ -95,10 +174,12 @@
           "default": null,
           "title": "Sha256"
         },
-        "version": {
-          "default": "original",
-          "title": "Version",
-          "type": "string"
+        "annotations": {
+          "items": {
+            "$ref": "#/$defs/ArchiveAnnotation"
+          },
+          "title": "Annotations",
+          "type": "array"
         }
       },
       "required": [
@@ -106,6 +187,28 @@
         "filename"
       ],
       "title": "ArchiveFile",
+      "type": "object"
+    },
+    "ArchiveIncluded": {
+      "description": "Which optional parts the archive was made with.\n\nAn empty list means \"none\" only when its part is included; otherwise\nit means \"not exported\", and an importer must not read anything\ninto it.",
+      "properties": {
+        "notes": {
+          "default": false,
+          "title": "Notes",
+          "type": "boolean"
+        },
+        "annotations": {
+          "default": false,
+          "title": "Annotations",
+          "type": "boolean"
+        },
+        "standard_revisions": {
+          "default": false,
+          "title": "Standard Revisions",
+          "type": "boolean"
+        }
+      },
+      "title": "ArchiveIncluded",
       "type": "object"
     },
     "ArchiveItem": {
@@ -160,6 +263,24 @@
           },
           "title": "Files",
           "type": "array"
+        },
+        "notes": {
+          "items": {
+            "$ref": "#/$defs/ArchiveNote"
+          },
+          "title": "Notes",
+          "type": "array"
+        },
+        "revision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArchiveRevision"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -187,6 +308,111 @@
         "filename"
       ],
       "title": "ArchiveMissing",
+      "type": "object"
+    },
+    "ArchiveNote": {
+      "description": "A note on a document, by the person who made the archive.",
+      "properties": {
+        "content_html": {
+          "default": "",
+          "title": "Content Html",
+          "type": "string"
+        },
+        "content_text": {
+          "default": "",
+          "title": "Content Text",
+          "type": "string"
+        },
+        "visibility": {
+          "default": "space",
+          "title": "Visibility",
+          "type": "string"
+        },
+        "created_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Created At"
+        },
+        "updated_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Updated At"
+        }
+      },
+      "title": "ArchiveNote",
+      "type": "object"
+    },
+    "ArchiveRevision": {
+      "description": "The document as one edition of an engineering standard.\n\nA standard is identified by (body, designation), case-insensitively,\non every instance, so the link survives a move between them.",
+      "properties": {
+        "body": {
+          "minLength": 1,
+          "title": "Body",
+          "type": "string"
+        },
+        "designation": {
+          "minLength": 1,
+          "title": "Designation",
+          "type": "string"
+        },
+        "family_title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Family Title"
+        },
+        "label": {
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "issued_on": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Issued On"
+        },
+        "superseded": {
+          "default": false,
+          "title": "Superseded",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "body",
+        "designation",
+        "label"
+      ],
+      "title": "ArchiveRevision",
       "type": "object"
     },
     "ArchiveSource": {
@@ -303,6 +529,9 @@
       "default": "items",
       "title": "Scope",
       "type": "string"
+    },
+    "included": {
+      "$ref": "#/$defs/ArchiveIncluded"
     },
     "root_collection_id": {
       "anyOf": [

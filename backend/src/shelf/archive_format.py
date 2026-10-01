@@ -28,7 +28,7 @@ after 1.0 must have a default.
 
 import re
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -87,8 +87,33 @@ class ArchiveTag(_Model):
     color: str | None = None
 
 
+class ArchiveAnnotation(_Model):
+    """A highlight or pin on a PDF, by the person who made the archive.
+
+    Coordinates are PDF user space (origin bottom-left), so they mean
+    the same thing on the original bytes the archive carries.
+    """
+
+    kind: str = Field(min_length=1)  # "highlight" | "note"
+    page_number: int = Field(ge=1)
+    # [x, y, w, h] per quad; a single 1x1 rect for a pin.
+    rects: list[list[float]] = Field(default_factory=list)
+    color: str = "#ffd400"
+    text: str | None = None
+    # "private" (the author alone) or "space" (everyone who can read the
+    # document's space). An import keeps it.
+    visibility: str = "space"
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
 class ArchiveFile(_Model):
-    """One PDF in the ZIP."""
+    """One PDF in the ZIP: always the attachment's original, as uploaded.
+
+    Derived versions (OCR'd, outlined) are never archived. They are
+    Shelf's own processing, rebuilt by the instance that imports the
+    original.
+    """
 
     # Where the bytes are in the ZIP, "/"-separated. Unique per archive.
     path: str = Field(min_length=1)
@@ -100,10 +125,37 @@ class ArchiveFile(_Model):
     # uses them to recognise a file it already has.
     size: int | None = Field(default=None, ge=0)
     sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    # Which version of the attachment these bytes are: "original", or
-    # the derivation kind ("ocr", "outline") that superseded it.
-    # Informational; an import stores the bytes as a new original.
-    version: str = "original"
+    # Present when the archive includes annotations (see ``included``).
+    annotations: list[ArchiveAnnotation] = Field(default_factory=list)
+
+
+class ArchiveNote(_Model):
+    """A note on a document, by the person who made the archive."""
+
+    content_html: str = ""
+    # Plain-text projection; an importer may derive it from the HTML.
+    content_text: str = ""
+    # "private" or "space"; see ArchiveAnnotation.visibility.
+    visibility: str = "space"
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class ArchiveRevision(_Model):
+    """The document as one edition of an engineering standard.
+
+    A standard is identified by (body, designation), case-insensitively,
+    on every instance, so the link survives a move between them.
+    """
+
+    body: str = Field(min_length=1)
+    designation: str = Field(min_length=1)
+    # The standard's own title, for creating it where it doesn't exist.
+    family_title: str | None = None
+    # This edition's name: "2020", "Rev. 5".
+    label: str = Field(min_length=1)
+    issued_on: date | None = None
+    superseded: bool = False
 
 
 class ArchiveItem(_Model):
@@ -124,6 +176,26 @@ class ArchiveItem(_Model):
     # PDFs appear once in the ZIP, under the shallowest of them.
     collection_ids: list[uuid.UUID] = Field(default_factory=list)
     files: list[ArchiveFile] = Field(default_factory=list)
+    # Present when the archive includes notes (see ``included``).
+    notes: list[ArchiveNote] = Field(default_factory=list)
+    # Present when the archive includes revision links and the document
+    # is an edition of a standard.
+    revision: ArchiveRevision | None = None
+
+
+class ArchiveIncluded(_Model):
+    """Which optional parts the archive was made with.
+
+    An empty list means "none" only when its part is included; otherwise
+    it means "not exported", and an importer must not read anything
+    into it.
+    """
+
+    # The exporting user's own notes and annotations -- never anyone
+    # else's, whose notes are theirs to share.
+    notes: bool = False
+    annotations: bool = False
+    standard_revisions: bool = False
 
 
 class ArchiveMissing(_Model):
@@ -158,6 +230,7 @@ class ArchiveIndex(_Model):
     # filed in none), or "items" (a selection of documents, no tree).
     # Informational; the collections and memberships say the rest.
     scope: str = "items"
+    included: ArchiveIncluded = Field(default_factory=ArchiveIncluded)
     # The exported collection, for scope "collection"; otherwise null.
     root_collection_id: uuid.UUID | None = None
     collections: list[ArchiveCollection] = Field(default_factory=list)

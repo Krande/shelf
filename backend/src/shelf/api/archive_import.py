@@ -22,10 +22,17 @@ Re-importing is safe, and is how an interrupted import is finished:
                   attachment with the same SHA-256 or the same filename;
                   only the others are asked for
 
-What an archive doesn't carry isn't imported: notes, annotations, and
-standard revision links (families are per instance).
+    notes,        when the archive includes them, go onto the items this
+    revisions     import created -- never onto ones already here, which is
+                  what keeps a re-import from doubling them. Notes are
+                  authored by the importer, visibility kept. Revisions
+                  join the instance's family for (body, designation).
+    annotations   ride along with each upload and are posted by the
+                  browser to the new attachment, so they arrive exactly
+                  when their PDF does
 """
 
+import re
 import uuid
 from itertools import batched
 from typing import Annotated, Any
@@ -45,12 +52,18 @@ from ..auth.deps import get_current_user
 from ..auth.spaces import SPACE_ROLE_EDITOR, require_space_role
 from ..db import get_session
 from ..models import (
+    VISIBILITIES,
+    VISIBILITY_PRIVATE,
+    AnnotationKind,
     Attachment,
     Collection,
     Item,
     ItemCollection,
     ItemTag,
+    Note,
     Space,
+    StandardFamily,
+    StandardRevision,
     Tag,
     User,
 )
@@ -72,6 +85,18 @@ class ArchiveImportRequest(BaseModel):
     collection_id: uuid.UUID | None = None
 
 
+class UploadAnnotation(BaseModel):
+    """An archived annotation, shaped for
+    ``POST /api/attachments/{id}/annotations/bulk``."""
+
+    kind: str
+    page_number: int
+    rects: list[list[float]]
+    color: str
+    text: str | None
+    visibility: str
+
+
 class ArchiveUpload(BaseModel):
     """A PDF in the archive the browser should upload."""
 
@@ -80,6 +105,11 @@ class ArchiveUpload(BaseModel):
     filename: str
     content_type: str
     size: int | None
+    # To post to the new attachment once it's uploaded. They ride with
+    # the upload because an annotation needs the attachment's id, which
+    # only exists once the browser has registered it -- and so they're
+    # restored exactly when the PDF is, never twice.
+    annotations: list[UploadAnnotation] = []
 
 
 class ArchiveImportResponse(BaseModel):
@@ -91,6 +121,8 @@ class ArchiveImportResponse(BaseModel):
     items_existing: int
     # PDFs skipped because the item already has them.
     files_existing: int
+    notes_created: int
+    revisions_linked: int
     uploads: list[ArchiveUpload]
 
 
@@ -138,6 +170,8 @@ async def import_archive(
     targets, created = await _import_items(db, space.id, index, user)
     await _file_items(db, index, targets, coll_map, payload.collection_id)
     await _tag_items(db, space.id, index, targets, created)
+    notes_created = _add_notes(db, index, targets, created, user)
+    revisions_linked = await _link_revisions(db, index, targets, created)
     uploads, files_existing = await _uploads(db, index, targets, created)
 
     details = {
@@ -147,6 +181,8 @@ async def import_archive(
         "items_existing": len(targets) - len(created),
         "files_to_upload": len(uploads),
         "files_existing": files_existing,
+        "notes_created": notes_created,
+        "revisions_linked": revisions_linked,
     }
     target_name = None
     if payload.collection_id is not None:
@@ -171,6 +207,8 @@ async def import_archive(
         items_created=len(created),
         items_existing=len(targets) - len(created),
         files_existing=files_existing,
+        notes_created=notes_created,
+        revisions_linked=revisions_linked,
         uploads=uploads,
     )
 
@@ -388,6 +426,122 @@ async def _uploads(
                     filename=f.filename,
                     content_type=f.content_type,
                     size=f.size,
+                    annotations=[
+                        UploadAnnotation(
+                            kind=a.kind,
+                            page_number=a.page_number,
+                            rects=a.rects,
+                            color=a.color,
+                            text=a.text,
+                            visibility=_visibility(a.visibility),
+                        )
+                        for a in f.annotations
+                        # What this Shelf can't represent is dropped
+                        # rather than failing the PDF's whole batch.
+                        if a.kind in _ANNOTATION_KINDS
+                        and a.rects
+                        and all(len(r) == 4 for r in a.rects)
+                    ],
                 )
             )
     return uploads, skipped
+
+
+_ANNOTATION_KINDS = {k.value for k in AnnotationKind}
+
+
+def _visibility(value: str) -> str:
+    """An archived visibility this Shelf knows, or the most private
+    reading of one it doesn't: a note must never become more widely
+    readable by being moved."""
+    return value if value in VISIBILITIES else VISIBILITY_PRIVATE
+
+
+def _add_notes(
+    db: AsyncSession,
+    index: ArchiveIndex,
+    targets: dict[uuid.UUID, Item],
+    created: set[uuid.UUID],
+    user: User,
+) -> int:
+    """The archive's notes, on the items this import created, authored by
+    the person importing -- it is their archive of their notes. An item
+    that was already here keeps its own, so re-importing never doubles
+    them."""
+    count = 0
+    for it in index.items:
+        if it.id not in created:
+            continue
+        for n in it.notes:
+            note = Note(
+                item_id=targets[it.id].id,
+                content_html=n.content_html,
+                content_text=n.content_text or _text_of(n.content_html),
+                author_id=user.id,
+                visibility=_visibility(n.visibility),
+            )
+            if n.created_at is not None:
+                note.created_at = n.created_at
+            if n.updated_at is not None:
+                note.updated_at = n.updated_at
+            db.add(note)
+            count += 1
+    return count
+
+
+def _text_of(html: str) -> str:
+    """Plain text for search, when an archive didn't carry it."""
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html)).strip()
+
+
+async def _link_revisions(
+    db: AsyncSession,
+    index: ArchiveIndex,
+    targets: dict[uuid.UUID, Item],
+    created: set[uuid.UUID],
+) -> int:
+    """Make each created item an edition of its standard again.
+
+    Families are instance-wide and keyed by (body, designation), compared
+    case-insensitively, so the import joins the family this instance
+    already has for that standard, or starts it.
+    """
+    wanted = [
+        (targets[it.id].id, it.revision)
+        for it in index.items
+        if it.id in created and it.revision is not None
+    ]
+    if not wanted:
+        return 0
+    families: dict[tuple[str, str], StandardFamily] = {}
+    for item_id, rev in wanted:
+        key = (rev.body.casefold(), rev.designation.casefold())
+        fam = families.get(key)
+        if fam is None:
+            fam = (
+                await db.execute(
+                    select(StandardFamily).where(
+                        StandardFamily.body == rev.body,
+                        StandardFamily.designation == rev.designation,
+                    )
+                )
+            ).scalar_one_or_none()
+            if fam is None:
+                fam = StandardFamily(
+                    body=rev.body,
+                    designation=rev.designation,
+                    title=rev.family_title,
+                )
+                db.add(fam)
+                await db.flush()
+            families[key] = fam
+        db.add(
+            StandardRevision(
+                item_id=item_id,
+                family_id=fam.id,
+                label=rev.label,
+                issued_on=rev.issued_on,
+                superseded=rev.superseded,
+            )
+        )
+    return len(wanted)
