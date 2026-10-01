@@ -1,0 +1,20 @@
+[
+  {
+    "path": "Root document.pdf",
+    "title": "Root document",
+    "item_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "collection": ""
+  },
+  {
+    "path": "Sub/b.pdf",
+    "title": "In a subcollection",
+    "item_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    "collection": "Sub"
+  },
+  {
+    "path": "Sub/Deeper/c.pdf",
+    "title": "Two levels down",
+    "item_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    "collection": "Sub/Deeper"
+  }
+]

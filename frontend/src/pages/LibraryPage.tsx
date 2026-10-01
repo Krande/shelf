@@ -93,6 +93,7 @@ import {
   type Tag,
 } from "@/api/tags";
 import {
+  type ArchiveOptions,
   downloadItemPdfsZip,
   listAttachments,
   uploadAttachment,
@@ -113,6 +114,7 @@ import TagChips from "@/components/library/TagChips";
 import CollectionRail, {
   ITEM_DRAG_TYPE,
 } from "@/components/library/CollectionRail";
+import ArchiveDownloadDialog from "@/components/library/ArchiveDownloadDialog";
 import BulkAddToCollection from "@/components/library/BulkAddToCollection";
 import BulkCopyToSpace from "@/components/library/BulkCopyToSpace";
 import SearchScopePopover from "@/components/library/SearchScopePopover";
@@ -1397,8 +1399,11 @@ export default function LibraryPage() {
   }
 
   // Bulk-download the PDFs of every checked document as a single ZIP.
+  // Asks which optional parts to include first.
+  const [askDownload, setAskDownload] = useState(false);
   const downloadPdfs = useMutation({
-    mutationFn: () => downloadItemPdfsZip(slug!, [...checkedIds]),
+    mutationFn: (options: ArchiveOptions) =>
+      downloadItemPdfsZip(slug!, [...checkedIds], options),
     onSuccess: ({ files }) => {
       if (files === 0) {
         window.alert("Nothing to download — no PDFs in the selection.");
@@ -1870,7 +1875,7 @@ export default function LibraryPage() {
                   {checkedIds.size > 0 && (
                     <button
                       disabled={!slug || downloadPdfs.isPending}
-                      onClick={() => downloadPdfs.mutate()}
+                      onClick={() => setAskDownload(true)}
                       className="flex items-center gap-1 rounded border px-3 py-1.5 text-sm font-medium disabled:opacity-50"
                       style={{
                         borderColor: "var(--color-border)",
@@ -1890,6 +1895,18 @@ export default function LibraryPage() {
                       </span>
                       <span>({checkedIds.size})</span>
                     </button>
+                  )}
+                  {askDownload && (
+                    <ArchiveDownloadDialog
+                      title={`Download ${checkedIds.size} document${
+                        checkedIds.size === 1 ? "" : "s"
+                      }`}
+                      onCancel={() => setAskDownload(false)}
+                      onConfirm={(options) => {
+                        setAskDownload(false);
+                        downloadPdfs.mutate(options);
+                      }}
+                    />
                   )}
                   <button
                     disabled={!slug || !writable || uploadPdf.isPending}

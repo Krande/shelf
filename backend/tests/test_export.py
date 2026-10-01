@@ -352,11 +352,17 @@ async def test_bulk_pdf_zip_bundles_selected_items(
     # No non-PDF and nothing from the unselected item.
     assert not any(n.endswith(".txt") for n in names)
     assert "other.pdf" not in names
-    # The index ties each file back to its document; no collection key,
-    # since an item selection has no folders.
-    assert json.loads(zf.read("index.json")) == [
-        {"path": "report.pdf", "title": "Paper A", "item_id": a["id"]},
-        {"path": "report (2).pdf", "title": "Paper B", "item_id": b["id"]},
+    # The index ties each file back to its document; an item selection
+    # has no tree.
+    index = json.loads(zf.read("index.json"))
+    assert index["root_collection_id"] is None
+    assert index["collections"] == []
+    assert [
+        (it["id"], it["data"]["title"], [f["path"] for f in it["files"]])
+        for it in index["items"]
+    ] == [
+        (a["id"], "Paper A", ["report.pdf"]),
+        (b["id"], "Paper B", ["report (2).pdf"]),
     ]
 
 
@@ -392,10 +398,11 @@ async def test_bulk_pdf_zip_reports_unfetchable_blobs(
     assert "gone.pdf" not in names
     assert "_MISSING_FILES.txt" in names
     assert "gone.pdf" in zf.read("_MISSING_FILES.txt").decode()
-    # The index lists only what actually made it in.
-    assert [e["path"] for e in json.loads(zf.read("index.json"))] == [
-        "good.pdf"
-    ]
+    # The index lists the files that made it in, and the one that didn't.
+    index = json.loads(zf.read("index.json"))
+    files = [f["path"] for it in index["items"] for f in it["files"]]
+    assert files == ["good.pdf"]
+    assert index["missing"] == [{"item_id": bad["id"], "filename": "gone.pdf"}]
 
 
 async def test_bulk_pdf_zip_404_when_no_pdfs(
@@ -577,14 +584,14 @@ async def test_collection_zip_includes_subcollections_as_folders(
         "Mid/both.pdf",
         "index.json",
     ]
-    index = {e["path"]: e for e in json.loads(zf.read("index.json"))}
-    assert index["Mid/Leaf/b.pdf"] == {
-        "path": "Mid/Leaf/b.pdf",
-        "title": "In leaf",
-        "item_id": b["id"],
-        "collection": "Mid/Leaf",
-    }
-    assert index["Mid/both.pdf"]["collection"] == "Mid"
+    index = json.loads(zf.read("index.json"))
+    folders = {c["id"]: c["folder"] for c in index["collections"]}
+    assert folders == {top: "", mid: "Mid", leaf: "Mid/Leaf"}
+    by_id = {it["id"]: it for it in index["items"]}
+    assert [f["path"] for f in by_id[b["id"]]["files"]] == ["Mid/Leaf/b.pdf"]
+    # Every membership is kept, even though the file is written once.
+    assert sorted(by_id[both["id"]]["collection_ids"]) == sorted([mid, leaf])
+    assert [f["path"] for f in by_id[both["id"]]["files"]] == ["Mid/both.pdf"]
 
 
 async def test_collection_zip_streams_bodies_intact(

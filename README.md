@@ -18,6 +18,7 @@ This README is about *using* shelf — the web interface and the `shelf` CLI. Ru
 - Background OCR and text extraction, so scanned PDFs become searchable too. Originals are kept; OCR output becomes a new version you can switch between.
 - Export to BibTeX, CSL-JSON, and Zotero RDF — the last optionally bundled as a ZIP with the files, in the layout Zotero's own translator produces.
 - Bulk select, bulk add-to-collection, and a ZIP download that serves each document's current best version.
+- Download a selection, a collection or a whole space as a re-importable archive: the original PDFs in their collection folders, plus an `index.json` with each document's metadata, tags and collections, and optionally your own notes and highlights and standard revision links. Import it into any space on any instance; re-importing is idempotent. The format is versioned and specified in [docs/archive-format.md](docs/archive-format.md).
 - Spaces as the unit of ownership and sharing, with read-only inheritance between them.
 - OIDC login against any compliant provider, plus scoped API tokens for scripts.
 - A command-line client, `shelf`, for searching, browsing and bulk metadata from a terminal.

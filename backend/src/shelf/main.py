@@ -13,6 +13,7 @@ from . import __version__
 from .api import (
     admin,
     annotations,
+    archive_import,
     attachments,
     auth,
     collections,
@@ -93,6 +94,7 @@ app.include_router(collections.router)
 app.include_router(attachments.router)
 app.include_router(annotations.router)
 app.include_router(export.router)
+app.include_router(archive_import.router)
 app.include_router(extraction.router)
 app.include_router(notes.router)
 app.include_router(processing.router)

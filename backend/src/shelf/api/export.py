@@ -6,8 +6,8 @@ endpoints. The bulk endpoint reuses the list-items filter surface
 to whatever filtered view they had in the UI.
 """
 
+import hashlib
 import io
-import json
 import logging
 import re
 import uuid
@@ -15,7 +15,9 @@ import zipfile
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
+from itertools import batched
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -24,16 +26,36 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import __version__, archive_format
+from ..archive_format import (
+    ArchiveAnnotation,
+    ArchiveCollection,
+    ArchiveFile,
+    ArchiveIncluded,
+    ArchiveIndex,
+    ArchiveItem,
+    ArchiveMissing,
+    ArchiveNote,
+    ArchiveRevision,
+    ArchiveSource,
+    ArchiveSpace,
+    ArchiveTag,
+)
 from ..auth.deps import get_current_user
 from ..auth.spaces import SPACE_ROLE_VIEWER, require_space_role
 from ..db import get_session
 from ..models import (
+    Annotation,
     Attachment,
+    AttachmentProcessing,
     Collection,
     Item,
     ItemCollection,
     ItemTag,
+    Note,
     Space,
+    StandardFamily,
+    StandardRevision,
     Tag,
     User,
 )
@@ -46,7 +68,6 @@ from ..services.export_renderers import (
     render_zotero_rdf,
 )
 from ..services.zip_stream import ZipStream
-from .attachments import current_versions
 
 log = logging.getLogger(__name__)
 
@@ -417,76 +438,124 @@ def _dedupe_name(name: str, used: set[str]) -> str:
         n += 1
 
 
-async def _collection_item_folders(
-    db: AsyncSession, space_id: uuid.UUID, collection_id: uuid.UUID
-) -> dict[uuid.UUID, str]:
-    """Items filed under one of this space's collections or any of its
-    subcollections, each mapped to the ZIP folder it belongs in.
+# Ids per IN (...) list. asyncpg caps a statement at 32767 bind
+# parameters, and a whole space can hold more documents than that.
+_IN_BATCH = 5000
 
-    The collection's own documents sit at the archive root and each
-    subcollection becomes a folder, so the download mirrors the tree in
-    the rail. A collection that only groups subcollections -- no
+
+@dataclass
+class _Tree:
+    """The collections an archive covers, and what is filed in them."""
+
+    # Parents before children, siblings in rail order.
+    collections: list[ArchiveCollection]
+    # Every item filed anywhere in the tree -> the tree's collections it
+    # is filed in, most recently updated item first.
+    memberships: dict[uuid.UUID, list[uuid.UUID]]
+    folders: dict[uuid.UUID, str]
+
+    def folder_of(self, item_id: uuid.UUID) -> str:
+        """The ZIP folder an item's PDFs go in: the shallowest of its
+        collections, so an item filed in several is written once. An
+        item in none of them (whole-space archives) goes at the root."""
+        return min(
+            (self.folders[cid] for cid in self.memberships.get(item_id, [])),
+            key=lambda f: f.count("/") + 1 if f else 0,
+            default="",
+        )
+
+
+async def _collection_tree(
+    db: AsyncSession, space_id: uuid.UUID, collection_id: uuid.UUID | None
+) -> _Tree:
+    """One of this space's collections and its subcollections to any
+    depth -- or, with no ``collection_id``, all of the space's
+    collections -- and the items filed in any of them.
+
+    For one collection, its own documents sit at the archive root and
+    each subcollection becomes a folder, so the download mirrors the
+    tree in the rail. A collection that only groups subcollections -- no
     documents of its own -- still downloads everything below it rather
-    than coming back empty. An item filed in several places in the tree
-    is written once, under the shallowest of them.
+    than coming back empty. For the whole space every top-level
+    collection is a folder, and the root holds what isn't filed at all.
+    Empty collections are kept in the index either way, so an import
+    rebuilds the tree as it was.
 
     A collection belonging to some other space is a 404 rather than an
     empty archive, for the same reason the item listing rejects one: a
     filter that silently matches nothing reads as "there is nothing
     here".
     """
-    owner_space_id = (
+    # The whole space's tree in one query and walked here: it's small,
+    # and the walk needs the names to build folder paths anyway.
+    rows = (
         await db.execute(
-            select(Collection.space_id).where(Collection.id == collection_id)
+            select(Collection)
+            .where(Collection.space_id == space_id)
+            .order_by(Collection.position)
         )
-    ).scalar_one_or_none()
-    if owner_space_id != space_id:
+    ).scalars().all()
+    by_id = {c.id: c for c in rows}
+    if collection_id is not None and collection_id not in by_id:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND, "No such collection in this space"
         )
-    # The whole space's tree in one query and walked here: it's small,
-    # and the walk needs the names to build folder paths anyway.
-    children: dict[uuid.UUID, list[tuple[uuid.UUID, str]]] = {}
-    for cid, parent_id, name in (
-        await db.execute(
-            select(Collection.id, Collection.parent_id, Collection.name).where(
-                Collection.space_id == space_id
-            )
-        )
-    ).all():
-        if parent_id is not None:
-            children.setdefault(parent_id, []).append((cid, name))
-    folders: dict[uuid.UUID, str] = {collection_id: ""}
-    stack = [collection_id]
-    while stack:
-        parent = stack.pop()
-        for cid, name in children.get(parent, []):
-            if cid in folders:
-                continue
-            seg = _safe_zip_name(name, cid.hex[:8])
-            folders[cid] = f"{folders[parent]}/{seg}" if folders[parent] else seg
-            stack.append(cid)
-
-    rows = await db.execute(
-        select(Item.id, ItemCollection.collection_id)
-        .join(ItemCollection, ItemCollection.item_id == Item.id)
-        .where(
-            ItemCollection.collection_id.in_(list(folders)),
-            Item.space_id == space_id,
-            Item.deleted_at.is_(None),
-        )
-        .order_by(Item.updated_at.desc())
+    children: dict[uuid.UUID | None, list[Collection]] = {}
+    for c in rows:
+        children.setdefault(c.parent_id, []).append(c)
+    roots = (
+        [by_id[collection_id]] if collection_id is not None else children.get(None, [])
     )
 
-    def depth(folder: str) -> int:
-        return folder.count("/") + 1 if folder else 0
+    collections: list[ArchiveCollection] = []
+    folders: dict[uuid.UUID, str] = {}
+    # Reversed so the first sibling is popped, and listed, first.
+    stack = list(reversed(roots))
+    while stack:
+        c = stack.pop()
+        if c.id in folders:
+            continue
+        if c.id == collection_id:
+            # The exported collection *is* the archive root.
+            folder = ""
+            parent_id = None
+        else:
+            seg = _safe_zip_name(c.name, c.id.hex[:8])
+            parent = folders.get(c.parent_id, "") if c.parent_id else ""
+            folder = f"{parent}/{seg}" if parent else seg
+            parent_id = c.parent_id
+        folders[c.id] = folder
+        collections.append(
+            ArchiveCollection(
+                id=c.id,
+                parent_id=parent_id,
+                name=c.name,
+                description=c.description,
+                folder=folder,
+            )
+        )
+        stack.extend(reversed(children.get(c.id, [])))
 
-    placed: dict[uuid.UUID, str] = {}
-    for item_id, cid in rows.all():
-        prev = placed.get(item_id)
-        if prev is None or depth(folders[cid]) < depth(prev):
-            placed[item_id] = folders[cid]
-    return placed
+    stmt = (
+        select(Item.id, ItemCollection.collection_id)
+        .join(ItemCollection, ItemCollection.item_id == Item.id)
+        .where(Item.space_id == space_id, Item.deleted_at.is_(None))
+        .order_by(Item.updated_at.desc())
+    )
+    if collection_id is not None:
+        stmt = stmt.where(ItemCollection.collection_id.in_(list(folders)))
+    else:
+        # A join rather than IN (...): a big space's collection ids
+        # could outnumber the bind parameters one statement may carry.
+        stmt = stmt.join(
+            Collection, Collection.id == ItemCollection.collection_id
+        ).where(Collection.space_id == space_id)
+    memberships: dict[uuid.UUID, list[uuid.UUID]] = {}
+    for item_id, cid in (await db.execute(stmt)).all():
+        memberships.setdefault(item_id, []).append(cid)
+    return _Tree(
+        collections=collections, memberships=memberships, folders=folders
+    )
 
 
 @dataclass
@@ -498,10 +567,12 @@ class _ZipFile:
     """
 
     item_id: uuid.UUID
-    title: str
     attachment_id: uuid.UUID
     filename: str
+    content_type: str
+    # Of the original as uploaded; see _plan_pdf_zip.
     storage_key: str
+    annotations: list[ArchiveAnnotation]
     folder: str
 
 
@@ -509,6 +580,8 @@ class _ZipFile:
 class _ZipPlan:
     items: list[Item]
     files: list[_ZipFile]
+    # Everything but the files, which are added as they're written.
+    index: ArchiveIndex
 
 
 async def _plan_pdf_zip(
@@ -516,115 +589,280 @@ async def _plan_pdf_zip(
     space: Space,
     item: list[uuid.UUID] | None,
     collection: uuid.UUID | None,
+    whole_space: bool = False,
+    *,
+    user: User,
+    extras: ArchiveIncluded | None = None,
 ) -> _ZipPlan:
     """Everything the archive needs from the database, in a handful of
     bulk queries, so streaming touches storage only.
+
+    ``extras`` opts into the user's own notes and annotations and the
+    documents' standard revision links; off by default, since an archive
+    is often made to hand to someone else.
 
     That split matters beyond speed: the response outlives the request
     handler, and a download that held a database session open for as
     long as a slow client takes to pull a few GB would starve the pool.
     """
-    if collection is not None and item:
+    extras = extras or ArchiveIncluded()
+    if sum([bool(item), collection is not None, whole_space]) != 1:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            "pass item ids or a collection, not both",
-        )
-    if collection is None and not item:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            "at least one item id, or a collection, is required",
+            "pass exactly one of: item ids, a collection, or whole_space",
         )
 
-    if collection is not None:
+    tree: _Tree | None = None
+    if collection is not None or whole_space:
         # Resolved here rather than by the caller listing the collection
         # and sending an id per item: a folder with a few hundred
         # documents would otherwise build a query string long enough to
         # be refused, and the membership rule stays in one place.
-        item_folders = await _collection_item_folders(db, space.id, collection)
-    else:
-        # De-dupe while preserving the caller's selection order so ZIP
-        # entries come out in a predictable sequence.
-        assert item is not None
-        item_folders = {iid: "" for iid in item}
-    ids = list(item_folders)
-
-    rows = await db.execute(
-        select(Item).where(
-            Item.space_id == space.id,
-            Item.deleted_at.is_(None),
-            Item.id.in_(ids),
+        tree = await _collection_tree(db, space.id, collection)
+    if whole_space:
+        # The space's own documents, filed or not; inherited ones belong
+        # to the space they live in and are downloaded from there.
+        ordered = list(
+            (
+                await db.execute(
+                    select(Item)
+                    .where(Item.space_id == space.id, Item.deleted_at.is_(None))
+                    .order_by(Item.updated_at.desc())
+                )
+            ).scalars().all()
         )
-    )
-    items_by_id = {i.id: i for i in rows.scalars().all()}
-    ordered = [items_by_id[i] for i in ids if i in items_by_id]
-    if collection is not None:
+    else:
+        if tree is not None:
+            ids = list(tree.memberships)
+        else:
+            # De-dupe while preserving the caller's selection order so
+            # ZIP entries come out in a predictable sequence.
+            assert item is not None
+            ids = list(dict.fromkeys(item))
+        items_by_id: dict[uuid.UUID, Item] = {}
+        for batch in batched(ids, _IN_BATCH):
+            for row in (
+                await db.execute(
+                    select(Item).where(
+                        Item.space_id == space.id,
+                        Item.deleted_at.is_(None),
+                        Item.id.in_(batch),
+                    )
+                )
+            ).scalars():
+                items_by_id[row.id] = row
+        ordered = [items_by_id[i] for i in ids if i in items_by_id]
+
+    folder = {it.id: tree.folder_of(it.id) if tree else "" for it in ordered}
+    if tree is not None:
         # Folder by folder, root first, rather than interleaved by
         # recency; sorted() is stable, so each folder keeps that order.
-        ordered.sort(key=lambda it: item_folders[it.id])
-    if not ordered:
-        return _ZipPlan(items=[], files=[])
+        ordered.sort(key=lambda it: folder[it.id])
+    item_ids = [i.id for i in ordered]
 
-    att_rows = await db.execute(
-        select(Attachment)
-        .where(Attachment.item_id.in_([i.id for i in ordered]))
-        .order_by(Attachment.created_at)
-    )
     atts_by_item: dict[uuid.UUID, list[Attachment]] = {}
-    for att in att_rows.scalars().all():
-        if _is_pdf(att):
-            atts_by_item.setdefault(att.item_id, []).append(att)
+    tags_by_item: dict[uuid.UUID, list[str]] = {}
+    tags: dict[str, ArchiveTag] = {}
+    for batch in batched(item_ids, _IN_BATCH):
+        for att in (
+            await db.execute(
+                select(Attachment)
+                .where(Attachment.item_id.in_(batch))
+                .order_by(Attachment.created_at)
+            )
+        ).scalars():
+            if _is_pdf(att):
+                atts_by_item.setdefault(att.item_id, []).append(att)
+        for item_id, name, color in (
+            await db.execute(
+                select(ItemTag.item_id, Tag.name, Tag.color)
+                .join(Tag, Tag.id == ItemTag.tag_id)
+                .where(ItemTag.item_id.in_(batch))
+                .order_by(Tag.name)
+            )
+        ).all():
+            tags_by_item.setdefault(item_id, []).append(name)
+            tags.setdefault(name, ArchiveTag(name=name, color=color))
 
-    # The same "current best" blob the single-file download serves
-    # (latest outline > latest OCR > original). Reading ``storage_key``
-    # directly would miss every attachment whose original was superseded
-    # by a derivation -- its original object may no longer exist.
+    # Always the original as uploaded, never Shelf's own OCR'd or
+    # outlined derivation: an archive is the documents, and the instance
+    # that imports it does its own processing. The as-uploaded bytes are
+    # snapshotted to ``<key>.original`` when an upload completes, so that
+    # copy is preferred where one was made -- older versions rewrote the
+    # live object in place. Otherwise the live object is the original;
+    # derivations have their own keys and never touch it.
     pdfs = [a for it in ordered for a in atts_by_item.get(it.id, [])]
-    keys = await current_versions(db, pdfs)
+    preserved: set[uuid.UUID] = set()
+    annotations: dict[uuid.UUID, list[ArchiveAnnotation]] = {}
+    for att_batch in batched([a.id for a in pdfs], _IN_BATCH):
+        preserved.update(
+            (
+                await db.execute(
+                    select(AttachmentProcessing.attachment_id).where(
+                        AttachmentProcessing.attachment_id.in_(att_batch),
+                        AttachmentProcessing.original_preserved_at.is_not(None),
+                    )
+                )
+            ).scalars()
+        )
+        if extras.annotations:
+            for a in (
+                await db.execute(
+                    select(Annotation)
+                    .where(
+                        Annotation.attachment_id.in_(att_batch),
+                        Annotation.created_by == user.id,
+                    )
+                    .order_by(Annotation.page_number, Annotation.created_at)
+                )
+            ).scalars():
+                annotations.setdefault(a.attachment_id, []).append(
+                    ArchiveAnnotation(
+                        kind=a.kind,
+                        page_number=a.page_number,
+                        rects=a.rects,
+                        color=a.color,
+                        text=a.text,
+                        visibility=a.visibility,
+                        created_at=a.created_at,
+                        updated_at=a.updated_at,
+                    )
+                )
+
+    notes: dict[uuid.UUID, list[ArchiveNote]] = {}
+    revisions: dict[uuid.UUID, ArchiveRevision] = {}
+    for batch in batched(item_ids, _IN_BATCH):
+        if extras.notes:
+            for n in (
+                await db.execute(
+                    select(Note)
+                    .where(Note.item_id.in_(batch), Note.author_id == user.id)
+                    .order_by(Note.created_at)
+                )
+            ).scalars():
+                notes.setdefault(n.item_id, []).append(
+                    ArchiveNote(
+                        content_html=n.content_html,
+                        content_text=n.content_text,
+                        visibility=n.visibility,
+                        created_at=n.created_at,
+                        updated_at=n.updated_at,
+                    )
+                )
+        if extras.standard_revisions:
+            for rev, fam in (
+                await db.execute(
+                    select(StandardRevision, StandardFamily)
+                    .join(
+                        StandardFamily,
+                        StandardFamily.id == StandardRevision.family_id,
+                    )
+                    .where(StandardRevision.item_id.in_(batch))
+                )
+            ).tuples():
+                revisions[rev.item_id] = ArchiveRevision(
+                    body=fam.body,
+                    designation=fam.designation,
+                    family_title=fam.title,
+                    label=rev.label,
+                    issued_on=rev.issued_on,
+                    superseded=rev.superseded,
+                )
+
+    index = ArchiveIndex(
+        format=archive_format.FORMAT,
+        version=archive_format.VERSION,
+        created_at=datetime.now(UTC),
+        generator=f"shelf {__version__}",
+        source=ArchiveSource(
+            space=ArchiveSpace(id=space.id, slug=space.slug, name=space.name)
+        ),
+        scope=(
+            "space" if whole_space else "collection" if collection else "items"
+        ),
+        included=extras,
+        root_collection_id=collection,
+        collections=tree.collections if tree else [],
+        tags=sorted(tags.values(), key=lambda t: t.name.casefold()),
+        items=[
+            ArchiveItem(
+                id=it.id,
+                origin_id=it.origin_id,
+                item_type=it.item_type,
+                data=dict(it.data) if isinstance(it.data, dict) else {},
+                tags=tags_by_item.get(it.id, []),
+                collection_ids=tree.memberships.get(it.id, []) if tree else [],
+                notes=notes.get(it.id, []),
+                revision=revisions.get(it.id),
+            )
+            for it in ordered
+        ],
+    )
     return _ZipPlan(
         items=ordered,
         files=[
             _ZipFile(
                 item_id=it.id,
-                title=item_label(it),
                 attachment_id=att.id,
                 filename=att.filename,
-                storage_key=keys[att.id][0],
-                folder=item_folders[it.id],
+                content_type=att.content_type,
+                storage_key=(
+                    storage.original_key(att.storage_key)
+                    if att.id in preserved
+                    else att.storage_key
+                ),
+                annotations=annotations.get(att.id, []),
+                folder=folder[it.id],
             )
             for it in ordered
             for att in atts_by_item.get(it.id, [])
         ],
+        index=index,
     )
 
 
-async def _stream_pdf_zip(
-    files: list[_ZipFile], *, with_collections: bool
-) -> AsyncIterator[bytes]:
-    """The archive, one chunk at a time.
+class _Tally:
+    """Size and SHA-256 of the bytes passing through, for the index."""
+
+    def __init__(self) -> None:
+        self.sha256 = hashlib.sha256()
+        self.size = 0
+
+    async def wrap(self, chunks: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+        async for chunk in chunks:
+            self.sha256.update(chunk)
+            self.size += len(chunk)
+            yield chunk
+
+
+async def _stream_pdf_zip(plan: _ZipPlan) -> AsyncIterator[bytes]:
+    """The archive, one chunk at a time, ending with its index.json.
 
     Memory stays at roughly one storage chunk however big the archive
     gets: each PDF is copied from storage into the response as it
     arrives, and the ASGI server's flow control holds the copy back to
     the pace the client downloads at.
 
-    A PDF that can't be opened is left out and listed in
-    _MISSING_FILES.txt. One that fails partway through (after its
-    resumes are used up) can't be taken back out of bytes already sent,
-    so the stream is aborted and the browser reports the download as
-    failed rather than saving a corrupt archive.
+    A PDF that can't be opened is left out, listed in the index's
+    ``missing`` and in _MISSING_FILES.txt. One that fails partway
+    through (after its resumes are used up) can't be taken back out of
+    bytes already sent, so the stream is aborted and the browser reports
+    the download as failed rather than saving a corrupt archive.
     """
     zs = ZipStream()
     used: set[str] = set()
-    index: list[dict[str, str]] = []
     missing: list[str] = []
+    index = plan.index
+    entries = {it.id: it for it in index.items}
     async with storage.object_client() as client:
-        for f in files:
+        for f in plan.files:
             name = _safe_zip_name(f.filename, f"{f.attachment_id.hex[:8]}.pdf")
             if not name.lower().endswith(".pdf"):
                 name += ".pdf"
             arcname = _dedupe_name(
                 f"{f.folder}/{name}" if f.folder else name, used
             )
+            tally = _Tally()
             async with AsyncExitStack() as stack:
                 try:
                     size, chunks = await stack.enter_async_context(
@@ -635,6 +873,9 @@ async def _stream_pdf_zip(
                     missing.append(
                         f"{f.folder}/{f.filename}" if f.folder else f.filename
                     )
+                    index.missing.append(
+                        ArchiveMissing(item_id=f.item_id, filename=f.filename)
+                    )
                     log.warning(
                         "pdf-zip: skipping attachment %s (%s) key=%s: %s",
                         f.attachment_id,
@@ -644,7 +885,7 @@ async def _stream_pdf_zip(
                     )
                     continue
                 try:
-                    async for out in zs.add(arcname, size, chunks):
+                    async for out in zs.add(arcname, size, tally.wrap(chunks)):
                         yield out
                 except Exception:
                     log.exception(
@@ -655,14 +896,16 @@ async def _stream_pdf_zip(
                         f.storage_key,
                     )
                     raise
-            entry = {
-                "path": arcname,
-                "title": f.title,
-                "item_id": str(f.item_id),
-            }
-            if with_collections:
-                entry["collection"] = f.folder
-            index.append(entry)
+            entries[f.item_id].files.append(
+                ArchiveFile(
+                    path=arcname,
+                    filename=f.filename,
+                    content_type=f.content_type,
+                    size=tally.size,
+                    sha256=tally.sha256.hexdigest(),
+                    annotations=f.annotations,
+                )
+            )
 
     if missing:
         yield zs.add_bytes(
@@ -674,10 +917,9 @@ async def _stream_pdf_zip(
                 + "\n"
             ).encode(),
         )
-    # Last, so it lists what actually made it in.
+    # Last, so it describes what actually made it in.
     yield zs.add_bytes(
-        "index.json",
-        json.dumps(index, indent=2, ensure_ascii=False).encode(),
+        "index.json", index.model_dump_json(indent=2).encode()
     )
     yield zs.close()
 
@@ -687,7 +929,13 @@ _COLLECTION_QUERY = Query(
     description=(
         "Bundle every item filed under this collection or any of its "
         "subcollections (one ZIP folder per subcollection), instead of "
-        "naming ids. Mutually exclusive with `item`."
+        "naming ids."
+    )
+)
+_WHOLE_SPACE_QUERY = Query(
+    description=(
+        "Bundle every document of the space: all its collections as "
+        "folders, and what is filed in none at the archive root."
     )
 )
 
@@ -704,6 +952,7 @@ async def summarize_attachments_zip(
     db: Annotated[AsyncSession, Depends(get_session)],
     item: Annotated[list[uuid.UUID] | None, _ITEM_QUERY] = None,
     collection: Annotated[uuid.UUID | None, _COLLECTION_QUERY] = None,
+    whole_space: Annotated[bool, _WHOLE_SPACE_QUERY] = False,
 ) -> PdfZipSummary:
     """What `attachments-zip` would bundle for the same parameters,
     without fetching anything from storage.
@@ -715,7 +964,9 @@ async def summarize_attachments_zip(
     bad selection -- are caught here instead.
     """
     space = await _resolve_space(db, user, slug)
-    plan = await _plan_pdf_zip(db, space, item, collection)
+    plan = await _plan_pdf_zip(
+        db, space, item, collection, whole_space, user=user
+    )
     return PdfZipSummary(items=len(plan.items), files=len(plan.files))
 
 
@@ -726,12 +977,30 @@ async def download_attachments_zip(
     db: Annotated[AsyncSession, Depends(get_session)],
     item: Annotated[list[uuid.UUID] | None, _ITEM_QUERY] = None,
     collection: Annotated[uuid.UUID | None, _COLLECTION_QUERY] = None,
+    whole_space: Annotated[bool, _WHOLE_SPACE_QUERY] = False,
+    include_notes: Annotated[
+        bool, Query(description="Add the caller's own notes on each document.")
+    ] = False,
+    include_annotations: Annotated[
+        bool,
+        Query(description="Add the caller's own highlights and pins on each PDF."),
+    ] = False,
+    include_revisions: Annotated[
+        bool,
+        Query(description="Add each standard's family and edition details."),
+    ] = False,
 ) -> StreamingResponse:
-    """Bundle every PDF attachment of the selected items into one ZIP --
-    flat for an item selection, one folder per subcollection for a
-    collection -- with an ``index.json`` listing each file's title and
-    item. Used by the library's bulk-select "Download PDFs" action and by
-    "Download PDFs" on a collection.
+    """Bundle the PDFs of a selection of documents, a collection, or a
+    whole space into one ZIP, with an ``index.json`` (format
+    ``shelf.archive``, see ``archive_format``) that makes it
+    re-importable: each document's metadata, tags and collections, and
+    the collection tree. Flat for a selection; one folder per collection
+    otherwise. Used by the library's bulk-select "Download PDFs", by
+    "Download PDFs" on a collection, and by "Download space".
+
+    Every PDF is the original as uploaded, never an OCR'd or outlined
+    derivation. The caller's own notes and annotations, and standard
+    revision links, are added on request.
 
     Streamed: the first bytes go out as soon as the first PDF is opened,
     and nothing is held beyond the chunk in flight. Non-PDF attachments
@@ -739,7 +1008,14 @@ async def download_attachments_zip(
     _MISSING_FILES.txt rather than failing the whole download. 404 if
     none of the selected items has a PDF."""
     space = await _resolve_space(db, user, slug)
-    plan = await _plan_pdf_zip(db, space, item, collection)
+    extras = ArchiveIncluded(
+        notes=include_notes,
+        annotations=include_annotations,
+        standard_revisions=include_revisions,
+    )
+    plan = await _plan_pdf_zip(
+        db, space, item, collection, whole_space, user=user, extras=extras
+    )
     if not plan.items:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No matching items")
     if not plan.files:
@@ -755,6 +1031,9 @@ async def download_attachments_zip(
         "items": len(plan.items),
         "files": len(plan.files),
     }
+    included = [k for k, v in extras.model_dump().items() if v]
+    if included:
+        details["included"] = included
     if collection is not None:
         coll = await db.get(Collection, collection)
         await record_read(
@@ -765,6 +1044,17 @@ async def download_attachments_zip(
             target_type="collection",
             target_id=collection,
             label=coll.name if coll is not None else None,
+            details=details,
+        )
+    elif whole_space:
+        await record_read(
+            db,
+            user,
+            AuditAction.space_download,
+            space_id=space.id,
+            target_type="space",
+            target_id=space.id,
+            label=space.name,
             details=details,
         )
     else:
@@ -781,7 +1071,7 @@ async def download_attachments_zip(
 
     filename = f"{slug}-pdfs.zip"
     return StreamingResponse(
-        _stream_pdf_zip(plan.files, with_collections=collection is not None),
+        _stream_pdf_zip(plan),
         media_type="application/zip",
         headers={
             "Content-Disposition": f'attachment; filename="{filename}"',

@@ -1,0 +1,168 @@
+{
+  "format": "shelf.archive",
+  "version": "1.0",
+  "created_at": "2026-10-01T12:00:00Z",
+  "generator": "shelf 0.17.0",
+  "source": {
+    "space": {
+      "id": "0b5a6f8e-1c2d-4e3f-8a9b-0c1d2e3f4a5b",
+      "slug": "example-library",
+      "name": "Example library"
+    }
+  },
+  "scope": "collection",
+  "included": {
+    "notes": true,
+    "annotations": true,
+    "standard_revisions": true
+  },
+  "root_collection_id": "11111111-1111-4111-8111-111111111111",
+  "collections": [
+    {
+      "id": "11111111-1111-4111-8111-111111111111",
+      "parent_id": null,
+      "name": "Reports",
+      "description": "Everything we were sent",
+      "folder": ""
+    },
+    {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "parent_id": "11111111-1111-4111-8111-111111111111",
+      "name": "2024",
+      "description": null,
+      "folder": "2024"
+    },
+    {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "parent_id": "22222222-2222-4222-8222-222222222222",
+      "name": "Q1",
+      "description": null,
+      "folder": "2024/Q1"
+    },
+    {
+      "id": "44444444-4444-4444-8444-444444444444",
+      "parent_id": "11111111-1111-4111-8111-111111111111",
+      "name": "Empty",
+      "description": null,
+      "folder": "Empty"
+    }
+  ],
+  "tags": [
+    { "name": "Reviewed", "color": "#2e7d32" }
+  ],
+  "items": [
+    {
+      "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "origin_id": null,
+      "item_type": "report",
+      "data": {
+        "title": "Annual summary",
+        "creators": [{ "creatorType": "author", "name": "Example Org" }],
+        "date": "2024-12-31"
+      },
+      "tags": ["Reviewed"],
+      "collection_ids": ["11111111-1111-4111-8111-111111111111"],
+      "files": [
+        {
+          "path": "Annual summary.pdf",
+          "filename": "Annual summary.pdf",
+          "content_type": "application/pdf",
+          "size": 1024,
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000001",
+          "annotations": [
+            {
+              "kind": "highlight",
+              "page_number": 3,
+              "rects": [[72.0, 600.5, 210.0, 11.2], [72.0, 588.0, 140.0, 11.2]],
+              "color": "#ffd400",
+              "text": "Revenue grew",
+              "visibility": "space",
+              "created_at": "2025-01-10T09:30:00Z",
+              "updated_at": "2025-01-10T09:30:00Z"
+            },
+            {
+              "kind": "note",
+              "page_number": 1,
+              "rects": [[500.0, 760.0, 1.0, 1.0]],
+              "color": "#ff7043",
+              "text": "Check with finance",
+              "visibility": "private",
+              "created_at": "2025-01-11T14:00:00Z",
+              "updated_at": "2025-01-11T14:00:00Z"
+            }
+          ]
+        }
+      ],
+      "notes": [
+        {
+          "content_html": "<p>Summarised for the <strong>board</strong>.</p>",
+          "content_text": "Summarised for the board.",
+          "visibility": "space",
+          "created_at": "2025-01-12T08:00:00Z",
+          "updated_at": "2025-01-12T08:15:00Z"
+        }
+      ],
+      "revision": null
+    },
+    {
+      "id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "origin_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      "item_type": "standard",
+      "data": {
+        "title": "Example design standard",
+        "standardBody": "EX",
+        "designation": "EX-100",
+        "edition": "2023"
+      },
+      "tags": [],
+      "collection_ids": [
+        "22222222-2222-4222-8222-222222222222",
+        "33333333-3333-4333-8333-333333333333"
+      ],
+      "files": [
+        {
+          "path": "2024/ex-100.pdf",
+          "filename": "ex-100.pdf",
+          "content_type": "application/pdf",
+          "size": 2048,
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000002",
+          "annotations": []
+        }
+      ],
+      "notes": [
+        {
+          "content_html": "<p>Superseded clause 4.2 in project spec.</p>",
+          "content_text": "",
+          "visibility": "private",
+          "created_at": null,
+          "updated_at": null
+        }
+      ],
+      "revision": {
+        "body": "EX",
+        "designation": "EX-100",
+        "family_title": "Example design standard",
+        "label": "2023",
+        "issued_on": "2023-05-01",
+        "superseded": false
+      }
+    },
+    {
+      "id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "origin_id": null,
+      "item_type": "document",
+      "data": { "title": "Metadata only" },
+      "tags": [],
+      "collection_ids": ["33333333-3333-4333-8333-333333333333"],
+      "files": [],
+      "notes": [],
+      "revision": null
+    }
+  ],
+  "missing": [
+    {
+      "item_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "filename": "lost.pdf"
+    }
+  ]
+}

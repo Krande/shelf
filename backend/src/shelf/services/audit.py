@@ -52,6 +52,9 @@ class AuditAction(StrEnum):
     item_revision = "item.revision"
     attachment_upload = "attachment.upload"
     attachment_delete = "attachment.delete"
+    # One entry per import, with counts; the PDFs it uploads are logged
+    # individually as attachment.upload when each completes.
+    archive_import = "archive.import"
 
     # Reads. A "view" is the reader opening the file in the browser; a
     # "download" is the file leaving it — the Download button, a ZIP, an
@@ -59,6 +62,7 @@ class AuditAction(StrEnum):
     attachment_view = "attachment.view"
     attachment_download = "attachment.download"
     collection_download = "collection.download"
+    space_download = "space.download"
     export_zip = "export.zip"
     export_item = "export.item"
     export_space = "export.space"
