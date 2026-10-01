@@ -163,7 +163,8 @@ export async function downloadItemPdfsZip(
 }
 
 /**
- * The PDFs of every item filed directly under one collection.
+ * The PDFs of every item filed under one collection or any of its
+ * subcollections, each subcollection a folder in the ZIP.
  *
  * The collection id goes to the server rather than being expanded into
  * an id per item here: a folder of a few hundred documents would make a

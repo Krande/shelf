@@ -509,6 +509,61 @@ async def test_collection_zip_bundles_everything_filed_under_it(
     assert "loose.pdf" not in names
 
 
+async def test_collection_zip_includes_subcollections_as_folders(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A collection that only groups subcollections still downloads.
+
+    Regression: a parent with no documents of its own 404'd with "No
+    matching items" even though its subcollections were full.
+    """
+
+    async def fake_read_object(key: str) -> bytes:
+        return b"x"
+
+    monkeypatch.setattr(storage, "read_object", fake_read_object)
+
+    slug = await _login(client)
+    top = (
+        await client.post(f"/api/spaces/{slug}/collections", json={"name": "Top"})
+    ).json()["id"]
+    mid = (
+        await client.post(
+            f"/api/spaces/{slug}/collections",
+            json={"name": "Mid", "parent_id": top},
+        )
+    ).json()["id"]
+    leaf = (
+        await client.post(
+            f"/api/spaces/{slug}/collections",
+            json={"name": "Leaf", "parent_id": mid},
+        )
+    ).json()["id"]
+    a = await _make_paper(client, slug, title="In mid")
+    b = await _make_paper(client, slug, title="In leaf")
+    both = await _make_paper(client, slug, title="In mid and leaf")
+    await _attach(client, a["id"], "a.pdf")
+    await _attach(client, b["id"], "b.pdf")
+    await _attach(client, both["id"], "both.pdf")
+    for iid, colls in (
+        (a["id"], [mid]),
+        (b["id"], [leaf]),
+        (both["id"], [mid, leaf]),
+    ):
+        r = await client.put(
+            f"/api/items/{iid}/collections", json={"collection_ids": colls}
+        )
+        assert r.status_code == 200, r.text
+
+    r = await client.get(
+        f"/api/spaces/{slug}/attachments-zip", params={"collection": top}
+    )
+    assert r.status_code == 200, r.text
+    names = zipfile.ZipFile(io.BytesIO(r.content)).namelist()
+    # Filed twice in the tree → written once, under the shallower folder.
+    assert sorted(names) == ["Mid/Leaf/b.pdf", "Mid/a.pdf", "Mid/both.pdf"]
+
+
 async def test_collection_zip_ignores_a_trashed_member(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

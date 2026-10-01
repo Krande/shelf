@@ -410,14 +410,18 @@ def _dedupe_name(name: str, used: set[str]) -> str:
         n += 1
 
 
-async def _collection_item_ids(
+async def _collection_item_folders(
     db: AsyncSession, space_id: uuid.UUID, collection_id: uuid.UUID
-) -> list[uuid.UUID]:
-    """Items filed directly under one of this space's collections.
+) -> dict[uuid.UUID, str]:
+    """Items filed under one of this space's collections or any of its
+    subcollections, each mapped to the ZIP folder it belongs in.
 
-    Direct members only, no descendants -- the library lists a
-    collection the same way, and a download that quietly included four
-    subfolders would not be the thing on screen.
+    The collection's own documents sit at the archive root and each
+    subcollection becomes a folder, so the download mirrors the tree in
+    the rail. A collection that only groups subcollections -- no
+    documents of its own -- still downloads everything below it rather
+    than coming back empty. An item filed in several places in the tree
+    is written once, under the shallowest of them.
 
     A collection belonging to some other space is a 404 rather than an
     empty archive, for the same reason the item listing rejects one: a
@@ -433,17 +437,49 @@ async def _collection_item_ids(
         raise HTTPException(
             status.HTTP_404_NOT_FOUND, "No such collection in this space"
         )
+    # The whole space's tree in one query and walked here: it's small,
+    # and the walk needs the names to build folder paths anyway.
+    children: dict[uuid.UUID, list[tuple[uuid.UUID, str]]] = {}
+    for cid, parent_id, name in (
+        await db.execute(
+            select(Collection.id, Collection.parent_id, Collection.name).where(
+                Collection.space_id == space_id
+            )
+        )
+    ).all():
+        if parent_id is not None:
+            children.setdefault(parent_id, []).append((cid, name))
+    folders: dict[uuid.UUID, str] = {collection_id: ""}
+    stack = [collection_id]
+    while stack:
+        parent = stack.pop()
+        for cid, name in children.get(parent, []):
+            if cid in folders:
+                continue
+            seg = _safe_zip_name(name, cid.hex[:8])
+            folders[cid] = f"{folders[parent]}/{seg}" if folders[parent] else seg
+            stack.append(cid)
+
     rows = await db.execute(
-        select(Item.id)
+        select(Item.id, ItemCollection.collection_id)
         .join(ItemCollection, ItemCollection.item_id == Item.id)
         .where(
-            ItemCollection.collection_id == collection_id,
+            ItemCollection.collection_id.in_(list(folders)),
             Item.space_id == space_id,
             Item.deleted_at.is_(None),
         )
         .order_by(Item.updated_at.desc())
     )
-    return list(rows.scalars().all())
+
+    def depth(folder: str) -> int:
+        return folder.count("/") + 1 if folder else 0
+
+    placed: dict[uuid.UUID, str] = {}
+    for item_id, cid in rows.all():
+        prev = placed.get(item_id)
+        if prev is None or depth(folders[cid]) < depth(prev):
+            placed[item_id] = folders[cid]
+    return placed
 
 
 @router.get("/api/spaces/{slug}/attachments-zip")
@@ -459,14 +495,16 @@ async def download_attachments_zip(
         uuid.UUID | None,
         Query(
             description=(
-                "Bundle every item filed directly under this collection, "
+                "Bundle every item filed under this collection or any of "
+                "its subcollections (one ZIP folder per subcollection), "
                 "instead of naming ids. Mutually exclusive with `item`."
             )
         ),
     ] = None,
 ) -> Response:
-    """Bundle every PDF attachment of the selected items into one flat
-    ZIP. Used by the library's bulk-select "Download PDFs" action and by
+    """Bundle every PDF attachment of the selected items into one ZIP --
+    flat for an item selection, one folder per subcollection for a
+    collection. Used by the library's bulk-select "Download PDFs" action and by
     "Download PDFs" on a collection. Non-PDF attachments are skipped; a
     missing blob is logged and left out rather than failing the whole
     download. 404 if none of the selected items yields a PDF."""
@@ -487,17 +525,13 @@ async def download_attachments_zip(
         # and sending an id per item: a folder with a few hundred
         # documents would otherwise build a query string long enough to
         # be refused, and the membership rule stays in one place.
-        ids = await _collection_item_ids(db, space.id, collection)
+        item_folders = await _collection_item_folders(db, space.id, collection)
     else:
         # De-dupe while preserving the caller's selection order so ZIP
         # entries come out in a predictable sequence.
         assert item is not None
-        seen: set[uuid.UUID] = set()
-        ids = []
-        for iid in item:
-            if iid not in seen:
-                seen.add(iid)
-                ids.append(iid)
+        item_folders = {iid: "" for iid in item}
+    ids = list(item_folders)
 
     rows = await db.execute(
         select(Item).where(
@@ -531,7 +565,10 @@ async def download_attachments_zip(
                 name = _safe_zip_name(att.filename, f"{att.id.hex[:8]}.pdf")
                 if not name.lower().endswith(".pdf"):
                     name += ".pdf"
-                arcname = _dedupe_name(name, used)
+                folder = item_folders[it.id]
+                arcname = _dedupe_name(
+                    f"{folder}/{name}" if folder else name, used
+                )
                 # Fetch the same "current best" blob the single-file
                 # download serves (latest outline > latest OCR >
                 # original). Reading ``storage_key`` directly would miss
