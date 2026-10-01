@@ -78,6 +78,10 @@ class ProcessingDTO:
     outline_engine: str | None = None
     outline_completed_at: datetime | None = None
     outline_json: Any | None = None
+    convert_status: str = "untouched"
+    convert_engine: str | None = None
+    convert_completed_at: datetime | None = None
+    convert_error: str | None = None
     progress_done: int | None = None
     progress_total: int | None = None
     original_preserved_at: datetime | None = None
@@ -132,6 +136,18 @@ class WorkerDB(Protocol):
         ...
 
 
+async def pdf_base_key(db: WorkerDB, att: AttachmentDTO) -> str | None:
+    """Worker-side ``services.conversion.pdf_base_key``: the upload for a
+    PDF, its newest ``convert`` rendering otherwise, None when neither
+    exists. OCR and outline both start from this."""
+    from ..services import conversion
+
+    if conversion.is_pdf(att.content_type, att.filename):
+        return att.storage_key
+    latest = await db.latest_derivation(att.id, conversion.CONVERT_KIND)
+    return latest.storage_key if latest is not None else None
+
+
 # ── SQL backend — direct DB ─────────────────────────────────────────────────
 
 
@@ -179,6 +195,10 @@ class SqlBackend:
                 outline_engine=row.outline_engine,
                 outline_completed_at=row.outline_completed_at,
                 outline_json=row.outline_json,
+                convert_status=row.convert_status,
+                convert_engine=row.convert_engine,
+                convert_completed_at=row.convert_completed_at,
+                convert_error=row.convert_error,
                 progress_done=row.progress_done,
                 progress_total=row.progress_total,
                 original_preserved_at=row.original_preserved_at,
@@ -445,6 +465,10 @@ def _processing_from_json(d: dict[str, Any]) -> ProcessingDTO:
         outline_engine=d.get("outline_engine"),
         outline_completed_at=_parse_dt(d.get("outline_completed_at")),
         outline_json=d.get("outline_json"),
+        convert_status=d.get("convert_status", "untouched"),
+        convert_engine=d.get("convert_engine"),
+        convert_completed_at=_parse_dt(d.get("convert_completed_at")),
+        convert_error=d.get("convert_error"),
         progress_done=d.get("progress_done"),
         progress_total=d.get("progress_total"),
         original_preserved_at=_parse_dt(d.get("original_preserved_at")),

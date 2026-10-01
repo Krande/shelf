@@ -18,7 +18,7 @@ import logging
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import quote
 
 import httpx
@@ -41,7 +41,7 @@ from ..models import (
     Space,
     User,
 )
-from ..services import extraction, storage
+from ..services import conversion, extraction, storage
 from ..services.audit import AuditAction, record, record_read
 from ..services.storage import attachment_storage_key
 from .items import user_names
@@ -57,6 +57,9 @@ class AttachmentRegister(BaseModel):
     size_bytes: int | None = None
 
 
+PdfStatus = Literal["native", "converted", "converting", "failed"]
+
+
 class AttachmentResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -69,19 +72,51 @@ class AttachmentResponse(BaseModel):
     # Who uploaded it, and their display name as it is now.
     created_by: uuid.UUID | None = None
     created_by_name: str | None = None
+    # Whether the reader can open it. ``native`` for a PDF upload;
+    # ``converted`` once a non-PDF upload has been rendered, with
+    # ``converting`` / ``failed`` before that; None for a file shelf
+    # doesn't render (it can only be downloaded).
+    pdf_status: PdfStatus | None = None
+    # Why the last conversion failed, while ``pdf_status`` is ``failed``.
+    convert_error: str | None = None
 
 
 async def attachment_responses(
     db: AsyncSession, atts: list[Attachment]
 ) -> list[AttachmentResponse]:
-    """Serialise attachments with their uploader's name — one user
-    lookup for the whole list, not one per row."""
+    """Serialise attachments with their uploader's name and PDF status —
+    one lookup each for the whole list, not one per row."""
     names = await user_names(db, (a.created_by for a in atts))
+    convertible = [a.id for a in atts if conversion.is_convertible(a)]
+    converted = await conversion.latest_convert_keys(db, convertible)
+    convert_state: dict[uuid.UUID, tuple[str, str | None]] = {}
+    if convertible:
+        convert_state = {
+            aid: (st, err)
+            for aid, st, err in (
+                await db.execute(
+                    select(
+                        AttachmentProcessing.attachment_id,
+                        AttachmentProcessing.convert_status,
+                        AttachmentProcessing.convert_error,
+                    ).where(AttachmentProcessing.attachment_id.in_(convertible))
+                )
+            ).tuples()
+        }
     out = []
     for a in atts:
         r = AttachmentResponse.model_validate(a)
         if a.created_by is not None:
             r.created_by_name = names.get(a.created_by)
+        if conversion.is_pdf(a.content_type, a.filename):
+            r.pdf_status = "native"
+        elif a.id in converted:
+            # An earlier rendering still opens while a re-run is going.
+            r.pdf_status = "converted"
+        elif a.id in convertible:
+            st, err = convert_state.get(a.id, ("untouched", None))
+            r.pdf_status = "failed" if st == "failed" else "converting"
+            r.convert_error = err if st == "failed" else None
         out.append(r)
     return out
 
@@ -135,6 +170,10 @@ class AttachmentProcessingResponse(BaseModel):
     outline_status: str = "untouched"
     outline_engine: str | None = None
     outline_completed_at: datetime | None = None
+    convert_status: str = "untouched"
+    convert_engine: str | None = None
+    convert_completed_at: datetime | None = None
+    convert_error: str | None = None
     original_preserved_at: datetime | None = None
     progress_done: int | None = None
     progress_total: int | None = None
@@ -272,7 +311,8 @@ async def resolve_version(
     """Pick the storage key for the requested ``version``.
 
     ``version`` is one of:
-      - None → current best (latest outline > latest ocr > original)
+      - None → current best (latest outline > latest ocr > latest
+        convert > original)
       - "original" → ``attachments.storage_key``
       - a derivation UUID → that row's storage_key (404 on miss /
         wrong attachment)
@@ -300,15 +340,17 @@ async def resolve_version(
     return (await current_versions(db, [attachment]))[attachment.id]
 
 
-# Which derivation kinds outrank the original, best first.
-_CURRENT_KINDS = ("outline", "ocr")
+# Which derivation kinds outrank the original, best first. ``convert`` is
+# last: an OCR or outline pass over a converted upload starts from its
+# rendering, so either one is the better copy.
+_CURRENT_KINDS = ("outline", "ocr", conversion.CONVERT_KIND)
 
 
 async def current_versions(
     db: AsyncSession, attachments: list[Attachment]
 ) -> dict[uuid.UUID, tuple[str, str]]:
     """``resolve_version(..., None)`` for many attachments in one query:
-    latest outline > latest ocr > original, as ``(storage_key,
+    latest outline > latest ocr > latest convert > original, as ``(storage_key,
     version_label)`` per attachment id.
 
     A bulk download of a few hundred PDFs would otherwise spend up to two
@@ -410,9 +452,16 @@ async def stream_attachment(
     direct-from-storage.
 
     Signs for the server-side endpoint, not the browser-facing one: this
-    process performs the GET itself, so the URL never leaves the server."""
+    process performs the GET itself, so the URL never leaves the server.
+
+    With no ``version``, a converted upload downloads as uploaded — the
+    ``.docx`` under its own name and type, not the PDF rendering, which
+    ``version=<derivation id>`` still reaches."""
     att, item = await _resolve_attachment_and_item(db, user, attachment_id)
-    storage_key, _ = await resolve_version(db, att, version)
+    if version is None and not conversion.is_pdf(att.content_type, att.filename):
+        storage_key = att.storage_key
+    else:
+        storage_key, _ = await resolve_version(db, att, version)
     presigned = await storage.presign_download_internal(storage_key)
 
     client = httpx.AsyncClient(follow_redirects=True, timeout=60.0)
@@ -452,10 +501,17 @@ async def stream_attachment(
 
     # RFC 6266: filename* with UTF-8 percent-encoding covers non-ASCII
     # filenames; filename= gives a safe ASCII fallback for old clients.
-    ascii_name = att.filename.encode("ascii", "replace").decode("ascii")
+    filename, media_type = att.filename, att.content_type
+    if storage_key != att.storage_key and not conversion.is_pdf(
+        att.content_type, att.filename
+    ):
+        # A converted upload's rendering: same name, as the PDF it is.
+        stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+        filename, media_type = f"{stem}.pdf", conversion.PDF_CONTENT_TYPE
+    ascii_name = filename.encode("ascii", "replace").decode("ascii")
     disposition = (
         f'attachment; filename="{ascii_name}"; '
-        f"filename*=UTF-8''{quote(att.filename)}"
+        f"filename*=UTF-8''{quote(filename)}"
     )
     headers = {"Content-Disposition": disposition}
     content_length = upstream.headers.get("content-length")
@@ -463,7 +519,7 @@ async def stream_attachment(
         headers["Content-Length"] = content_length
     return StreamingResponse(
         body(),
-        media_type=att.content_type or "application/octet-stream",
+        media_type=media_type or "application/octet-stream",
         headers=headers,
     )
 
@@ -580,7 +636,7 @@ async def complete_attachment(
                 "size_bytes": att.size_bytes,
             },
         )
-        await extraction.mark_and_enqueue(att)
+        await extraction.mark_and_enqueue(db, att)
         # Eagerly snapshot the just-uploaded blob to its `.original`
         # sibling so any later worker rewrite (OCR, future passes) is
         # reversible. PDF-only — non-PDFs aren't mutated by any worker

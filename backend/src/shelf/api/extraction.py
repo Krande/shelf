@@ -34,7 +34,7 @@ from ..auth.spaces import (
 )
 from ..db import get_session
 from ..models import Attachment, ExtractionStatus, Item, Space, User
-from ..services import queue
+from ..services import conversion, extraction, queue
 
 router = APIRouter(tags=["extraction"])
 
@@ -282,11 +282,21 @@ async def rescan_one(
     await require_space_role(
         db, space, user.id, SPACE_ROLE_EDITOR, label="Attachment not found"
     )
-    if att.content_type != PDF_CONTENT_TYPE:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            "Only PDF attachments support extraction",
-        )
+    if not conversion.is_pdf(att.content_type, att.filename):
+        if not conversion.is_convertible(att):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Only PDFs and documents shelf converts support extraction",
+            )
+        # A converted upload rescans from the top: render it again, and
+        # the convert worker chains into extraction. This is also how a
+        # failed conversion gets retried.
+        att.extraction_status = ExtractionStatus.pending.value
+        att.extracted_at = None
+        await extraction.mark_convert_queued(db, att)
+        await db.commit()
+        enqueued = 1 if await queue.publish_convert(att.id) else 0
+        return RescanResult(selected=1, enqueued=enqueued)
 
     att.extraction_status = ExtractionStatus.pending.value
     att.extracted_at = None

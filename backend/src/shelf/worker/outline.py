@@ -38,7 +38,7 @@ import obstore
 
 from .. import config
 from ..services import storage
-from ._db_client import get_db
+from ._db_client import get_db, pdf_base_key
 
 log = logging.getLogger("shelf.worker.outline")
 
@@ -76,9 +76,10 @@ async def outline_attachment(attachment_id: str | uuid.UUID) -> None:
     if att.uploaded_at is None:
         log.warning("attachment %s not uploaded; skipping outline", aid)
         return
-    if att.content_type != "application/pdf":
+    base_key = await pdf_base_key(db, att)
+    if base_key is None:
         log.warning(
-            "attachment %s is %s; skipping outline",
+            "attachment %s (%s) has no PDF; skipping outline",
             aid,
             att.content_type,
         )
@@ -96,9 +97,9 @@ async def outline_attachment(attachment_id: str | uuid.UUID) -> None:
 
     # Prefer the latest OCR'd version as input — it's the one whose
     # text layer is freshest and whose bookmarks the user will see.
-    # Fall back to the attachment's original storage_key when no OCR
-    # derivation exists yet.
-    parent_key = att.storage_key
+    # Fall back to the original PDF (or a converted upload's rendering)
+    # when no OCR derivation exists yet.
+    parent_key = base_key
     latest_ocr = await db.latest_derivation(aid, "ocr")
     if latest_ocr is not None:
         parent_key = latest_ocr.storage_key

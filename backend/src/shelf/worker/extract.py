@@ -38,7 +38,7 @@ from ..models import (
     AttachmentProcessing,
     ExtractionStatus,
 )
-from ..services import queue, storage
+from ..services import conversion, queue, storage
 from ..services.pdf_quality import (
     assess_outline_need,
     assess_text_quality,
@@ -68,7 +68,13 @@ async def extract_attachment(attachment_id: str | uuid.UUID) -> None:
         if att.uploaded_at is None:
             log.warning("attachment %s not marked uploaded; skipping", aid)
             return
-        if att.content_type != "application/pdf":
+        base_key = await conversion.pdf_base_key(db, att)
+        if base_key is None:
+            if conversion.is_convertible(att):
+                # The convert worker hasn't produced the PDF yet; it
+                # publishes a fresh extract job when it has.
+                log.info("attachment %s not converted yet; skipping", aid)
+                return
             att.extraction_status = ExtractionStatus.skipped.value
             att.extracted_at = datetime.now(UTC)
             await db.commit()
@@ -76,8 +82,8 @@ async def extract_attachment(attachment_id: str | uuid.UUID) -> None:
 
         # Extract from the most recent OCR'd derivation when one
         # exists — that's the searchable text the SPA actually shows
-        # by default. Falls back to the original PDF for fresh
-        # uploads (no OCR yet) and for non-OCR'd attachments.
+        # by default. Falls back to the original PDF (or, for a
+        # converted upload, its rendering) when there's no OCR yet.
         latest_ocr = (
             await db.execute(
                 select(AttachmentDerivation.storage_key)
@@ -89,7 +95,7 @@ async def extract_attachment(attachment_id: str | uuid.UUID) -> None:
                 .limit(1)
             )
         ).scalar_one_or_none()
-        source_key = latest_ocr or att.storage_key
+        source_key = latest_ocr or base_key
         body = await _fetch_body(source_key)
 
         # Backfill the content hash while the bytes are in hand — the
@@ -98,12 +104,13 @@ async def extract_attachment(attachment_id: str | uuid.UUID) -> None:
         #
         # Only when it's absent, and only from the *original* blob: the
         # hash is defined as the bytes as uploaded, and `source_key` is
-        # the OCR'd derivation whenever one exists. Hashing that would
-        # quietly redefine the column the first time OCR ran.
+        # the OCR'd derivation (or a converted upload's rendering)
+        # whenever one exists. Hashing that would quietly redefine the
+        # column the first time OCR ran.
         if att.sha256 is None:
             original = (
                 body
-                if latest_ocr is None
+                if source_key == att.storage_key
                 else await _fetch_body(att.storage_key)
             )
             att.sha256 = hashlib.sha256(original).hexdigest()

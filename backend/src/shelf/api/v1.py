@@ -857,7 +857,7 @@ async def upload(
         created_by=auth.user.id,
     )
     db.add(att)
-    await extraction.mark_and_enqueue(att)
+    await extraction.mark_and_enqueue(db, att)
     if created_item is not None:
         _audit_item_create(db, auth, created_item)
     _audit_upload(db, auth, item, att)
@@ -1029,7 +1029,7 @@ async def uploads_complete(
 
     if att.uploaded_at is None:
         att.uploaded_at = _utcnow()
-        await extraction.mark_and_enqueue(att)
+        await extraction.mark_and_enqueue(db, att)
         _audit_upload(db, auth, item, att)
         await db.commit()
         await db.refresh(att)

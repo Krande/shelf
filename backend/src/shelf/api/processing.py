@@ -29,7 +29,7 @@ from ..auth.roles import require_admin
 from ..auth.spaces import SPACE_ROLE_EDITOR, readable_space_ids, require_space_role
 from ..db import get_session
 from ..models import Attachment, AttachmentProcessing, Item, Space, User
-from ..services import queue, storage
+from ..services import conversion, queue, storage
 from ..services.audit import AuditAction, record
 
 router = APIRouter(tags=["processing"])
@@ -377,10 +377,11 @@ async def _resolve_pdf(
     await require_space_role(
         db, space, user.id, SPACE_ROLE_EDITOR, label="Attachment not found"
     )
-    if att.content_type != PDF_CONTENT_TYPE:
+    if await conversion.pdf_base_key(db, att) is None:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            "Only PDF attachments support post-extraction processing",
+            "Only PDFs (uploaded or converted) support post-extraction "
+            "processing",
         )
     return att
 

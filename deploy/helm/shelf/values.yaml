@@ -79,7 +79,8 @@ affinity: {}
 worker:
   enabled: true
   replicas: 1
-  # Resources are set for the combined extract + ocr consumer. OCR
+  # Resources are set for the combined extract + ocr + outline + convert
+  # consumers (office conversion itself runs in the gotenberg pod below). OCR
   # via Tesseract is the heavier of the two (one 1-2 GB working set
   # per page in flight); the limits here cover a reasonable book-
   # length scan without thrashing. Bump if you ingest huge scans.
@@ -90,6 +91,29 @@ worker:
     limits:
       cpu: 2000m
       memory: 3Gi
+
+# -- Gotenberg (LibreOffice behind an HTTP API) for the worker's `convert`
+# consumer, which renders Word, PowerPoint and spreadsheet uploads to PDF.
+# Images are converted in the worker itself and don't need it. Enabled, the
+# chart runs it beside the worker and points SHELF_GOTENBERG_URL at it;
+# disable to bring your own (set SHELF_GOTENBERG_URL in the Secret or
+# extraEnv) or to go without office conversion — those uploads then show
+# "conversion failed" and stay downloadable.
+gotenberg:
+  enabled: true
+  image:
+    repository: gotenberg/gotenberg
+    tag: "8"
+    pullPolicy: IfNotPresent
+  # LibreOffice holds a few hundred MB idle and spikes on large decks and
+  # spreadsheets; one conversion at a time is what the worker sends.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1536Mi
 
 # -- External NATS endpoint. Empty disables job publishing on the API
 # side and prevents the worker from starting (it exits with a clear

@@ -24,7 +24,7 @@ import {
   type Item,
   type SearchScope,
 } from "@/api/items";
-import { listAttachments } from "@/api/attachments";
+import { listAttachments, opensInReader } from "@/api/attachments";
 import { fetchMySpaces } from "@/api/spaces";
 import SearchScopePopover from "@/components/library/SearchScopePopover";
 import SearchSpacePopover from "@/components/library/SearchSpacePopover";
@@ -262,7 +262,7 @@ export default function HomePage() {
   async function openInReader(item: Item) {
     try {
       const atts = await listAttachments(item.id);
-      const pdf = atts.find((a) => a.content_type === "application/pdf");
+      const pdf = atts.find(opensInReader);
       if (pdf) {
         nav(`/reader/${encodeURIComponent(pdf.id)}`);
         return;

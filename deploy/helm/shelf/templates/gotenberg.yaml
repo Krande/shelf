@@ -1,0 +1,86 @@
+{{- if .Values.gotenberg.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "shelf.fullname" . }}-gotenberg
+  labels:
+    {{- include "shelf.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gotenberg
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "shelf.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: gotenberg
+  template:
+    metadata:
+      labels:
+        {{- include "shelf.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: gotenberg
+    spec:
+      securityContext:
+        # The image's own unprivileged user.
+        runAsNonRoot: true
+        runAsUser: 1001
+      containers:
+        - name: gotenberg
+          image: "{{ .Values.gotenberg.image.repository }}:{{ .Values.gotenberg.image.tag }}"
+          imagePullPolicy: {{ .Values.gotenberg.image.pullPolicy }}
+          args:
+            - gotenberg
+            # Only the LibreOffice route is used; Chromium is the larger
+            # half of the image's memory and attack surface.
+            - --chromium-disable-routes=true
+            - --api-timeout=300s
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 20
+          resources:
+            {{- toYaml .Values.gotenberg.resources | nindent 12 }}
+          securityContext:
+            # Not read-only: LibreOffice writes its profile and scratch
+            # files under the user's home.
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "shelf.fullname" . }}-gotenberg
+  labels:
+    {{- include "shelf.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gotenberg
+spec:
+  type: ClusterIP
+  ports:
+    - port: 3000
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "shelf.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: gotenberg
+{{- end -}}

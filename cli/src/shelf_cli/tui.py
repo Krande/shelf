@@ -663,7 +663,14 @@ class ShelfBrowser(App[None]):
             except (ApiError, httpx.HTTPError) as e:
                 self._status(str(e), error=True)
                 return
-            pdfs = [a for a in attachments if a.get("content_type") == "application/pdf"]
+            # A PDF upload, or one the server has rendered to PDF; the
+            # content type is the fallback for servers without pdf_status.
+            pdfs = [
+                a
+                for a in attachments
+                if a.get("pdf_status") in ("native", "converted")
+                or ("pdf_status" not in a and a.get("content_type") == "application/pdf")
+            ]
             if not pdfs:
                 self._status("this document has no PDF")
                 return

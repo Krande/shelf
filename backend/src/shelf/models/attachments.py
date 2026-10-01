@@ -162,6 +162,18 @@ class AttachmentProcessing(Timestamps, Base):
         DateTime(timezone=True), nullable=True
     )
     outline_json: Mapped[Any] = mapped_column(JSONB, nullable=True)
+    # Non-PDF → PDF rendering (``shelf.worker.convert``). Only ever
+    # leaves ``untouched`` for uploads ``services.conversion`` knows how
+    # to render; ``convert_error`` keeps the reason a run failed, since
+    # that is usually the file's fault and the uploader needs to see it.
+    convert_status: Mapped[str] = mapped_column(
+        String, nullable=False, default="untouched", server_default="untouched"
+    )
+    convert_engine: Mapped[str | None] = mapped_column(String, nullable=True)
+    convert_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    convert_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Set the moment we copy the live blob to ``<storage_key>.original``
     # — either eagerly on upload completion or lazily before the first
     # OCR rewrite. A non-null value is the SPA's "show Restore" gate.
@@ -177,7 +189,12 @@ class AttachmentProcessing(Timestamps, Base):
 
 
 class AttachmentDerivation(Base):
-    """One derived PDF (OCR'd, outlined, …) for an attachment.
+    """One derived PDF (converted, OCR'd, outlined, …) for an attachment.
+
+    ``kind='convert'`` is the PDF rendering of a non-PDF upload (Word,
+    PowerPoint, an image, …). For those attachments it plays the part
+    the original plays for a PDF upload: the input OCR and outline work
+    from, and what the reader shows when nothing better exists.
 
     Rows accumulate as workers run, so we keep a full history per
     ``(attachment_id, kind)`` rather than overwriting a single

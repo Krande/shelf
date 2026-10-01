@@ -332,8 +332,8 @@ rewritten; keys are stored per row, so both layouts coexist.
 Jobs go to NATS JetStream and are consumed by `python -m shelf.worker`, running from the same image as the API. Job state also lives on the database row, so a worker being down delays work rather than losing it.
 
 `pixi run up` starts NATS and a worker alongside the API and the SPA, so a local
-stack processes uploads end-to-end: upload a PDF, and its text is extracted and
-searchable a few seconds later. Which consumers run depends on what the machine
+stack processes uploads end-to-end: upload a PDF (or a Word file, a deck, a
+scan), and its text is extracted and searchable a few seconds later. Which consumers run depends on what the machine
 has —
 
 | Consumer | Does | Needs |
@@ -341,10 +341,26 @@ has —
 | `extract` | body text + per-page text, quality assessment | pypdf (always available) |
 | `outline` | heading detection, generated table of contents | PyMuPDF (always available) |
 | `ocr` | Tesseract pass over scanned PDFs | `tesseract` + `gs` on PATH |
+| `convert` | renders non-PDF uploads to PDF, then hands them to `extract` | Gotenberg (`SHELF_GOTENBERG_URL`) for office files; images need nothing |
+
+`convert` takes Word (`.docx`, `.doc`, `.odt`, `.rtf`), PowerPoint (`.pptx`,
+`.ppt`, `.ppsx`, `.pps`, `.odp`), spreadsheets (`.xlsx`, `.xls`, `.ods`) and
+images (`.png`, `.jpg`, `.tiff`, `.bmp`, `.gif`), decided by extension —
+`shelf.services.conversion` is the list. Office files go to Gotenberg's
+LibreOffice route (the compose stack runs one, as does the Helm chart unless
+`gotenberg.enabled=false`); images are wrapped by PyMuPDF in the worker, come out
+without text, and so go on to OCR. The upload itself is never changed: the PDF
+is stored as a `convert` derivation beside it, which the reader opens, search
+indexes, and OCR and outline start from, while **Download** still returns the
+`.docx`. A file that won't convert keeps the reason on
+`attachment_processing.convert_error`, shown on the attachment; rescanning it
+from the admin extraction page tries again. `pixi run backfill-extract` also
+queues every convertible upload that has never been converted — run it once
+after the first deploy with this worker, since earlier uploads were skipped.
 
 `ocr` is skipped with a note when those binaries are missing, which is the
 normal case on Windows and macOS — pixi only installs them on linux-64. Override
-with `pixi run up --consumers extract,ocr,outline`, or run without a worker at
+with `pixi run up --consumers extract,ocr,outline,convert`, or run without a worker at
 all via `pixi run up --no-worker`.
 
 Anything uploaded while no queue was running has a row but no message, so

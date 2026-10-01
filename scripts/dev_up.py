@@ -218,7 +218,8 @@ def _available_consumers() -> tuple[list[str], str | None]:
     """Which worker consumers this machine can actually run.
 
     `extract` (pypdf) and `outline` (PyMuPDF) are pure-Python and always
-    available. `ocr` shells out to Tesseract and Ghostscript, which
+    available, and so is `convert` — it renders office files through the
+    Gotenberg container this script starts, and images with PyMuPDF. `ocr` shells out to Tesseract and Ghostscript, which
     pixi.toml only installs on linux-64 — the Python package is there on
     every platform, so the import succeeds and the failure would only
     show up mid-job, on the first scanned PDF someone tries.
@@ -226,7 +227,7 @@ def _available_consumers() -> tuple[list[str], str | None]:
     Returns the consumer list plus a note to print when OCR was left out,
     so "OCR did nothing" is answered before it's asked.
     """
-    consumers = ["extract", "outline"]
+    consumers = ["extract", "outline", "convert"]
     missing = [
         binary for binary in ("tesseract", "gs") if shutil.which(binary) is None
     ]
@@ -773,7 +774,7 @@ def main() -> int:
     parser.add_argument(
         "--consumers",
         help=(
-            "comma-separated worker consumers (extract, ocr, outline). "
+            "comma-separated worker consumers (extract, ocr, outline, convert). "
             "Default: everything this machine has the binaries for."
         ),
     )

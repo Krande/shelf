@@ -10,7 +10,63 @@ export interface Attachment {
   /** Id of the user who uploaded the file, and their current display name. */
   created_by?: string | null;
   created_by_name?: string | null;
+  /**
+   * Whether the reader can open it: `native` for a PDF upload, `converted`
+   * once the worker has rendered a Word/PowerPoint/spreadsheet/image upload
+   * to PDF, `converting` / `failed` before that. Null for files shelf
+   * doesn't render — those can only be downloaded.
+   */
+  pdf_status?: "native" | "converted" | "converting" | "failed" | null;
+  /** Why the last conversion failed, while `pdf_status` is `failed`. */
+  convert_error?: string | null;
 }
+
+/**
+ * Whether the reader can open this attachment — a PDF upload, or one the
+ * worker has rendered to PDF. Falls back to the content type for a server
+ * that predates `pdf_status`.
+ */
+export function opensInReader(att: Attachment): boolean {
+  if (att.pdf_status !== undefined) {
+    return att.pdf_status === "native" || att.pdf_status === "converted";
+  }
+  return (
+    att.content_type === "application/pdf" ||
+    att.filename.toLowerCase().endsWith(".pdf")
+  );
+}
+
+/**
+ * What the upload pickers accept: PDFs, plus everything the worker
+ * renders to PDF. Mirrors `shelf.services.conversion`.
+ */
+export const UPLOAD_ACCEPT = [
+  "application/pdf",
+  ".pdf",
+  ".docx",
+  ".doc",
+  ".odt",
+  ".rtf",
+  ".pptx",
+  ".ppt",
+  ".ppsx",
+  ".pps",
+  ".odp",
+  ".xlsx",
+  ".xls",
+  ".ods",
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".tif",
+  ".tiff",
+  ".bmp",
+  ".gif",
+].join(",");
+
+/** Matches the extension of a file `UPLOAD_ACCEPT` lets through. */
+export const UPLOAD_EXTENSION =
+  /\.(pdf|docx?|odt|rtf|pptx?|ppsx?|odp|xlsx?|ods|png|jpe?g|tiff?|bmp|gif)$/i;
 
 interface RegisterResponse {
   attachment: Attachment;
@@ -67,7 +123,8 @@ export function cleanupOrphanAttachments(
  * Fetch a presigned URL for the PDF.
  *
  * `version` selects which derived (or original) blob to download:
- *   - undefined → server's "current best" (latest outline > latest OCR > original)
+ *   - undefined → server's "current best" (latest outline > latest OCR >
+ *     latest conversion > original)
  *   - "original" → the untouched upload
  *   - a derivation UUID → that specific run, for compare-versions UX
  */
