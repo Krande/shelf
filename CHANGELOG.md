@@ -2,6 +2,13 @@
 
 
 
+## v0.16.2 (2026-10-01)
+
+### Fix
+
+* fix(export): stream PDF ZIP downloads instead of building them in memory (#26) ([`050eeb3`](https://github.com/Krande/shelf/commit/050eeb3c31673aac6bd74dfca33b89ccae4e31b4))
+
+
 ## v0.16.1 (2026-10-01)
 
 ### Fix
