@@ -161,6 +161,9 @@ export function DocumentInfoPanel({
         <ItemForm
           open={editing}
           title="Edit Item"
+          // Modeless: the PDF behind it is usually where the values
+          // being typed in come from.
+          modal={false}
           slug={slug}
           initial={{
             item_type: item.data.item_type as ItemType,
