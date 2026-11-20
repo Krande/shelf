@@ -25,7 +25,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import ColumnElement, Select, case, func, or_, select
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,11 +44,9 @@ from ..models import (
     AttachmentProcessing,
     Item,
     Space,
-    StandardFamily,
-    StandardRevision,
     User,
 )
-from ..services import conversion, extraction, storage
+from ..services import conversion, extraction, resolve, storage
 from ..services.audit import AuditAction, record, record_read
 from ..services.storage import attachment_storage_key
 from .items import user_names
@@ -389,44 +387,24 @@ async def current_versions(
     }
 
 
-class AttachmentMatch(BaseModel):
-    attachment_id: uuid.UUID
-    filename: str
-    item_id: uuid.UUID
-    space_id: uuid.UUID
-
-
-class AttachmentResolveResponse(BaseModel):
-    """Possibly empty: a file the caller can't see is not an error."""
-
-    attachments: list[AttachmentMatch]
-
-
-def _is_pdf_attachment() -> ColumnElement[bool]:
-    """SQL twin of `conversion.is_pdf`, loosened to "declared a PDF, or
-    named like one" — it only orders results, never decides access."""
-    return or_(
-        func.lower(Attachment.content_type).startswith("application/pdf"),
-        func.lower(Attachment.filename).endswith(".pdf"),
-    )
-
-
 # Registered before `/api/attachments/{attachment_id}`, which would
 # otherwise claim the path and reject "resolve" as a malformed UUID.
 @router.get(
     "/api/attachments/resolve",
-    response_model=AttachmentResolveResponse,
+    response_model=resolve.AttachmentResolveResponse,
     summary="Find the caller's attachments by file hash or standard edition",
 )
 async def resolve_attachments(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_session)],
-    sha256: Annotated[str | None, Query(pattern=r"^[0-9a-fA-F]{64}$")] = None,
-    body: Annotated[str | None, Query(max_length=120)] = None,
-    designation: Annotated[str | None, Query(max_length=200)] = None,
-    label: Annotated[str | None, Query(max_length=120)] = None,
-    space: Annotated[str | None, Query()] = None,
-) -> dict[str, object]:
+    sha256: Annotated[str | None, Query(pattern=resolve.SHA256_PATTERN)] = None,
+    body: Annotated[str | None, Query(max_length=resolve.BODY_MAX_LENGTH)] = None,
+    designation: Annotated[
+        str | None, Query(max_length=resolve.DESIGNATION_MAX_LENGTH)
+    ] = None,
+    label: Annotated[str | None, Query(max_length=resolve.LABEL_MAX_LENGTH)] = None,
+    space: resolve.SpaceSlugQuery = None,
+) -> resolve.AttachmentResolveResponse:
     """The session twin of `/api/v1/attachments/resolve`, for the SPA.
 
     It is what makes `/open?sha256=…` work as a link. Item and
@@ -456,68 +434,19 @@ async def resolve_attachments(
             "Give sha256, or all of body, designation and label",
         )
 
-    reachable: Select[tuple[uuid.UUID]] | list[uuid.UUID] = readable_item_space_ids(
-        user.id
-    )
-    if space is not None:
-        target = (
-            await db.execute(
-                select(Space.id).where(Space.slug == space, Space.id.in_(reachable))
-            )
-        ).scalar_one_or_none()
-        if target is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Space not found")
-        reachable = [target]
-
-    stmt = (
-        select(Attachment.id, Attachment.filename, Item.id, Item.space_id)
-        .join(Item, Item.id == Attachment.item_id)
-        .where(
-            Item.deleted_at.is_(None),
-            Item.space_id.in_(reachable),
-            Attachment.uploaded_at.is_not(None),
-        )
+    reachable = await resolve.narrow_to_space(
+        db, readable_item_space_ids(user.id), space
     )
     if sha256 is not None:
-        stmt = stmt.where(Attachment.sha256 == sha256.lower()).order_by(
-            Attachment.created_at, Attachment.id
+        found = await resolve.attachments_by_sha256(
+            db, reachable, sha256, completed_only=True
         )
     else:
         assert body is not None and designation is not None and label is not None
-        stmt = (
-            stmt.join(StandardRevision, StandardRevision.item_id == Item.id)
-            .join(StandardFamily, StandardFamily.id == StandardRevision.family_id)
-            .where(
-                # Body and designation are CITEXT, so this is the same
-                # case-insensitive match filing a revision uses; the
-                # label is matched as written.
-                StandardFamily.body == body.strip(),
-                StandardFamily.designation == designation.strip(),
-                StandardRevision.label == label.strip(),
-            )
-            # Oldest edition item first; within one, a PDF before the
-            # other files it carries (a cover letter, a source .docx),
-            # since a PDF is what the reader opens without converting.
-            .order_by(
-                Item.created_at,
-                case((_is_pdf_attachment(), 0), else_=1),
-                Attachment.created_at,
-                Attachment.id,
-            )
+        found = await resolve.attachments_by_edition(
+            db, reachable, body, designation, label, completed_only=True
         )
-
-    rows = (await db.execute(stmt)).all()
-    return {
-        "attachments": [
-            {
-                "attachment_id": att_id,
-                "filename": filename,
-                "item_id": item_id,
-                "space_id": space_id,
-            }
-            for att_id, filename, item_id, space_id in rows
-        ]
-    }
+    return resolve.AttachmentResolveResponse(attachments=found)
 
 
 @router.get("/api/attachments/{attachment_id}", response_model=AttachmentResponse)

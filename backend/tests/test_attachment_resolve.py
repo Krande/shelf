@@ -15,7 +15,7 @@ from httpx import AsyncClient
 from obstore.store import MemoryStore
 
 from shelf.config import settings
-from shelf.services import storage
+from shelf.services import resolve, storage
 
 from .helpers import login
 
@@ -166,7 +166,38 @@ async def test_an_upload_that_never_completed_does_not_resolve(
         },
     )
     assert r.status_code == 201, r.text
-    assert await _resolve(client, sha256=hashlib.sha256(pending).hexdigest()) == []
+    digest = hashlib.sha256(pending).hexdigest()
+    assert await _resolve(client, sha256=digest) == []
+
+    # The importer's v1 lookup shares the query but still counts it: a
+    # declared hash is how it knows not to push the same file twice.
+    r = await client.get(
+        "/api/v1/attachments/resolve",
+        headers=_auth(library["token"]),
+        params={"sha256": digest},
+    )
+    assert r.status_code == 200, r.text
+    assert len(r.json()["attachments"]) == 1
+
+
+async def test_matches_are_capped(
+    client: AsyncClient, library: Library, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every caller takes the first match or refuses to guess, so a hash
+    shared by many copies can't grow the response without bound."""
+    monkeypatch.setattr(resolve, "RESOLVE_LIMIT", 2)
+    for slug in ("one", "two"):
+        r = await client.post("/api/spaces", json={"name": slug, "slug": slug})
+        assert r.status_code == 201, r.text
+        r = await client.post(
+            f"/api/items/{library['shared']['item']['id']}/copy",
+            json={"target_slug": slug},
+        )
+        assert r.status_code == 201, r.text
+
+    found = await _resolve(client, sha256=SHARED_SHA)
+    assert len(found) == 2
+    assert found[0]["attachment_id"] == library["shared"]["attachment"]["id"]
 
 
 async def test_narrowing_to_a_space(client: AsyncClient, library: Library) -> None:
@@ -331,8 +362,16 @@ async def test_a_removed_member_no_longer_resolves(client: AsyncClient, library:
         {"body": "NX Standards", "designation": "NX-ACME 1234"},
         {"body": "NX Standards", "designation": "NX-ACME 1234", "label": " "},
         {"sha256": PRIVATE_SHA, **EDITION},
+        {"sha256": PRIVATE_SHA, "space": "s" * 65},
     ],
-    ids=["no-key", "bad-digest", "partial-edition", "blank-label", "both-keys"],
+    ids=[
+        "no-key",
+        "bad-digest",
+        "partial-edition",
+        "blank-label",
+        "both-keys",
+        "long-space-slug",
+    ],
 )
 async def test_a_request_without_exactly_one_key_is_422(
     client: AsyncClient, library: Library, params: dict[str, str]
