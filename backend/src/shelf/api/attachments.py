@@ -30,7 +30,12 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth.deps import get_current_user
-from ..auth.spaces import SPACE_ROLE_EDITOR, SPACE_ROLE_VIEWER, require_space_role
+from ..auth.spaces import (
+    SPACE_ROLE_EDITOR,
+    SPACE_ROLE_VIEWER,
+    readable_item_space_ids,
+    require_space_role,
+)
 from ..db import get_session
 from ..models import (
     Attachment,
@@ -41,7 +46,7 @@ from ..models import (
     Space,
     User,
 )
-from ..services import conversion, extraction, storage
+from ..services import conversion, extraction, resolve, storage
 from ..services.audit import AuditAction, record, record_read
 from ..services.storage import attachment_storage_key
 from .items import user_names
@@ -380,6 +385,68 @@ async def current_versions(
         else (a.storage_key, "original")
         for a in attachments
     }
+
+
+# Registered before `/api/attachments/{attachment_id}`, which would
+# otherwise claim the path and reject "resolve" as a malformed UUID.
+@router.get(
+    "/api/attachments/resolve",
+    response_model=resolve.AttachmentResolveResponse,
+    summary="Find the caller's attachments by file hash or standard edition",
+)
+async def resolve_attachments(
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+    sha256: Annotated[str | None, Query(pattern=resolve.SHA256_PATTERN)] = None,
+    body: Annotated[str | None, Query(max_length=resolve.BODY_MAX_LENGTH)] = None,
+    designation: Annotated[
+        str | None, Query(max_length=resolve.DESIGNATION_MAX_LENGTH)
+    ] = None,
+    label: Annotated[str | None, Query(max_length=resolve.LABEL_MAX_LENGTH)] = None,
+    space: resolve.SpaceSlugQuery = None,
+) -> resolve.AttachmentResolveResponse:
+    """The session twin of `/api/v1/attachments/resolve`, for the SPA.
+
+    It is what makes `/open?sha256=…` work as a link. Item and
+    attachment ids differ per instance, so something that holds a PDF
+    but knows nothing about this library can still point a reader at
+    it: the bytes hash the same everywhere. A standard edition — `body`
+    + `designation` + `label` — is the other portable key, for when the
+    library's copy is a different download of the same document
+    (publishers watermark per copy, which changes the hash).
+
+    One key per request: `sha256`, or all three edition fields. Scoped
+    to the spaces whose items the caller can read — the same set the
+    item routes allow — so this answers "can *I* open this file", never
+    "does anyone have it". An upload that never completed is left out:
+    there is nothing to read yet.
+    """
+    edition = (body, designation, label)
+    has_edition = any(v is not None for v in edition)
+    if sha256 is not None and has_edition:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "Give sha256 or body + designation + label, not both",
+        )
+    if sha256 is None and not all(v and v.strip() for v in edition):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "Give sha256, or all of body, designation and label",
+        )
+
+    reachable = await resolve.narrow_to_space(
+        db, readable_item_space_ids(user.id), space
+    )
+    if sha256 is not None:
+        found = await resolve.attachments_by_sha256(
+            db, reachable, sha256, completed_only=True
+        )
+    else:
+        assert body is not None and designation is not None and label is not None
+        found = await resolve.attachments_by_edition(
+            db, reachable, body, designation, label, completed_only=True
+        )
+    return resolve.AttachmentResolveResponse(attachments=found)
 
 
 @router.get("/api/attachments/{attachment_id}", response_model=AttachmentResponse)

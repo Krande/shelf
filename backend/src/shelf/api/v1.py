@@ -49,10 +49,8 @@ from ..models import (
     Item,
     ItemCollection,
     Space,
-    StandardFamily,
-    StandardRevision,
 )
-from ..services import extraction, storage
+from ..services import extraction, resolve, storage
 from ..services.audit import AuditAction, item_label, record, record_read
 from ..services.storage import attachment_storage_key
 from .attachments import resolve_version
@@ -1054,17 +1052,6 @@ class TokenSpace(BaseModel):
     writable: bool
 
 
-class AttachmentMatch(BaseModel):
-    attachment_id: uuid.UUID
-    filename: str
-    item_id: uuid.UUID
-    space_id: uuid.UUID
-
-
-class AttachmentResolveResponse(BaseModel):
-    attachments: list[AttachmentMatch]
-
-
 class StandardMatch(BaseModel):
     item_id: uuid.UUID
     space_id: uuid.UUID
@@ -1397,15 +1384,15 @@ async def item_revisions_v1(
 
 @router.get(
     "/attachments/resolve",
-    response_model=AttachmentResolveResponse,
+    response_model=resolve.AttachmentResolveResponse,
     summary="Find items carrying a file with this SHA-256",
 )
 async def resolve_attachment(
     auth: Annotated[TokenAuth, Depends(require_scope("search"))],
     db: Annotated[AsyncSession, Depends(get_session)],
-    sha256: Annotated[str, Query(pattern=r"^[0-9a-fA-F]{64}$")],
-    space: Annotated[str | None, Query()] = None,
-) -> dict[str, object]:
+    sha256: Annotated[str, Query(pattern=resolve.SHA256_PATTERN)],
+    space: resolve.SpaceSlugQuery = None,
+) -> resolve.AttachmentResolveResponse:
     """Content identity, for when a document has no business identity.
 
     A standard can be named by (body, designation, edition) and found
@@ -1416,50 +1403,17 @@ async def resolve_attachment(
     duplicate.
 
     Scoped to what the token can read, so this answers "do *I* already
-    have this file", never "does anyone".
+    have this file", never "does anyone". A presigned upload counts as
+    soon as it declares its hash, before the bytes arrive: that is what
+    stops an importer pushing the same file twice.
     """
-    reachable = await _token_space_ids(db, auth, writable=False)
-    if space is not None:
-        target = (
-            await db.execute(
-                select(Space.id).where(
-                    Space.slug == space, Space.id.in_(reachable)
-                )
-            )
-        ).scalar_one_or_none()
-        if target is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Space not found")
-        reachable = [target]
-
-    rows = (
-        await db.execute(
-            select(
-                Attachment.id,
-                Attachment.filename,
-                Item.id,
-                Item.space_id,
-            )
-            .join(Item, Item.id == Attachment.item_id)
-            .where(
-                Attachment.sha256 == sha256.lower(),
-                Item.deleted_at.is_(None),
-                Item.space_id.in_(reachable),
-            )
-            .order_by(Attachment.created_at)
-        )
-    ).all()
-
-    return {
-        "attachments": [
-            {
-                "attachment_id": att_id,
-                "filename": filename,
-                "item_id": item_id,
-                "space_id": space_id,
-            }
-            for att_id, filename, item_id, space_id in rows
-        ]
-    }
+    reachable = await resolve.narrow_to_space(
+        db, await _token_space_ids(db, auth, writable=False), space
+    )
+    found = await resolve.attachments_by_sha256(
+        db, reachable, sha256, completed_only=False
+    )
+    return resolve.AttachmentResolveResponse(attachments=found)
 
 
 @router.get(
@@ -1470,10 +1424,16 @@ async def resolve_attachment(
 async def resolve_standard(
     auth: Annotated[TokenAuth, Depends(require_scope("search"))],
     db: Annotated[AsyncSession, Depends(get_session)],
-    body: Annotated[str, Query(min_length=1, max_length=120)],
-    designation: Annotated[str, Query(min_length=1, max_length=200)],
-    label: Annotated[str, Query(min_length=1, max_length=120)],
-    space: Annotated[str | None, Query()] = None,
+    body: Annotated[
+        str, Query(min_length=1, max_length=resolve.BODY_MAX_LENGTH)
+    ],
+    designation: Annotated[
+        str, Query(min_length=1, max_length=resolve.DESIGNATION_MAX_LENGTH)
+    ],
+    label: Annotated[
+        str, Query(min_length=1, max_length=resolve.LABEL_MAX_LENGTH)
+    ],
+    space: resolve.SpaceSlugQuery = None,
 ) -> dict[str, object]:
     """Look an edition up by its own identity rather than by id.
 
@@ -1488,38 +1448,10 @@ async def resolve_standard(
     when a revision is filed. Returns an empty `items` list rather than
     404 so a caller can tell "no such edition here" from "no such route".
     """
-    reachable = await _token_space_ids(db, auth, writable=False)
-    if space is not None:
-        target = (
-            await db.execute(
-                select(Space.id).where(
-                    Space.slug == space, Space.id.in_(reachable)
-                )
-            )
-        ).scalar_one_or_none()
-        if target is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Space not found")
-        reachable = [target]
-
-    rows = (
-        await db.execute(
-            select(Item.id, Item.space_id, StandardRevision.label)
-            .join(StandardRevision, StandardRevision.item_id == Item.id)
-            .join(
-                StandardFamily,
-                StandardFamily.id == StandardRevision.family_id,
-            )
-            .where(
-                StandardFamily.body == body.strip(),
-                StandardFamily.designation == designation.strip(),
-                StandardRevision.label == label.strip(),
-                Item.deleted_at.is_(None),
-                Item.space_id.in_(reachable),
-            )
-            .order_by(Item.created_at)
-        )
-    ).all()
-
+    reachable = await resolve.narrow_to_space(
+        db, await _token_space_ids(db, auth, writable=False), space
+    )
+    rows = await resolve.edition_items(db, reachable, body, designation, label)
     return {
         "items": [
             {"item_id": item_id, "space_id": space_id, "label": row_label}
