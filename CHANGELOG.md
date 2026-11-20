@@ -2,6 +2,16 @@
 
 
 
+## v0.19.0 (2026-11-20)
+
+### Feature
+
+* feat: open by file hash, SHELF_FRAME_ANCESTORS, shared resolve lookup (#31)
+
+Co-authored-by: oleandor &lt;oleandor@gmail.com&gt;
+Co-authored-by: Claude Opus 5.5 (1M context) &lt;noreply@anthropic.com&gt; ([`7d75fbe`](https://github.com/Krande/shelf/commit/7d75fbea609da393f9f0e73eda9c2f99496d1372))
+
+
 ## v0.18.0 (2026-10-01)
 
 ### Feature
